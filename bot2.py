@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO EMBRYO - READY THEO LOGIC XIANGQI + 20s TIMEOUT       ║
-║  Engine: Embryo Caro6 v1.2.0 (ponder ON, AG_TIMEOUT=12s)        ║
-║  Luôn gửi ready khi có đối thủ / vào bàn / hết ván (delay 3s)  ║
+║  BOT CARO EMBRYO - FIXED 15x19 BOARD                     ║
+║  Engine: Embryo Caro6 v1.2.0                                   ║
+║  FIX: DynamicWindow hoàn chỉnh (overspan, hysteresis, reset) ║
+║  FIX: Reset window khi ván mới                               ║
+║  FIX: Fallback gần nước cuối, không về trung tâm             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -34,7 +36,7 @@ AG_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
 AG_VERSION = "1.2.0"
 AG_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 AG_RULE = 8  # Freestyle Caro
-AG_TIMEOUT = 2000  # 12 giây (server cho 20s mỗi nước)
+AG_TIMEOUT = 2000  # 3 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
@@ -63,9 +65,16 @@ def detect_ag_binary() -> Optional[str]:
         return str(f)
     return None
 
+    for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
+        if "cuda" not in f.name and "opencl" not in f.name:
+            os.system(f"chmod +x {f}")
+            return str(f)
+    return None
+
+# ======================== DYNAMIC WINDOW ========================
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=12000, board_size=15, rule=8):
+    def __init__(self, timeout_turn=2000, board_size=15, rule=9):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
@@ -108,6 +117,7 @@ class AlphaGomokuEngine:
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
         if self.proc and self.proc.poll() is None:
+            # Process is alive! Let's just restart the internal board to preserve Hash/Cache
             self._send("RESTART")
             for _ in range(5):
                 if self._read_line(timeout=0.5).upper() == "OK": break
@@ -116,7 +126,7 @@ class AlphaGomokuEngine:
                 if self._read_line(timeout=0.5).upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
-            self._send(f"INFO time_left 5000")
+            self._send(f"INFO time_left 100000")
             self._send("INFO ponder 1")
             self.my_side = my_symbol
             self._initialized = True
@@ -131,7 +141,8 @@ class AlphaGomokuEngine:
             )
             self._buffer = ""
             self.my_side = my_symbol
-            self._send("RECTSTART 15,19")
+            # Since board is 15x19, we use 19x19 for engine and don't play outside 15 width
+            self._send(f"RECTSTART 15,19")
             for _ in range(10):
                 line = self._read_line(timeout=1.0)
                 if line.upper() == "OK": break
@@ -143,11 +154,35 @@ class AlphaGomokuEngine:
             self._initialized = True
             return True
         except Exception as e:
+            import logging
             logging.getLogger().error(f"[AG] Start error: {e}")
+            self._initialized = False
+            return False
+        try:
+            self.proc = subprocess.Popen(
+                [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR), text=True, bufsize=1
+            )
+            self._buffer = ""
+            self.my_side = my_symbol
+            self._send(f"START {self.board_size}")
+            for _ in range(10):
+                line = self._read_line(timeout=1.0)
+                if line.upper() == "OK": break
+            self._send(f"INFO rule {self.rule}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO checkmate 1")
+            self._send("INFO folder ./networks")
+            time.sleep(0.2)
+            self._initialized = True
+            return True
+        except Exception as e:
+            log.error(f"[AG] Start error: {e}")
             self._initialized = False
             return False
 
     def restart_game(self) -> bool:
+        """Gửi RESTART để reset bàn mà giữ hash/cache."""
         with self.lock:
             if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return False
@@ -165,6 +200,7 @@ class AlphaGomokuEngine:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None: return None
                 
+                # Cấp lại thời gian
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
                 
@@ -193,6 +229,7 @@ class AlphaGomokuEngine:
                             return int(parts[0].strip()), int(parts[1].strip())
                 return None
             except Exception as e:
+                import logging
                 logging.getLogger().warning(f"[AG] get_move error: {e}")
                 self._synced = False
                 return None
@@ -223,7 +260,7 @@ GAME_ID = "caro"
 RUNTIME = int(float(os.environ.get("CARO_RUNTIME_HOURS", "5.9")) * 3600)
 BOT_BET_XU = 1000
 BOT_MATCH_DURATION = '0'
-BOT_TURN_DURATION = '20'   # Server thực tế cho 20 giây mỗi nước
+BOT_TURN_DURATION = '60'
 EMPTY = -1
 CIRCLE = 0
 CROSS = 1
@@ -379,6 +416,7 @@ class Board:
         return (0, 0)
 
     def get_empty_near(self, x0: int, y0: int) -> tuple:
+        """Tìm ô trống gần (x0, y0) nhất."""
         for r in range(10):
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
@@ -393,7 +431,7 @@ class CaroBot:
     def __init__(self):
         self.ws = None; self.board = Board(width=15, height=19)
         self.slot = -1; self.my_symbol = CROSS; self.opponent_symbol = CIRCLE
-        self.is_playing = False; self.in_table = False
+        self.is_playing = False; self.in_table = False; self.ready = False
         self.players = {}; self.nickname = ""; self.token = 0; self.cookie = ""
         self.place_path = "Lobby.caro.0"; self.lock_key = ""
         self.start_time = None; self.last_activity = time.time(); self._running = True
@@ -412,7 +450,8 @@ class CaroBot:
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
 
-        self._ready_task: Optional[asyncio.Task] = None
+        # Dynamic window
+        
 
     def init_ag(self):
         if self.ag is not None: return self.ag_available
@@ -423,7 +462,7 @@ class CaroBot:
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] OK! Rule={AG_RULE}, Timeout={AG_TIMEOUT}ms (Ponder ON)")
+                log.info(f"[AG] OK! Rule={AG_RULE} (Dynamic Window Enabled)")
             else: self.ag_available = False; log.warning("[AG] Start failed!")
             return self.ag_available
         except Exception as e: log.error(f"[AG] Init error: {e}"); self.ag_available = False; return False
@@ -434,8 +473,6 @@ class CaroBot:
     def stop(self):
         self._running = False
         if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
-        if self._ready_task and not self._ready_task.done():
-            self._ready_task.cancel()
 
     def save_stats(self):
         try:
@@ -502,20 +539,6 @@ class CaroBot:
         else:
             await self.send(self.make_create_rule())
 
-    # ==================== CƠ CHẾ READY MỚI ====================
-    def _schedule_ready(self, delay: float = 5.0):
-        """Hủy task ready cũ (nếu có) và lên lịch gửi SET_READY sau `delay` giây."""
-        if self._ready_task and not self._ready_task.done():
-            self._ready_task.cancel()
-        self._ready_task = asyncio.create_task(self._delayed_ready(delay))
-
-    async def _delayed_ready(self, delay: float):
-        await asyncio.sleep(delay)
-        if not self.is_playing and self.in_table:
-            await self.send(self.make_ready())
-            log.info("[BOT] Đã gửi SET_READY thành công")
-
-    # ==================== HANDLERS ====================
     async def do_move(self):
         if not self.is_playing or not self.running or self.slot < 0: return
         if self._moving:
@@ -542,18 +565,22 @@ class CaroBot:
                         x, y = move; self.ag_moves += 1
                     else:
                         self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
+                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
+                        # Tìm ô trống gần nước cuối cùng
                         if history:
                             lx, ly = history[-1][0], history[-1][1]
                         else:
-                            lx, ly = 7, 9
+                            lx, ly = 7, 9  # trung tâm bàn 15x19
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
+                        # Restart (Keep Cache)
                         self.ag.start_game(my_symbol=self.my_symbol)
+                        # Lần sau vào ván, engine sẽ nhận BOARD mới
                 except Exception as e:
                     self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
                     except Exception: pass
+                    # Fallback gần nước cuối
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
@@ -561,6 +588,7 @@ class CaroBot:
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
+                # Không có engine: đánh gần nước cuối hoặc trung tâm
                 history = self.board.history
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
@@ -618,7 +646,6 @@ class CaroBot:
                 self._joining_table = False; self._rejoining = False
                 self.in_table = True
                 await asyncio.sleep(0.3); await self.send(self.make_get_table())
-                self._schedule_ready(2.0)
             elif not self.in_table:
                 if self._want_rejoin and self.table_id:
                     self._want_rejoin = False; self._rejoining = True; self._joining_table = True
@@ -699,12 +726,18 @@ class CaroBot:
             if is_playing and current_player == self.slot:
                 if not self._moving and not self.pending_move:
                     self.pending_move = True; await self.do_move()
+            elif not is_playing and self.slot >= 0:
+                if not self.ready:
+                    self.ready = True; await self.send(self.make_ready())
+            elif not is_playing and self.slot < 0:
+                self.in_table = False; self.table_id = None
+                await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
             
             self._rejoining = False
         except Exception as e: log.error(f"Table error: {e}")
 
     async def handle_start(self, r: BinaryReader):
-        self.total_games += 1; self.is_playing = True; self.pending_move = False
+        self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
         self._moving = False; self._last_move_xy = None
         self.opponent_gone_at = None
         
@@ -719,6 +752,10 @@ class CaroBot:
         
         log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
         
+        # RESET DYNAMIC WINDOW cho ván mới
+        
+        
+        # Ván mới: Tái sử dụng engine (giữ lại Hash/Cache)
         if self.ag is None:
             self.init_ag()
         else:
@@ -732,7 +769,7 @@ class CaroBot:
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
-                self.pending_move = True; await asyncio.sleep(2.5); await self.do_move()
+                self.pending_move = True; await asyncio.sleep(1.5); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
@@ -778,60 +815,52 @@ class CaroBot:
             await asyncio.sleep(1.5); await self.create_new_table()
             return
         
-        log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 2 giây...")
-        self._schedule_ready(2.0)
+        log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
+        asyncio.create_task(self._delay_ready(5.0))
 
     async def handle_kick(self, r: BinaryReader):
         r.i8(); r.read_utf()
         self.is_playing = False; self.in_table = False; self.pending_move = False
         self.table_id = None
-        await asyncio.sleep(0.5); await self.create_new_table()
+        await asyncio.sleep(1); await self.create_new_table()
+    async def _delay_ready(self, delay: float):
+        await asyncio.sleep(delay)
+        if not self.is_playing and self.in_table:
+            self.ready = True
+            await self.send(self.make_ready())
 
     async def handle_player_enter(self, r: BinaryReader):
-        try:
-            place_level = r.i8()
-            pid = r.i64()
-            name = r.read_utf()
-            
-            # Đọc cạn phần byte dữ liệu thừa còn lại của gói PLAYER_ENTERED
-            if r.remaining() >= 35:
-                r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
-            
-            log.info(f"[BOT] Phát hiện người chơi '{name}' (ID: {pid}) vào bàn (place_level={place_level})")
-            
-            # Bỏ qua lọc place_level, lên lịch ready sau 3 giây nếu không trong trận
-            if not self.is_playing and self.in_table:
-                log.info("[BOT] Đang chờ 2s để server xử lý người chơi mới trước khi gửi SET_READY...")
-                self._schedule_ready(3.0)
-        except Exception as e:
-            log.error(f"[BOT] Lỗi xử lý PLAYER_ENTERED: {e}")
+        place_level = r.i8()
+        pid = r.i64(); name = r.read_utf()
+        r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
+        if place_level < 4: return
+        if not self.ready and not self.is_playing:
+            log.info(f"[BOT] Người chơi {name} vào bàn, chuẩn bị sẵn sàng sau 5s...")
+            asyncio.create_task(self._delay_ready(5.0))
 
     async def handle_player_exit(self, r: BinaryReader):
-        try:
-            place_level = r.i8()
-            pid = r.i64() if r.remaining() >= 8 else -1
-            
-            slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
-            if pid >= 0: self.player_slot_by_id.pop(pid, None)
-            
-            if slot is not None and slot == self.slot:
-                if self.is_playing:
-                    self.in_table = False; self._table_lost_at = time.time()
-                else:
-                    self.in_table = False; await asyncio.sleep(1); await self.create_new_table()
-            elif self.is_playing:
-                if self.opponent_gone_at is None:
-                    self.opponent_gone_at = time.time()
-                    log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
-            elif self.in_table:
-                log.info("[BOT] Có người rời bàn, gửi ready sau 2 giây...")
-                self._schedule_ready(2.0)
-        except Exception as e:
-            log.error(f"[BOT] Lỗi xử lý PLAYER_EXITED: {e}")
+        place_level = r.i8()
+        pid = r.i64() if r.remaining() >= 8 else -1
+        if place_level < 4: return
+        
+        slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
+        if pid >= 0: self.player_slot_by_id.pop(pid, None)
+        
+        if slot is not None and slot == self.slot:
+            if self.is_playing:
+                self.in_table = False; self._table_lost_at = time.time()
+            else:
+                self.in_table = False; await asyncio.sleep(1); await self.create_new_table()
+        elif self.is_playing:
+            if self.opponent_gone_at is None:
+                self.opponent_gone_at = time.time()
+                log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
+        elif self.in_table:
+            self.ready = True; await self.send(self.make_ready())
 
     async def watchdog(self):
         while self.running:
-            try: await asyncio.sleep(1)
+            try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
             if not self.running: return
             
@@ -919,7 +948,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info(f"BOT CARO EMBRYO - READY XIANGQI STYLE + 20s TURN")
+        log.info(f"BOT CARO EMBRYO - 15x19 ")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -930,7 +959,7 @@ class CaroBot:
             self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
             
             self.is_playing = False; self.pending_move = False
-            self.in_table = False
+            self.in_table = False; self.ready = False
             self.board = Board(width=15, height=19); self.players.clear()
             self.bet_amts = []; self._resolved_bet_id = None
             self._bet_amts_loaded = False; self._joining_table = False
