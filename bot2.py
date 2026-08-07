@@ -34,7 +34,7 @@ AG_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
 AG_VERSION = "1.2.0"
 AG_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 AG_RULE = 8  # Freestyle Caro
-AG_TIMEOUT = 1000  # 12 giây (server cho 20s mỗi nước)
+AG_TIMEOUT = 2000  # 12 giây (server cho 20s mỗi nước)
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
@@ -785,7 +785,7 @@ class CaroBot:
         r.i8(); r.read_utf()
         self.is_playing = False; self.in_table = False; self.pending_move = False
         self.table_id = None
-        await asyncio.sleep(1); await self.create_new_table()
+        await asyncio.sleep(0.5); await self.create_new_table()
 
     async def handle_player_enter(self, r: BinaryReader):
         try:
@@ -802,7 +802,7 @@ class CaroBot:
             # Bỏ qua lọc place_level, lên lịch ready sau 3 giây nếu không trong trận
             if not self.is_playing and self.in_table:
                 log.info("[BOT] Đang chờ 2s để server xử lý người chơi mới trước khi gửi SET_READY...")
-                self._schedule_ready(2.0)
+                self._schedule_ready(3.0)
         except Exception as e:
             log.error(f"[BOT] Lỗi xử lý PLAYER_ENTERED: {e}")
 
@@ -831,7 +831,7 @@ class CaroBot:
 
     async def watchdog(self):
         while self.running:
-            try: await asyncio.sleep(10)
+            try: await asyncio.sleep(1)
             except asyncio.CancelledError: return
             if not self.running: return
             
