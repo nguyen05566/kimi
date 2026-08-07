@@ -3,15 +3,21 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO EMBRYO - FIXED 15x19 BOARD                     ║
 ║  Engine: Embryo Caro6 v1.2.0                                   ║
-║  FIX: DynamicWindow hoàn chỉnh (overspan, hysteresis, reset) ║
-║  FIX: Reset window khi ván mới                               ║
-║  FIX: Fallback gần nước cuối, không về trung tâm             ║
+║  Tối ưu hóa: Tránh nghẽn Event Loop, sửa lỗi đệm Engine        ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
 import re, logging, asyncio, random, threading, shutil, selectors
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
+
+# ======================== LOGGING ========================
+log = logging.getLogger("caro")
+log.setLevel(logging.INFO)
+if not log.handlers:
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+    log.addHandler(h)
 
 # ======================== SETUP & IMPORTS ========================
 REQUIRED = ["websockets", "requests"]
@@ -41,7 +47,9 @@ AG_TIMEOUT = 2000  # 3 giây
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
-        os.system(f"chmod +x {binary_path}")
+        try:
+            binary_path.chmod(0o755)
+        except Exception: pass
         return str(binary_path)
     print(f"[AG] Downloading Embryo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,7 +60,9 @@ def auto_download_alphagomoku() -> Optional[str]:
         with bz2.BZ2File(archive, "rb") as f_in, open(binary_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
         archive.unlink(missing_ok=True)
-        os.system(f"chmod +x {binary_path}")
+        try:
+            binary_path.chmod(0o755)
+        except Exception: pass
         return str(binary_path)
     except Exception as e:
         print(f"[AG] Download failed: {e}")
@@ -60,18 +70,21 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
+    # Tìm kiếm engine pbrain-embryo trước
     for f in ENGINE_DIR.glob("pbrain-embryo*"):
-        os.system(f"chmod +x {f}")
+        try:
+            f.chmod(0o755)
+        except Exception: pass
         return str(f)
-    return None
-
+    # Nếu không thấy, tìm kiếm pbrain-AlphaGomoku dự phòng
     for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
         if "cuda" not in f.name and "opencl" not in f.name:
-            os.system(f"chmod +x {f}")
+            try:
+                f.chmod(0o755)
+            except Exception: pass
             return str(f)
     return None
 
-# ======================== DYNAMIC WINDOW ========================
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
     def __init__(self, timeout_turn=2000, board_size=15, rule=9):
@@ -81,14 +94,14 @@ class AlphaGomokuEngine:
         self.rule = rule
         self.proc = None
         self.lock = threading.Lock()
-        self._buffer = ""
+        self._buffer = b""  # Sử dụng bộ đệm Byte để tránh lỗi unicode cắt nửa chừng
         self.my_side = 1
         self._initialized = False
 
     def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.stdin.write(cmd + "\n")
+                self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
             except Exception: pass
 
@@ -96,11 +109,11 @@ class AlphaGomokuEngine:
         if not self.proc or self.proc.poll() is not None: return ""
         deadline = time.monotonic() + timeout
         while True:
-            idx = self._buffer.find("\n")
+            idx = self._buffer.find(b"\n")
             if idx >= 0:
-                line = self._buffer[:idx].strip()
+                line_bytes = self._buffer[:idx].strip()
                 self._buffer = self._buffer[idx + 1:]
-                return line
+                return line_bytes.decode("utf-8", errors="replace")
             remaining = deadline - time.monotonic()
             if remaining <= 0: return ""
             try:
@@ -111,13 +124,13 @@ class AlphaGomokuEngine:
                 if ready:
                     chunk = os.read(self.proc.stdout.fileno(), 4096)
                     if not chunk: return ""
-                    self._buffer += chunk.decode("utf-8", errors="replace")
+                    self._buffer += chunk
             except Exception: return ""
 
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
         if self.proc and self.proc.poll() is None:
-            # Process is alive! Let's just restart the internal board to preserve Hash/Cache
+            # Tiến trình đang chạy ổn định, tái sử dụng bàn cờ để giữ bộ nhớ đệm (Cache/Hash)
             self._send("RESTART")
             for _ in range(5):
                 if self._read_line(timeout=0.5).upper() == "OK": break
@@ -135,13 +148,13 @@ class AlphaGomokuEngine:
         self.stop()
         if not self.binary: return False
         try:
+            # Khởi động ở chế độ Binary để xử lý luồng dữ liệu an toàn và chính xác hơn
             self.proc = subprocess.Popen(
                 [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR), text=True, bufsize=1
+                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
             )
-            self._buffer = ""
+            self._buffer = b""
             self.my_side = my_symbol
-            # Since board is 15x19, we use 19x19 for engine and don't play outside 15 width
             self._send(f"RECTSTART 15,19")
             for _ in range(10):
                 line = self._read_line(timeout=1.0)
@@ -154,35 +167,11 @@ class AlphaGomokuEngine:
             self._initialized = True
             return True
         except Exception as e:
-            import logging
-            logging.getLogger().error(f"[AG] Start error: {e}")
-            self._initialized = False
-            return False
-        try:
-            self.proc = subprocess.Popen(
-                [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR), text=True, bufsize=1
-            )
-            self._buffer = ""
-            self.my_side = my_symbol
-            self._send(f"START {self.board_size}")
-            for _ in range(10):
-                line = self._read_line(timeout=1.0)
-                if line.upper() == "OK": break
-            self._send(f"INFO rule {self.rule}")
-            self._send(f"INFO timeout_turn {self.timeout_turn}")
-            self._send("INFO checkmate 1")
-            self._send("INFO folder ./networks")
-            time.sleep(0.2)
-            self._initialized = True
-            return True
-        except Exception as e:
             log.error(f"[AG] Start error: {e}")
             self._initialized = False
             return False
 
     def restart_game(self) -> bool:
-        """Gửi RESTART để reset bàn mà giữ hash/cache."""
         with self.lock:
             if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return False
@@ -200,7 +189,6 @@ class AlphaGomokuEngine:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None: return None
                 
-                # Cấp lại thời gian
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
                 
@@ -229,8 +217,7 @@ class AlphaGomokuEngine:
                             return int(parts[0].strip()), int(parts[1].strip())
                 return None
             except Exception as e:
-                import logging
-                logging.getLogger().warning(f"[AG] get_move error: {e}")
+                log.warning(f"[AG] get_move error: {e}")
                 self._synced = False
                 return None
                 
@@ -277,14 +264,6 @@ CMD_MAP = {
     434: "SET_READY", 501: "BET", 502: "PLAY", 505: "CHAT", 518: "HIGHLIGHT",
     529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 535: "RETREAT",
 }
-
-# ======================== LOGGING ========================
-log = logging.getLogger("caro")
-log.setLevel(logging.INFO)
-if not log.handlers:
-    h = logging.StreamHandler(sys.stdout)
-    h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
-    log.addHandler(h)
 
 # ======================== BINARY PROTOCOL ========================
 class BinaryReader:
@@ -416,7 +395,6 @@ class Board:
         return (0, 0)
 
     def get_empty_near(self, x0: int, y0: int) -> tuple:
-        """Tìm ô trống gần (x0, y0) nhất."""
         for r in range(10):
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
@@ -450,9 +428,6 @@ class CaroBot:
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
 
-        # Dynamic window
-        
-
     def init_ag(self):
         if self.ag is not None: return self.ag_available
         binary = detect_ag_binary()
@@ -462,7 +437,7 @@ class CaroBot:
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] OK! Rule={AG_RULE} (Dynamic Window Enabled)")
+                log.info(f"[AG] OK! Rule={AG_RULE}")
             else: self.ag_available = False; log.warning("[AG] Start failed!")
             return self.ag_available
         except Exception as e: log.error(f"[AG] Init error: {e}"); self.ag_available = False; return False
@@ -566,21 +541,17 @@ class CaroBot:
                     else:
                         self.ag_errors += 1
                         log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        # Tìm ô trống gần nước cuối cùng
                         if history:
                             lx, ly = history[-1][0], history[-1][1]
                         else:
-                            lx, ly = 7, 9  # trung tâm bàn 15x19
+                            lx, ly = 7, 9
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
-                        # Restart (Keep Cache)
                         self.ag.start_game(my_symbol=self.my_symbol)
-                        # Lần sau vào ván, engine sẽ nhận BOARD mới
                 except Exception as e:
                     self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
                     except Exception: pass
-                    # Fallback gần nước cuối
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
@@ -588,7 +559,6 @@ class CaroBot:
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
-                # Không có engine: đánh gần nước cuối hoặc trung tâm
                 history = self.board.history
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
@@ -632,7 +602,9 @@ class CaroBot:
         if status == 0:
             path = r.read_utf()
             if path == "REFRESH":
-                if self.http_login(): await self.send(self.make_login())
+                # Chạy không đồng bộ để tránh nghẽn luồng xử lý chính
+                login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
+                if login_ok: await self.send(self.make_login())
                 return
             if r.remaining() > 0: self.lock_key = r.read_ascii()
             await self.send(self.make_enter(self.place_path))
@@ -742,20 +714,14 @@ class CaroBot:
         self.opponent_gone_at = None
         
         player_count = r.u8()
-        first_turn_slot = -1
         for i in range(player_count):
-            sid = r.i8(); r.i32()
-            if i == 0: first_turn_slot = sid
+            r.i8(); r.i32()
         
         width = r.u8(); height = r.u8(); self.board.resize(width, height)
         r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
         
         log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
         
-        # RESET DYNAMIC WINDOW cho ván mới
-        
-        
-        # Ván mới: Tái sử dụng engine (giữ lại Hash/Cache)
         if self.ag is None:
             self.init_ag()
         else:
@@ -823,6 +789,7 @@ class CaroBot:
         self.is_playing = False; self.in_table = False; self.pending_move = False
         self.table_id = None
         await asyncio.sleep(1); await self.create_new_table()
+
     async def _delay_ready(self, delay: float):
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
@@ -831,7 +798,7 @@ class CaroBot:
 
     async def handle_player_enter(self, r: BinaryReader):
         place_level = r.i8()
-        pid = r.i64(); name = r.read_utf()
+        r.i64(); name = r.read_utf()
         r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
         if place_level < 4: return
         if not self.ready and not self.is_playing:
@@ -969,7 +936,9 @@ class CaroBot:
             
             login_ok = False
             for attempt in range(5):
-                if self.http_login():
+                # Thực thi tác vụ đăng nhập đồng bộ bằng executor của asyncio
+                login_ok_res = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
+                if login_ok_res:
                     login_ok = True; retry_count = 0; break
                 await asyncio.sleep(5)
             
