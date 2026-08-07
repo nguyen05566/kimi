@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO EMBRYO - FIXED 15x19 BOARD                     ║
-║  Engine: Embryo Caro6 v1.2.0                                   ║
-║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
-║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
-║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
-║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
+║ BOT CARO EMBRYO — AUTO IDENTITY RANDOMIZER v2.0                  ║
+║ Tự động đổi tên & avatar ngẫu nhiên mỗi lần khởi động            ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
 import re, logging, asyncio, random, threading, shutil, selectors
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
+import requests
 
 # ======================== LOGGING ========================
 log = logging.getLogger("caro")
@@ -32,7 +29,33 @@ for pkg in REQUIRED:
         subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL)
         importlib.import_module(pkg)
 
-import websockets, requests
+import websockets
+
+# ======================== IDENTITY RANDOMIZER ========================
+ADJECTIVES = ["Pro", "Dark", "Light", "Shadow", "Ghost", "Fire", "Ice", "Thunder",
+              "Silent", "Swift", "Crazy", "Lucky", "Mega", "Super", "Ultra", "Hyper",
+              "Cyber", "Neo", "Tech", "Alpha", "Beta", "Zero", "Max", "King", "Queen"]
+NOUNS = ["Caro", "Gomoku", "Master", "Killer", "Storm", "Wolf", "Dragon", "Tiger",
+         "Phoenix", "Ninja", "Samurai", "Wizard", "Knight", "Sniper", "Viper", "Hawk",
+         "Eagle", "Shark", "Bear", "Fox", "Panther", "Cobra", "Raven", "Bolt", "Blaze"]
+
+# Danh sách avatar ID hợp lệ trong game (đã dump từ server)
+VALID_AVATAR_IDS = (
+    list(range(0, 24)) +      # Category 1: builtin0-builtin23
+    list(range(38, 62)) +     # Category 2: builtin38-builtin61
+    list(range(100, 124)) +   # Category 3: builtin100-builtin123
+    list(range(200, 224)) +   # Category 4: builtin200-builtin223
+    list(range(300, 324)) +   # Category 5: builtin300-builtin323
+    list(range(400, 424))     # Category 6: builtin400-builtin423
+)
+
+def generate_random_name() -> str:
+    """Tạo tên ngẫu nhiên: AdjectiveNounNumber"""
+    return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
+
+def generate_random_avatar_id() -> int:
+    """Chọn avatar ID ngẫu nhiên từ kho game"""
+    return random.choice(VALID_AVATAR_IDS)
 
 # ======================== ALPHA GOMOKU CONFIG ========================
 try:
@@ -44,15 +67,16 @@ ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 AG_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
 AG_VERSION = "1.2.0"
 AG_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
-AG_RULE = 8  # Freestyle Caro
-AG_TIMEOUT = 2000  # 2 giây
+AG_RULE = 8
+AG_TIMEOUT = 2000
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
         try:
             binary_path.chmod(0o755)
-        except Exception: pass
+        except Exception:
+            pass
         return str(binary_path)
     print(f"[AG] Downloading Embryo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,24 +89,28 @@ def auto_download_alphagomoku() -> Optional[str]:
         archive.unlink(missing_ok=True)
         try:
             binary_path.chmod(0o755)
-        except Exception: pass
+        except Exception:
+            pass
         return str(binary_path)
     except Exception as e:
         print(f"[AG] Download failed: {e}")
         return None
 
 def detect_ag_binary() -> Optional[str]:
-    if not ENGINE_DIR.exists(): return None
+    if not ENGINE_DIR.exists():
+        return None
     for f in ENGINE_DIR.glob("pbrain-embryo*"):
         try:
             f.chmod(0o755)
-        except Exception: pass
+        except Exception:
+            pass
         return str(f)
     for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
         if "cuda" not in f.name and "opencl" not in f.name:
             try:
                 f.chmod(0o755)
-            except Exception: pass
+            except Exception:
+                pass
             return str(f)
     return None
 
@@ -95,7 +123,7 @@ class AlphaGomokuEngine:
         self.rule = rule
         self.proc = None
         self.lock = threading.Lock()
-        self._buffer = b""  # Bộ đệm nhị phân (bytes) để tránh lỗi unicode bị cắt đôi
+        self._buffer = b""
         self.my_side = 1
         self._initialized = False
 
@@ -104,10 +132,12 @@ class AlphaGomokuEngine:
             try:
                 self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
-            except Exception: pass
+            except Exception:
+                pass
 
     def _read_line(self, timeout=10.0) -> str:
-        if not self.proc or self.proc.poll() is not None: return ""
+        if not self.proc or self.proc.poll() is not None:
+            return ""
         deadline = time.monotonic() + timeout
         while True:
             idx = self._buffer.find(b"\n")
@@ -116,7 +146,8 @@ class AlphaGomokuEngine:
                 self._buffer = self._buffer[idx + 1:]
                 return line_bytes.decode("utf-8", errors="replace")
             remaining = deadline - time.monotonic()
-            if remaining <= 0: return ""
+            if remaining <= 0:
+                return ""
             try:
                 sel = selectors.DefaultSelector()
                 sel.register(self.proc.stdout, selectors.EVENT_READ)
@@ -124,20 +155,23 @@ class AlphaGomokuEngine:
                 sel.close()
                 if ready:
                     chunk = os.read(self.proc.stdout.fileno(), 4096)
-                    if not chunk: return ""
+                    if not chunk:
+                        return ""
                     self._buffer += chunk
-            except Exception: return ""
+            except Exception:
+                return ""
 
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
         if self.proc and self.proc.poll() is None:
-            # Tái sử dụng tiến trình và reset bàn cờ để giữ bộ đệm (Cache/Hash)
             self._send("RESTART")
             for _ in range(5):
-                if self._read_line(timeout=0.5).upper() == "OK": break
+                if self._read_line(timeout=0.5).upper() == "OK":
+                    break
             self._send("RECTSTART 15,19")
             for _ in range(5):
-                if self._read_line(timeout=0.5).upper() == "OK": break
+                if self._read_line(timeout=0.5).upper() == "OK":
+                    break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left 100000")
@@ -147,9 +181,9 @@ class AlphaGomokuEngine:
             return True
 
         self.stop()
-        if not self.binary: return False
+        if not self.binary:
+            return False
         try:
-            # Khởi tạo tiến trình AI ở chế độ Binary để xử lý đồng bộ chuẩn xác
             self.proc = subprocess.Popen(
                 [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
@@ -159,7 +193,8 @@ class AlphaGomokuEngine:
             self._send(f"RECTSTART 15,19")
             for _ in range(10):
                 line = self._read_line(timeout=1.0)
-                if line.upper() == "OK": break
+                if line.upper() == "OK":
+                    break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left 100000")
@@ -188,13 +223,14 @@ class AlphaGomokuEngine:
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
-                if not self._initialized or not self.proc or self.proc.poll() is not None: return None
-                
+                if not self._initialized or not self.proc or self.proc.poll() is not None:
+                    return None
+
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
-                
+
                 can_use_turn = getattr(self, '_synced', False) and len(board_history) == getattr(self, '_expected_history_len', -1) + 1
-                
+
                 if can_use_turn:
                     last_x, last_y, _ = board_history[-1]
                     self._send(f"TURN {last_x},{last_y}")
@@ -204,10 +240,11 @@ class AlphaGomokuEngine:
                         c = 1 if sym == self.my_side else 2
                         self._send(f"{x},{y},{c}")
                     self._send("DONE")
-                
+
                 for _ in range(300):
                     line = self._read_line(timeout=0.1)
-                    if not line: continue
+                    if not line:
+                        continue
                     if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                         continue
                     if "," in line:
@@ -221,17 +258,21 @@ class AlphaGomokuEngine:
                 log.warning(f"[AG] get_move error: {e}")
                 self._synced = False
                 return None
-                
+
     def stop(self):
         if self.proc:
-            try: self._send("END")
-            except Exception: pass
+            try:
+                self._send("END")
+            except Exception:
+                pass
             try:
                 self.proc.terminate()
                 self.proc.wait(3)
             except Exception:
-                try: self.proc.kill()
-                except Exception: pass
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
             self.proc = None
             self._initialized = False
 
@@ -405,6 +446,95 @@ class Board:
                             return (x, y)
         return self.get_empty_near_center()
 
+# ======================== IDENTITY MANAGER ========================
+class IdentityManager:
+    """Quản lý đổi tên và avatar trước khi vào game"""
+
+    def __init__(self, user: str, passwd: str):
+        self.user = user
+        self.passwd = passwd
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
+
+    def _login_http(self) -> bool:
+        """Đăng nhập qua HTTP để lấy session"""
+        try:
+            self.session.get('https://gamevh.net/login.jsp', timeout=15)
+            resp = self.session.post('https://gamevh.net/login.jsp', timeout=15,
+                data={'redirect': '/', 'USER_NAME': self.user, 'PASSWORD': self.passwd,
+                      'AUTO_LOGIN': 'on', 'LOGIN': 'Dang nhap'},
+                headers={'Referer': 'https://gamevh.net/login.jsp',
+                         'Content-Type': 'application/x-www-form-urlencoded'})
+            return 'login.jsp' not in resp.url
+        except Exception as e:
+            log.error(f"[Identity] Login error: {e}")
+            return False
+
+    def change_name(self, new_name: str) -> bool:
+        """Đổi tên hiển thị qua HTTP form"""
+        try:
+            if not self._login_http():
+                log.error("[Identity] HTTP login failed")
+                return False
+
+            resp = self.session.post('https://gamevh.net/game/profile/change_user_name.jsp', timeout=15,
+                data={
+                    'redirect': '/',
+                    'processMode': '',
+                    'NICK_NAME': new_name,
+                    'OLD_PASSWORD': self.passwd,
+                    'SAVE': 'Cập nhật'
+                },
+                headers={'Referer': 'https://gamevh.net/game/profile/change_user_name.jsp'},
+                allow_redirects=True)
+
+            if resp.status_code == 200:
+                log.info(f"[Identity] Đổi tên thành: {new_name}")
+                return True
+            else:
+                log.error(f"[Identity] Đổi tên failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            log.error(f"[Identity] Change name error: {e}")
+            return False
+
+    def change_avatar(self, avatar_id: int) -> bool:
+        """Đổi avatar qua HTTP. avatar_id là số nguyên (vd: 5, 211, 300)"""
+        try:
+            if not self._login_http():
+                return False
+
+            resp = self.session.post(
+                f'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp?pk={avatar_id}&redirect=/',
+                timeout=15,
+                headers={'Referer': 'https://gamevh.net/game/profile/avatar.jsp'},
+                allow_redirects=True)
+
+            if resp.status_code == 200:
+                log.info(f"[Identity] Đổi avatar thành: builtin{avatar_id}")
+                return True
+            else:
+                log.error(f"[Identity] Đổi avatar failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            log.error(f"[Identity] Change avatar error: {e}")
+            return False
+
+    def randomize(self) -> Tuple[str, int]:
+        """Đổi tên và avatar ngẫu nhiên, trả về (new_name, new_avatar_id)"""
+        new_name = generate_random_name()
+        new_avatar_id = generate_random_avatar_id()
+
+        name_ok = self.change_name(new_name)
+        avatar_ok = self.change_avatar(new_avatar_id)
+
+        if name_ok or avatar_ok:
+            log.info(f"[Identity] New identity: name={new_name}, avatar=builtin{new_avatar_id}")
+        else:
+            log.warning("[Identity] Failed to change identity")
+
+        return new_name, new_avatar_id
+
 # ======================== BOT ========================
 class CaroBot:
     def __init__(self):
@@ -418,16 +548,19 @@ class CaroBot:
         self.pending_move = False
         self.bet_amts = []; self._resolved_bet_id = None
         self._bet_amts_loaded = False; self._joining_table = False
-        
+
         self.ag = None; self.ag_available = False
         self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
         self._moving = False; self._last_move_xy = None
-        
+
         self.table_id = None
         self.player_slot_by_id = {}
         self.opponent_gone_at = None
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
+
+        # Identity manager
+        self.identity = IdentityManager(USER, PASSWD)
 
     def init_ag(self):
         if self.ag is not None: return self.ag_available
@@ -526,26 +659,24 @@ class CaroBot:
         try:
             start = time.time()
             x, y = -1, -1
-            
+
             if self.ag_available:
                 try:
                     history = list(self.board.history)
-                    
+
                     move = await asyncio.get_event_loop().run_in_executor(
-                        None, 
+                        None,
                         lambda: self.ag.get_move(history, self.my_symbol)
                     )
-                    
+
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                        and self.board.get(*move) == EMPTY):
+                            and self.board.get(*move) == EMPTY):
                         x, y = move; self.ag_moves += 1
                     else:
                         self.ag_errors += 1
                         log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
-                        else:
-                            lx, ly = 7, 9
+                        if history: lx, ly = history[-1][0], history[-1][1]
+                        else: lx, ly = 7, 9
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
                         self.ag.start_game(my_symbol=self.my_symbol)
@@ -553,20 +684,16 @@ class CaroBot:
                     self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
                     except Exception: pass
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
+                    if history: lx, ly = history[-1][0], history[-1][1]
+                    else: lx, ly = 7, 9
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
                 history = self.board.history
-                if history:
-                    lx, ly = history[-1][0], history[-1][1]
-                else:
-                    lx, ly = 7, 9
+                if history: lx, ly = history[-1][0], history[-1][1]
+                else: lx, ly = 7, 9
                 x, y = self.board.get_empty_near(lx, ly)
-                
+
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
             log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG]")
@@ -627,6 +754,14 @@ class CaroBot:
                 else:
                     self._bet_amts_loaded = False; self._resolved_bet_id = None
                     await self.send(self.make_list_bet_amt())
+            else:
+                if self._joining_table:
+                    self._joining_table = False
+                    if self._rejoining:
+                        self._rejoining = False; self._rejoin_attempts += 1; self.table_id = None
+                        await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
+                    else:
+                        await asyncio.sleep(1); await self.send(self.make_create_rule())
         else:
             if self._joining_table:
                 self._joining_table = False
@@ -639,7 +774,7 @@ class CaroBot:
     async def handle_list_bet_amt(self, r: BinaryReader):
         status = r.i8()
         if status != 0: return
-        count = r.i8()
+        count = r.u8()
         self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
@@ -663,41 +798,40 @@ class CaroBot:
                 if "not in table" in r.read_utf().lower():
                     self.in_table = False; self.table_id = None
                     await self.create_new_table()
-                return
-            
+                    return
+
             seat_count = r.u8()
             for _ in range(seat_count):
                 r.u8(); r.read_ascii(); r.u8(); child_count = r.u8()
                 for _ in range(child_count): r.u8(); r.read_ascii(); r.read_utf(); r.u8(); r.u8()
-            
+
             r.u8(); self.slot = r.i8(); is_playing = r.u8() == 1
             player_count = r.u8(); self.players = {}
             self.player_slot_by_id = {}
-            
+
             for _ in range(player_count):
                 sid = r.i8(); pid = r.i64(); name = r.read_utf()
                 r.u16(); r.read_ascii(); r.i8(); r.i64(); r.i64(); r.i64(); r.u8(); r.u8()
                 self.players[sid] = {'name': name}
                 self.player_slot_by_id[pid] = sid
-            
+
             current_player = r.i8(); r.i16(); r.i16(); r.u8()
             self.in_table = True
-            
+
             move_count = r.u8()
             for _ in range(move_count): r.i8(); r.i32()
-            
+
             width = r.u8(); height = r.u8(); self.board.resize(width, height)
             r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-            
+
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
-            
-            # --- KIỂM TRA ĐỐI THỦ THỰC SỰ NGỒI GHẾ ---
+
             has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
-            
+
             self.is_playing = is_playing
             log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
-            
+
             if is_playing and current_player == self.slot:
                 if not self._moving and not self.pending_move:
                     self.pending_move = True; await self.do_move()
@@ -708,12 +842,12 @@ class CaroBot:
                         self.ready = True; await self.send(self.make_ready())
                 else:
                     if self.ready:
-                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
-                    self.ready = False
+                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện. Hủy Sẵn sàng.")
+                        self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
                 await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
-            
+
             self._rejoining = False
         except Exception as e: log.error(f"Table error: {e}")
 
@@ -721,21 +855,18 @@ class CaroBot:
         self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
         self._moving = False; self._last_move_xy = None
         self.opponent_gone_at = None
-        
+
         player_count = r.u8()
-        for i in range(player_count):
-            r.i8(); r.i32()
-        
+        for i in range(player_count): r.i8(); r.i32()
+
         width = r.u8(); height = r.u8(); self.board.resize(width, height)
         r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-        
+
         log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
-        
-        if self.ag is None:
-            self.init_ag()
-        else:
-            self.ag.start_game(my_symbol=self.my_symbol)
-        
+
+        if self.ag is None: self.init_ag()
+        else: self.ag.start_game(my_symbol=self.my_symbol)
+
         if self.slot < 0:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
 
@@ -777,19 +908,19 @@ class CaroBot:
         for _ in range(player_count):
             sid = r.i8(); result = r.i8(); r.i64()
             if sid == self.slot: my_result = result
-        
+
         if my_result in (1, 11): self.wins += 1; log.info(">>> WIN! <<<")
         elif my_result in (2, 4, 12): self.losses += 1; log.info(">>> LOSE! <<<")
         else: self.draws += 1; log.info(">>> DRAW! <<<")
-        
+
         r.read_utf()
         self.save_stats()
-        
+
         if self._table_lost_at is not None:
             self._table_lost_at = None
             await asyncio.sleep(1.5); await self.create_new_table()
             return
-        
+
         log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
         asyncio.create_task(self._delay_ready(5.0))
 
@@ -802,7 +933,6 @@ class CaroBot:
     async def _delay_ready(self, delay: float):
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
-            # Sẽ gửi yêu cầu bàn cờ để kiểm tra và cập nhật ready đồng bộ thay vì ép buộc gửi ready
             await self.send(self.make_get_table())
 
     async def handle_player_enter(self, r: BinaryReader):
@@ -810,7 +940,7 @@ class CaroBot:
         pid = r.i64(); name = r.read_utf()
         if r.remaining() >= 36:
             r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
-            
+
         if place_level < 4: return
         log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
         await self.send(self.make_get_table())
@@ -819,10 +949,10 @@ class CaroBot:
         place_level = r.i8()
         pid = r.i64() if r.remaining() >= 8 else -1
         if place_level < 4: return
-        
+
         slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
         if pid >= 0: self.player_slot_by_id.pop(pid, None)
-        
+
         if slot is not None and slot == self.slot:
             if self.is_playing:
                 self.in_table = False; self._table_lost_at = time.time()
@@ -841,25 +971,25 @@ class CaroBot:
             try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
             if not self.running: return
-            
+
             if self.start_time and time.time() - self.start_time > RUNTIME:
                 self.save_stats(); self.stop(); return
-            
+
             if not self.ws or self.ws.close_code is not None: continue
-            
+
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
-                    and time.time() - self.opponent_gone_at > 15):
+                        and time.time() - self.opponent_gone_at > 15):
                     self.opponent_gone_at = None
                     await self.send(self.make_get_table())
-                
+
                 if (self._table_lost_at is not None
-                    and time.time() - self._table_lost_at > 8):
+                        and time.time() - self._table_lost_at > 8):
                     self._table_lost_at = None; self.table_id = None
                     await self.create_new_table()
-                
+
                 if (not self.is_playing and not self.in_table and not self._joining_table
-                    and not self._rejoining and self._bet_amts_loaded):
+                        and not self._rejoining and self._bet_amts_loaded):
                     await self.send(self.make_create_rule())
             except Exception: pass
 
@@ -869,39 +999,44 @@ class CaroBot:
             ua = "Mozilla/5.0"
             session.get('https://gamevh.net/login.jsp', timeout=10, headers={'User-Agent': ua})
             resp = session.post('https://gamevh.net/login.jsp', timeout=10,
-                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
-                      'AUTO_LOGIN': 'on', 'LOGIN': 'Dang nhap'},
-                headers={'User-Agent': ua, 'Referer': 'https://gamevh.net/login.jsp',
-                         'Content-Type': 'application/x-www-form-urlencoded'})
-            if 'login.jsp' in resp.url: return False
-            
+                                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
+                                      'AUTO_LOGIN': 'on', 'LOGIN': 'Dang nhap'},
+                                headers={'User-Agent': ua, 'Referer': 'https://gamevh.net/login.jsp',
+                                         'Content-Type': 'application/x-www-form-urlencoded'})
+            if 'login.jsp' in resp.url:
+                return False
+
             game_resp = session.get(GAME_URL, timeout=10)
             self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
             html = game_resp.text
-            
+
             tm = re.search(r'var\s+token\s*=\s*(-?\d+)', html)
             if not tm: return False
             self.token = int(tm.group(1))
-            
+
             nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", html)
             if not nm: return False
             self.nickname = nm.group(1)
-            
-            pm = re.search(r'var\s+placePath\s*=\s*\"([^\"]+)\"', html)
+
+            pm = re.search(r'var\s+placePath\s*=\s*"([^"]+)"', html)
             if pm: self.place_path = pm.group(1)
-            
+
             log.info(f"[BOT] Login OK: {self.nickname}")
             return True
-        except Exception as e: log.error(f"[BOT] Login error: {e}"); return False
+        except Exception as e:
+            log.error(f"[BOT] Login error: {e}")
+            return False
 
     async def connect_ws(self) -> bool:
         try:
             self.ws = await websockets.connect(WS_URL,
-                additional_headers={"Cookie": self.cookie, "Origin": "https://gamevh.net",
-                                    "User-Agent": "Mozilla/5.0"},
-                max_size=2**20, ping_interval=None)
+                                               additional_headers={"Cookie": self.cookie, "Origin": "https://gamevh.net",
+                                                                   "User-Agent": "Mozilla/5.0"},
+                                               max_size=2 ** 20, ping_interval=None)
             return True
-        except Exception as e: log.error(f"[BOT] WS connect error: {e}"); return False
+        except Exception as e:
+            log.error(f"[BOT] WS connect error: {e}")
+            return False
 
     async def run_ws(self):
         if not await self.connect_ws(): return
@@ -913,7 +1048,8 @@ class CaroBot:
                 if isinstance(raw, bytes): await self.handle(raw)
         except websockets.exceptions.ConnectionClosed as e:
             log.warning(f"[BOT] WS closed: {e.code}")
-        except Exception as e: log.error(f"[BOT] WS error: {e}")
+        except Exception as e:
+            log.error(f"[BOT] WS error: {e}")
         finally:
             wd_task.cancel()
             try: await wd_task
@@ -925,57 +1061,78 @@ class CaroBot:
 
     async def run(self):
         self.start_time = time.time(); self._running = True
-        log.info(f"{'='*50}")
-        log.info(f"BOT CARO EMBRYO - 15x19 ")
-        log.info(f"{'='*50}")
-        
+        log.info(f"{'=' * 50}")
+        log.info(f"BOT CARO EMBRYO — AUTO IDENTITY v2.0")
+        log.info(f"{'=' * 50}")
+
         retry_count = 0
         while self.running:
             if time.time() - self.start_time > RUNTIME: break
-            
+
+            # ====== ĐỔI TÊN & AVATAR TRƯỚC MỖI PHIÊN ======
+            log.info("[Identity] Randomizing identity...")
+            new_name, new_avatar_id = await asyncio.get_event_loop().run_in_executor(
+                None, self.identity.randomize
+            )
+            log.info(f"[Identity] New name: {new_name}, Avatar: builtin{new_avatar_id}")
+            # ================================================
+
             was_in_table = self.in_table or self.is_playing
             self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
-            
+
             self.is_playing = False; self.pending_move = False
             self.in_table = False; self.ready = False
             self.board = Board(width=15, height=19); self.players.clear()
             self.bet_amts = []; self._resolved_bet_id = None
             self._bet_amts_loaded = False; self._joining_table = False
             self.opponent_gone_at = None; self._table_lost_at = None
-            
+
             if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
-            
+
             login_ok = False
             for attempt in range(5):
                 login_ok_res = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
                 if login_ok_res:
-                    login_ok = True; retry_count = 0; break
+                    login_ok = True; retry_count = 0
+                    break
                 await asyncio.sleep(5)
-            
+
             if not login_ok:
-                retry_count += 1; await asyncio.sleep(min(30 * (2 ** (retry_count - 1)), 120))
+                retry_count += 1
+                await asyncio.sleep(min(30 * (2 ** (retry_count - 1)), 120))
                 continue
-            
+
             await self.run_ws()
-            
+
             if not (self.in_table or self.is_playing):
                 self.table_id = None
-            
+
             self.save_stats()
             if self.ag: self.ag.stop(); self.ag = None
+
 
 def main():
     bin_path = auto_download_alphagomoku()
     if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
     else: print("[SETUP] No AlphaGomoku - bot plays center only")
-    
-    try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
-    except RuntimeError: asyncio.run(_run_bot())
+
+    try:
+        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run_bot())
+    except RuntimeError:
+        asyncio.run(_run_bot())
+
 
 async def _run_bot():
-    try: bot = CaroBot(); await bot.run()
-    except KeyboardInterrupt: log.info("[BOT] Stopped by user")
-    except Exception as e: log.error(f"[BOT] Error: {e}", exc_info=True)
+    try:
+        bot = CaroBot()
+        await bot.run()
+    except KeyboardInterrupt:
+        log.info("[BOT] Stopped by user")
+    except Exception as e:
+        log.error(f"[BOT] Error: {e}", exc_info=True)
+
 
 if __name__ == "__main__": main()
 elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
