@@ -3,7 +3,10 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO EMBRYO - FIXED 15x19 BOARD                     ║
 ║  Engine: Embryo Caro6 v1.2.0                                   ║
-║  Tối ưu hóa: Tránh nghẽn Event Loop, sửa lỗi đệm Engine        ║
+║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
+║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
+║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
+║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -42,7 +45,7 @@ AG_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
 AG_VERSION = "1.2.0"
 AG_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 AG_RULE = 8  # Freestyle Caro
-AG_TIMEOUT = 2000  # 3 giây
+AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
@@ -70,13 +73,11 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Tìm kiếm engine pbrain-embryo trước
     for f in ENGINE_DIR.glob("pbrain-embryo*"):
         try:
             f.chmod(0o755)
         except Exception: pass
         return str(f)
-    # Nếu không thấy, tìm kiếm pbrain-AlphaGomoku dự phòng
     for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
         if "cuda" not in f.name and "opencl" not in f.name:
             try:
@@ -94,7 +95,7 @@ class AlphaGomokuEngine:
         self.rule = rule
         self.proc = None
         self.lock = threading.Lock()
-        self._buffer = b""  # Sử dụng bộ đệm Byte để tránh lỗi unicode cắt nửa chừng
+        self._buffer = b""  # Bộ đệm nhị phân (bytes) để tránh lỗi unicode bị cắt đôi
         self.my_side = 1
         self._initialized = False
 
@@ -130,7 +131,7 @@ class AlphaGomokuEngine:
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
         if self.proc and self.proc.poll() is None:
-            # Tiến trình đang chạy ổn định, tái sử dụng bàn cờ để giữ bộ nhớ đệm (Cache/Hash)
+            # Tái sử dụng tiến trình và reset bàn cờ để giữ bộ đệm (Cache/Hash)
             self._send("RESTART")
             for _ in range(5):
                 if self._read_line(timeout=0.5).upper() == "OK": break
@@ -148,7 +149,7 @@ class AlphaGomokuEngine:
         self.stop()
         if not self.binary: return False
         try:
-            # Khởi động ở chế độ Binary để xử lý luồng dữ liệu an toàn và chính xác hơn
+            # Khởi tạo tiến trình AI ở chế độ Binary để xử lý đồng bộ chuẩn xác
             self.proc = subprocess.Popen(
                 [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
@@ -602,7 +603,6 @@ class CaroBot:
         if status == 0:
             path = r.read_utf()
             if path == "REFRESH":
-                # Chạy không đồng bộ để tránh nghẽn luồng xử lý chính
                 login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
                 if login_ok: await self.send(self.make_login())
                 return
@@ -692,6 +692,9 @@ class CaroBot:
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
             
+            # --- KIỂM TRA ĐỐI THỦ THỰC SỰ NGỒI GHẾ ---
+            has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
+            
             self.is_playing = is_playing
             log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
             
@@ -699,8 +702,14 @@ class CaroBot:
                 if not self._moving and not self.pending_move:
                     self.pending_move = True; await self.do_move()
             elif not is_playing and self.slot >= 0:
-                if not self.ready:
-                    self.ready = True; await self.send(self.make_ready())
+                if has_opponent:
+                    if not self.ready:
+                        log.info("[BOT] Phát hiện đối thủ thực sự đã ngồi vào ghế. Bấm Sẵn sàng!")
+                        self.ready = True; await self.send(self.make_ready())
+                else:
+                    if self.ready:
+                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
+                    self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
                 await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
@@ -793,17 +802,18 @@ class CaroBot:
     async def _delay_ready(self, delay: float):
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
-            self.ready = True
-            await self.send(self.make_ready())
+            # Sẽ gửi yêu cầu bàn cờ để kiểm tra và cập nhật ready đồng bộ thay vì ép buộc gửi ready
+            await self.send(self.make_get_table())
 
     async def handle_player_enter(self, r: BinaryReader):
         place_level = r.i8()
-        r.i64(); name = r.read_utf()
-        r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
+        pid = r.i64(); name = r.read_utf()
+        if r.remaining() >= 36:
+            r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
+            
         if place_level < 4: return
-        if not self.ready and not self.is_playing:
-            log.info(f"[BOT] Người chơi {name} vào bàn, chuẩn bị sẵn sàng sau 5s...")
-            asyncio.create_task(self._delay_ready(5.0))
+        log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
+        await self.send(self.make_get_table())
 
     async def handle_player_exit(self, r: BinaryReader):
         place_level = r.i8()
@@ -823,7 +833,8 @@ class CaroBot:
                 self.opponent_gone_at = time.time()
                 log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
         elif self.in_table:
-            self.ready = True; await self.send(self.make_ready())
+            log.info("[BOT] Phát hiện có người rời bàn. Đang cập nhật lại trạng thái...")
+            await self.send(self.make_get_table())
 
     async def watchdog(self):
         while self.running:
@@ -936,7 +947,6 @@ class CaroBot:
             
             login_ok = False
             for attempt in range(5):
-                # Thực thi tác vụ đăng nhập đồng bộ bằng executor của asyncio
                 login_ok_res = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
                 if login_ok_res:
                     login_ok = True; retry_count = 0; break
