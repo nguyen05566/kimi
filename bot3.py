@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO JAX24 - NATIVE 15x19 + FULL NAME/AVATAR v4.0                     ║
+║  BOT CARO JAX24 - NATIVE 15x19 + TACTICAL GUARD v4.1         ║
 ║  Engine: JAX24 StandardCaro via Wine                                   ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
@@ -572,6 +572,59 @@ class Board:
                             return (x, y)
         return self.get_empty_near_center()
 
+    def _line_length_after(self, x: int, y: int, symbol: int,
+                           dx: int, dy: int) -> int:
+        """Count a contiguous line if symbol were placed at an empty cell."""
+        total = 1
+        for direction in (1, -1):
+            nx, ny = x + dx * direction, y + dy * direction
+            while (0 <= nx < self.width and 0 <= ny < self.height
+                   and self.grid[ny][nx] == symbol):
+                total += 1
+                nx += dx * direction
+                ny += dy * direction
+        return total
+
+    def would_make_five(self, x: int, y: int, symbol: int) -> bool:
+        if self.get(x, y) != EMPTY:
+            return False
+        return any(
+            self._line_length_after(x, y, symbol, dx, dy) >= 5
+            for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1))
+        )
+
+    def immediate_winning_moves(self, symbol: int) -> List[Tuple[int, int]]:
+        result = []
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.would_make_five(x, y, symbol):
+                    result.append((x, y))
+        return result
+
+    def forced_tactical_move(self, my_symbol: int,
+                             opponent_symbol: int) -> Tuple[Optional[str], Optional[Tuple[int, int]]]:
+        """Win immediately or block an opponent's immediate five before JAX."""
+        wins = self.immediate_winning_moves(my_symbol)
+        if wins:
+            return "WIN", self._prefer_tactical_cell(wins)
+        blocks = self.immediate_winning_moves(opponent_symbol)
+        if blocks:
+            return "BLOCK", self._prefer_tactical_cell(blocks)
+        return None, None
+
+    def _prefer_tactical_cell(self, cells: List[Tuple[int, int]]) -> Tuple[int, int]:
+        if self.history:
+            anchor_x, anchor_y = self.history[-1][0], self.history[-1][1]
+        else:
+            anchor_x, anchor_y = self.width // 2, self.height // 2
+        return min(
+            cells,
+            key=lambda cell: (
+                abs(cell[0] - anchor_x) + abs(cell[1] - anchor_y),
+                abs(cell[0] - self.width // 2) + abs(cell[1] - self.height // 2),
+            )
+        )
+
 # ======================== BOT ========================
 class CaroBot:
     def __init__(self):
@@ -701,8 +754,18 @@ class CaroBot:
         try:
             start = time.time()
             x, y = -1, -1
-            
-            if self.ag_available:
+
+            tactical_reason, tactical_move = self.board.forced_tactical_move(
+                self.my_symbol, self.opponent_symbol)
+            if tactical_move is not None:
+                x, y = tactical_move
+                log.warning(
+                    f"[TACTICAL] {tactical_reason} bắt buộc tại ({x},{y}); "
+                    "ưu tiên hơn nước JAX")
+                # JAX did not produce this move, so its internal tree is stale.
+                if self.ag:
+                    self.ag.invalidate_sync()
+            elif self.ag_available:
                 try:
                     history = list(self.board.history)
                     
@@ -943,7 +1006,15 @@ class CaroBot:
 
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
+        if not (0 <= pos < self.board.width * self.board.height):
+            log.warning(
+                f"[BOARD] Server sent invalid pos={pos} for "
+                f"{self.board.width}x{self.board.height}")
+            if self.ag:
+                self.ag.invalidate_sync()
+            return
         x, y = self.board.pos_to_xy(pos)
+        log.info(f"[BOARD] Server MOVE pos={pos} -> ({x},{y}) symbol={symbol}")
         current = self.board.get(x, y)
         if current == symbol:
             if symbol == self.my_symbol and self._last_move_xy is not None:
@@ -1318,7 +1389,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO JAX24 - NATIVE 15x19 + FULL_NAME/AVATAR v4.0")
+        log.info("BOT CARO JAX24 - NATIVE 15x19 + TACTICAL GUARD v4.1")
         log.info(f"{'='*50}")
         
         retry_count = 0
