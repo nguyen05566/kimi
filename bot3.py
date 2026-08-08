@@ -98,6 +98,32 @@ def auto_install_wine() -> Optional[str]:
     return detect_wine_binary()
 
 
+def tune_jax_config() -> bool:
+    """Make JAX less random and less eager to stop in tactical positions."""
+    config_path = JAX_DIR / "config.toml"
+    if not config_path.exists():
+        return False
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        replacements = {
+            r"(?m)^move_temperature\s*=.*$": "move_temperature = 0.05",
+            r"(?m)^fast_search_visits_threshold\s*=.*$": "fast_search_visits_threshold = 1000",
+            r"(?m)^fast_search_best_action_visits_proportion_threshold\s*=.*$":
+                "fast_search_best_action_visits_proportion_threshold = 0.99",
+            r"(?m)^fast_search_win_rate_threshold\s*=.*$":
+                "fast_search_win_rate_threshold = 0.995",
+            r"(?m)^fast_search_draw_rate_threshold\s*=.*$":
+                "fast_search_draw_rate_threshold = 0.98",
+        }
+        for pattern, replacement in replacements.items():
+            text = re.sub(pattern, replacement, text)
+        config_path.write_text(text, encoding="utf-8")
+        return True
+    except Exception as e:
+        print(f"[JAX] Config tuning failed: {e}")
+        return False
+
+
 def auto_download_jax() -> Optional[str]:
     """Download the official Gomocup JAX24 CPU package."""
     binary_path = JAX_DIR / JAX_BINARY
@@ -108,6 +134,7 @@ def auto_download_jax() -> Optional[str]:
         JAX_DIR / "StandardCaro" / "dbt-128-2-111224-hardswish-se-329463400-329463400.onnx",
     ]
     if all(path.exists() for path in required):
+        tune_jax_config()
         return str(binary_path)
 
     print(f"[JAX] Downloading {JAX_VERSION}...")
@@ -121,6 +148,7 @@ def auto_download_jax() -> Optional[str]:
         archive.unlink(missing_ok=True)
         if not binary_path.exists():
             raise FileNotFoundError(f"{JAX_BINARY} not found after extraction")
+        tune_jax_config()
         return str(binary_path)
     except Exception as e:
         print(f"[JAX] Download failed: {e}")
@@ -152,6 +180,7 @@ class JaxGomokuEngine:
         self._buffer = b""
         self.my_side = 1
         self._initialized = False
+        self._synced = False
         self._expected_history_len = -1
 
     def _send(self, cmd: str):
@@ -226,6 +255,20 @@ class JaxGomokuEngine:
         ):
             self._send(cmd)
 
+    @staticmethod
+    def _timeout_for_position(stone_count: int) -> int:
+        """Spend more time when the board becomes tactically complicated."""
+        if stone_count < 12:
+            return 2000
+        if stone_count < 30:
+            return 4000
+        return 7000
+
+    def invalidate_sync(self):
+        """Force the next request to send a complete BOARD snapshot."""
+        self._synced = False
+        self._expected_history_len = -1
+
     def _command(self) -> List[str]:
         if os.name == "nt":
             return [str(Path(self.binary).resolve())]
@@ -264,7 +307,7 @@ class JaxGomokuEngine:
                     return False
                 self._send_info()
                 self._initialized = True
-                self._expected_history_len = -1
+                self.invalidate_sync()
                 log.info(
                     f"[JAX] Started native {self.width}x{self.height}, "
                     f"rule={self.rule} (StandardCaro)")
@@ -284,26 +327,53 @@ class JaxGomokuEngine:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
                 self.my_side = my_side
+                self.timeout_turn = self._timeout_for_position(len(board_history))
                 self._send_info()
-                self._send("BOARD")
-                for x, y, sym in board_history:
-                    color = 1 if sym == self.my_side else 2
-                    self._send(f"{int(x)},{int(y)},{color}")
-                self._send("DONE")
+
+                # Preserve JAX's MCTS tree with TURN whenever exactly one new
+                # opponent move was appended since the previous engine move.
+                use_turn = (
+                    self._synced and board_history and
+                    len(board_history) == self._expected_history_len + 1
+                )
+                if use_turn:
+                    last_x, last_y, last_symbol = board_history[-1]
+                    if last_symbol == self.my_side:
+                        # A table snapshot may have rebuilt history in scan order.
+                        use_turn = False
+                    else:
+                        self._send(f"TURN {int(last_x)},{int(last_y)}")
+                        log.info(
+                            f"[JAX] TURN {int(last_x)},{int(last_y)}; "
+                            f"stones={len(board_history)} timeout={self.timeout_turn}ms")
+
+                if not use_turn:
+                    self._send("BOARD")
+                    for x, y, sym in board_history:
+                        color = 1 if sym == self.my_side else 2
+                        self._send(f"{int(x)},{int(y)},{color}")
+                    self._send("DONE")
+                    log.info(
+                        f"[JAX] BOARD resync; stones={len(board_history)} "
+                        f"timeout={self.timeout_turn}ms")
+
                 move = self._read_move(
-                    timeout=max(3.0, self.timeout_turn / 1000.0 + 3.0))
+                    timeout=max(4.0, self.timeout_turn / 1000.0 + 3.0))
                 if move is None:
                     log.warning("[JAX] Timed out or returned no coordinate")
+                    self.invalidate_sync()
                     return None
                 x, y = move
                 if not (0 <= x < self.width and 0 <= y < self.height):
                     log.warning(f"[JAX] Invalid move outside {self.width}x{self.height}: {move}")
+                    self.invalidate_sync()
                     return None
+                self._synced = True
                 self._expected_history_len = len(board_history) + 1
                 return move
             except Exception as e:
                 log.warning(f"[JAX] get_move error: {e}")
-                self._initialized = False
+                self.invalidate_sync()
                 return None
 
     def stop(self):
@@ -326,6 +396,7 @@ class JaxGomokuEngine:
                         pass
         self.proc = None
         self._initialized = False
+        self.invalidate_sync()
 
 
 # ======================== CONSTANTS & CONFIG ========================
@@ -645,16 +716,32 @@ class CaroBot:
                         x, y = move; self.ag_moves += 1
                     else:
                         self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
+                        log.warning(f"[JAX] Nước không hợp lệ: {move}; BOARD resync và thử lại một lần")
+                        self.ag.invalidate_sync()
+                        retry_move = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: self.ag.get_move(history, self.my_symbol)
+                        )
+                        if (retry_move and 0 <= retry_move[0] < self.board.width
+                                and 0 <= retry_move[1] < self.board.height
+                                and self.board.get(*retry_move) == EMPTY):
+                            x, y = retry_move
+                            self.ag_moves += 1
+                            log.info(f"[JAX] Resync retry OK: {retry_move}")
                         else:
-                            lx, ly = 7, 9
-                        x, y = self.board.get_empty_near(lx, ly)
-                        self.ag_fallback_count += 1
-                        self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
+                            log.warning(f"[JAX] Resync retry failed: {retry_move}; dùng fallback")
+                            if history:
+                                lx, ly = history[-1][0], history[-1][1]
+                            else:
+                                lx, ly = 7, 9
+                            x, y = self.board.get_empty_near(lx, ly)
+                            self.ag_fallback_count += 1
+                            self.ag.start_game(
+                                my_symbol=self.my_symbol,
+                                width=self.board.width,
+                                height=self.board.height)
                 except Exception as e:
-                    self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
+                    self.ag_errors += 1; log.warning(f"[JAX] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
                     except Exception: pass
                     if history:
@@ -673,7 +760,7 @@ class CaroBot:
                 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG]")
+            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [JAX]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
@@ -792,6 +879,10 @@ class CaroBot:
             
             width = r.u8(); height = r.u8(); self.board.resize(width, height)
             r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
+            # GET_TABLE_DATA_EX rebuilds history in scan order, so TURN cannot
+            # safely reuse the previous MCTS tree after this snapshot.
+            if self.ag:
+                self.ag.invalidate_sync()
             
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
@@ -848,7 +939,7 @@ class CaroBot:
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
-                self.pending_move = True; await asyncio.sleep(1.5); await self.do_move()
+                self.pending_move = True; await asyncio.sleep(0.2); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
@@ -858,9 +949,15 @@ class CaroBot:
             if symbol == self.my_symbol and self._last_move_xy is not None:
                 self._last_move_xy = None
         elif current != EMPTY and current != symbol:
-            self.my_symbol = symbol
-            self.opponent_symbol = CROSS if symbol == CIRCLE else CIRCLE
-            self.board.undo(x, y); self.board.put(x, y, symbol)
+            # The server is authoritative. Repair the local cell, but never
+            # change my_symbol here: the side is determined only by self.slot.
+            log.warning(
+                f"[BOARD] Desync at ({x},{y}): local={current}, server={symbol}; "
+                "repairing without swapping sides")
+            self.board.undo(x, y)
+            self.board.put(x, y, symbol)
+            if self.ag:
+                self.ag.invalidate_sync()
         else:
             self.board.put(x, y, symbol)
 
