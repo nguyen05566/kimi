@@ -1,4 +1,4 @@
-name: Caro Bot AlphaGomoku Rule 9
+name: Caro Bot JAX24 Native 15x19
 
 on:
   workflow_dispatch:
@@ -18,11 +18,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: caro-bot-rule9
+  group: caro-bot-jax24
   cancel-in-progress: true
 
 jobs:
-  run-bot-rule9:
+  run-bot-jax24:
     runs-on: ubuntu-latest
     timeout-minutes: 370
 
@@ -35,17 +35,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: python -m pip install --upgrade requests websockets
 
-      - name: Run AlphaGomoku Rule 9 bot
+      - name: Run JAX24 StandardCaro bot
         env:
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours }}
           CARO_AUTO_IDENTITY: "1"
           CARO_IDENTITY_TEST_ONLY: ${{ inputs.identity_test_only && '1' || '0' }}
-        run: python -u bot3.py
+        run: |
+          # bot3.py downloads JAX24 and installs wine64 automatically when absent.
+          python -u bot3.py
 
       - name: Show match statistics
         if: always()

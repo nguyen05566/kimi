@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO ALPHAGOMOKU - FULL NAME + AVATAR v3.0                     ║
-║  Engine: AlphaGomoku release v5.9.3                                   ║
+║  BOT CARO JAX24 - NATIVE 15x19 + FULL NAME/AVATAR v4.0                     ║
+║  Engine: JAX24 StandardCaro via Wine                                   ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
 ║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
@@ -46,81 +46,102 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== ALPHA GOMOKU CONFIG ========================
+# ======================== JAX GOMOKU CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-AlphaGomoku"
-AG_VERSION = "v5.9.3"
-AG_DOWNLOAD_URL = f"https://github.com/MaciejKozarzewski/AlphaGomoku/releases/download/{AG_VERSION}/AlphaGomoku_linux.zip"
-AG_RULE = 9  # Standard/Renju-compatible engine rule test
-AG_TIMEOUT = 2000  # milliseconds per move
+JAX_DIR = _BASE_DIR / "jax-engine"
+JAX_BINARY = "pbrain-Jax.exe"
+JAX_VERSION = "JAX24"
+JAX_DOWNLOAD_URL = "https://github.com/Gomocup/GomocupDownload/raw/master/2024/JAX24.zip"
+JAX_RULE = 8  # StandardCaro
+JAX_TIMEOUT = 2000  # milliseconds per move
+WINE_PREFIX = _BASE_DIR / ".wine-jax"
 
-def auto_download_alphagomoku() -> Optional[str]:
-    """Download and prepare the official AlphaGomoku Linux pbrain release."""
-    binary_path = ENGINE_DIR / AG_BINARY
-    if binary_path.exists():
-        try:
-            binary_path.chmod(0o755)
-        except Exception:
-            pass
+
+def detect_wine_binary() -> Optional[str]:
+    """Find Wine on common Ubuntu/Debian runner paths."""
+    for name in ("wine64", "wine"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in ("/usr/lib/wine/wine64", "/usr/bin/wine64", "/usr/bin/wine"):
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def auto_install_wine() -> Optional[str]:
+    """Install Wine automatically on a Linux GitHub runner when needed."""
+    if os.name == "nt":
+        return None
+    found = detect_wine_binary()
+    if found:
+        return found
+    if not shutil.which("apt-get"):
+        print("[JAX] Wine not found and apt-get is unavailable")
+        return None
+    sudo = ["sudo"] if shutil.which("sudo") else []
+    print("[JAX] Installing wine64 (one-time runner setup)...")
+    try:
+        subprocess.run(
+            sudo + ["apt-get", "update", "-qq"], check=True,
+            stdout=subprocess.DEVNULL)
+        subprocess.run(
+            sudo + ["apt-get", "install", "-y", "--no-install-recommends", "wine64"],
+            check=True, stdout=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"[JAX] Wine installation failed: {e}")
+        return None
+    return detect_wine_binary()
+
+
+def auto_download_jax() -> Optional[str]:
+    """Download the official Gomocup JAX24 CPU package."""
+    binary_path = JAX_DIR / JAX_BINARY
+    required = [
+        binary_path,
+        JAX_DIR / "config.toml",
+        JAX_DIR / "onnxruntime.dll",
+        JAX_DIR / "StandardCaro" / "dbt-128-2-111224-hardswish-se-329463400-329463400.onnx",
+    ]
+    if all(path.exists() for path in required):
         return str(binary_path)
 
-    print(f"[AG] Downloading AlphaGomoku {AG_VERSION}...")
-    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-    archive = Path("/tmp/AlphaGomoku_linux.zip")
+    print(f"[JAX] Downloading {JAX_VERSION}...")
+    JAX_DIR.mkdir(parents=True, exist_ok=True)
+    archive = Path("/tmp/JAX24.zip")
     try:
         import zipfile
-        urllib.request.urlretrieve(AG_DOWNLOAD_URL, archive)
+        urllib.request.urlretrieve(JAX_DOWNLOAD_URL, archive)
         with zipfile.ZipFile(archive, "r") as zf:
-            zf.extractall(ENGINE_DIR)
+            zf.extractall(JAX_DIR)
         archive.unlink(missing_ok=True)
-
-        # Releases may contain files in a nested folder; copy the exact pbrain binary to ENGINE_DIR.
-        candidates = [p for p in ENGINE_DIR.rglob(AG_BINARY) if p.is_file()]
-        if not candidates:
-            candidates = [p for p in ENGINE_DIR.rglob("pbrain-AlphaGomoku*") if p.is_file()]
-        if not candidates:
-            raise FileNotFoundError(f"{AG_BINARY} not found after extracting {archive.name}")
-        src = candidates[0]
-        if src.resolve() != binary_path.resolve():
-            shutil.copy2(src, binary_path)
-        binary_path.chmod(0o755)
+        if not binary_path.exists():
+            raise FileNotFoundError(f"{JAX_BINARY} not found after extraction")
         return str(binary_path)
     except Exception as e:
-        print(f"[AG] Download failed: {e}")
+        print(f"[JAX] Download failed: {e}")
         return None
 
 
-def detect_ag_binary() -> Optional[str]:
-    """Find the prepared AlphaGomoku pbrain binary and ensure it is executable."""
-    candidates = []
-    exact = ENGINE_DIR / AG_BINARY
-    if exact.exists():
-        candidates.append(exact)
-    if ENGINE_DIR.exists():
-        candidates.extend(p for p in ENGINE_DIR.rglob("pbrain-AlphaGomoku*") if p.is_file())
-    for f in candidates:
-        if "cuda" in f.name.lower() or "opencl" in f.name.lower():
-            continue
-        try:
-            f.chmod(0o755)
-        except Exception:
-            pass
-        return str(f)
-    return None
+def auto_setup_jax() -> Optional[str]:
+    binary = auto_download_jax()
+    if not binary:
+        return None
+    if os.name != "nt" and not auto_install_wine():
+        return None
+    return binary
 
-# ======================== ENGINE WRAPPER ========================
-class AlphaGomokuEngine:
-    """Piskvork/brain wrapper that runs AlphaGomoku rule 9 on a focused 15x15 engine window."""
 
-    ENGINE_SIZE = 15
+class JaxGomokuEngine:
+    """JAX24 pbrain wrapper with native 15x19 support via RECSTART."""
 
     def __init__(self, timeout_turn=2000, board_size=15, rule=8, width=None, height=None):
-        self.binary = detect_ag_binary()
+        self.binary = str(JAX_DIR / JAX_BINARY) if (JAX_DIR / JAX_BINARY).exists() else None
+        self.wine = detect_wine_binary()
         self.timeout_turn = int(timeout_turn)
         self.board_size = int(board_size)
         self.width = int(width or board_size)
@@ -132,15 +153,11 @@ class AlphaGomokuEngine:
         self.my_side = 1
         self._initialized = False
         self._expected_history_len = -1
-        self._window_origin = (0, 0)
 
     def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.stdin.write((cmd + "\n").encode("utf-8"))
-                self.proc.stdin.flush()
-            except Exception:
-                pass
+            self.proc.stdin.write((cmd + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
 
     def _read_line(self, timeout=10.0) -> str:
         if not self.proc or self.proc.poll() is not None:
@@ -168,29 +185,38 @@ class AlphaGomokuEngine:
             except Exception:
                 return ""
 
-    def _read_until_coord_or_status(self, timeout: float):
+    def _read_status(self, timeout: float) -> Optional[str]:
         deadline = time.monotonic() + timeout
-        coord_re = re.compile(r"^\s*(-?\d+)\s*,\s*(-?\d+)\s*$")
-        status_lines = []
         while time.monotonic() < deadline:
             line = self._read_line(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
             if not line:
                 continue
             upper = line.upper()
-            status_lines.append(line)
-            if upper.startswith(("MESSAGE", "DEBUG", "INFO")):
+            if upper.startswith("DEBUG") or upper.startswith("MESSAGE"):
+                continue
+            if upper.startswith(("OK", "ERROR", "UNKNOWN")):
+                return line
+        return None
+
+    def _read_move(self, timeout: float) -> Optional[Tuple[int, int]]:
+        deadline = time.monotonic() + timeout
+        coord_re = re.compile(r"^\s*(-?\d+)\s*,\s*(-?\d+)\s*$")
+        while time.monotonic() < deadline:
+            line = self._read_line(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+            if not line:
+                continue
+            upper = line.upper()
+            if upper.startswith(("DEBUG", "MESSAGE", "INFO")):
                 continue
             match = coord_re.match(line)
             if match:
-                return (int(match.group(1)), int(match.group(2))), status_lines
-            if upper.startswith("UNKNOWN") or upper == "OK":
-                continue
-            if upper == "ERROR" or upper.startswith("ERROR"):
-                return None, status_lines
-        return None, status_lines
+                return int(match.group(1)), int(match.group(2))
+            if upper.startswith("ERROR"):
+                log.warning(f"[JAX] Engine error: {line}")
+                return None
+        return None
 
     def _send_info(self):
-        # Rule 8 is accepted by AlphaGomoku v5.9.3 with START 15.
         for cmd in (
             f"INFO rule {self.rule}",
             f"INFO timeout_turn {self.timeout_turn}",
@@ -200,63 +226,13 @@ class AlphaGomokuEngine:
         ):
             self._send(cmd)
 
-    def _start_protocol(self) -> bool:
-        self._send(f"START {self.ENGINE_SIZE}")
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            line = self._read_line(timeout=0.25)
-            if not line:
-                continue
-            upper = line.upper()
-            if upper == "OK":
-                self._send_info()
-                log.info(f"[AG] Started with START {self.ENGINE_SIZE}, rule={self.rule}")
-                return True
-            if upper.startswith(("ERROR", "UNKNOWN")):
-                log.warning(f"[AG] START {self.ENGINE_SIZE} failed: {line}")
-                return False
-        log.warning(f"[AG] START {self.ENGINE_SIZE} timed out")
-        return False
-
-    def _clamp(self, value: int, low: int, high: int) -> int:
-        return max(low, min(high, value))
-
-    def _compute_window_origin(self, board_history: list) -> Tuple[int, int]:
-        max_x0 = max(0, self.width - self.ENGINE_SIZE)
-        max_y0 = max(0, self.height - self.ENGINE_SIZE)
-        if not board_history:
-            return (
-                self._clamp((self.width - self.ENGINE_SIZE) // 2, 0, max_x0),
-                self._clamp((self.height - self.ENGINE_SIZE) // 2, 0, max_y0),
-            )
-        xs = [int(x) for x, _y, _sym in board_history]
-        ys = [int(y) for _x, y, _sym in board_history]
-        last_x, last_y, _ = board_history[-1]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        span_x = max_x - min_x + 1
-        span_y = max_y - min_y + 1
-        x0 = (min_x + max_x - self.ENGINE_SIZE + 1) // 2 if span_x <= self.ENGINE_SIZE else int(last_x) - self.ENGINE_SIZE // 2
-        y0 = (min_y + max_y - self.ENGINE_SIZE + 1) // 2 if span_y <= self.ENGINE_SIZE else int(last_y) - self.ENGINE_SIZE // 2
-        return self._clamp(x0, 0, max_x0), self._clamp(y0, 0, max_y0)
-
-    def _project_history_to_engine(self, board_history: list) -> Tuple[list, Tuple[int, int], int]:
-        origin = self._compute_window_origin(board_history)
-        ox, oy = origin
-        projected = []
-        omitted = 0
-        for x, y, sym in board_history:
-            ex, ey = int(x) - ox, int(y) - oy
-            if 0 <= ex < self.ENGINE_SIZE and 0 <= ey < self.ENGINE_SIZE:
-                projected.append((ex, ey, sym))
-            else:
-                omitted += 1
-        self._window_origin = origin
-        return projected, origin, omitted
-
-    def _engine_to_live(self, move: Tuple[int, int], origin: Tuple[int, int]) -> Tuple[int, int]:
-        ox, oy = origin
-        return int(move[0]) + ox, int(move[1]) + oy
+    def _command(self) -> List[str]:
+        if os.name == "nt":
+            return [str(Path(self.binary).resolve())]
+        wine = self.wine or detect_wine_binary()
+        if not wine:
+            raise FileNotFoundError("wine64/wine was not found")
+        return [wine, str(Path(self.binary).resolve())]
 
     def start_game(self, my_symbol=1, width=None, height=None) -> bool:
         with self.lock:
@@ -266,47 +242,41 @@ class AlphaGomokuEngine:
                 self.height = int(height)
             self.my_side = my_symbol
             self.stop()
-            if not self.binary:
+            if not self.binary or not Path(self.binary).exists():
                 return False
             try:
-                binary_path = Path(self.binary).resolve()
+                env = os.environ.copy()
+                if os.name != "nt":
+                    WINE_PREFIX.mkdir(parents=True, exist_ok=True)
+                    env["WINEPREFIX"] = str(WINE_PREFIX)
+                    env["WINEDEBUG"] = "-all"
                 self.proc = subprocess.Popen(
-                    [str(binary_path)],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    cwd=str(binary_path.parent),
-                )
+                    self._command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, cwd=str(JAX_DIR), env=env)
                 self._buffer = b""
-                self._initialized = self._start_protocol()
+
+                # JAX24 intentionally implements the misspelled RECSTART command.
+                self._send(f"RECSTART {self.width},{self.height}")
+                status = self._read_status(timeout=60.0)
+                if not status or not status.upper().startswith("OK"):
+                    log.warning(f"[JAX] RECSTART failed: {status!r}")
+                    self.stop()
+                    return False
+                self._send_info()
+                self._initialized = True
                 self._expected_history_len = -1
-                return self._initialized
+                log.info(
+                    f"[JAX] Started native {self.width}x{self.height}, "
+                    f"rule={self.rule} (StandardCaro)")
+                return True
             except Exception as e:
-                log.error(f"[AG] Start error: {e}")
-                self._initialized = False
+                log.error(f"[JAX] Start error: {e}")
+                self.stop()
                 return False
 
     def restart_game(self) -> bool:
-        with self.lock:
-            return self.start_game(my_symbol=self.my_side, width=self.width, height=self.height)
-
-    def _request_board_move(self, board_history: list) -> Optional[Tuple[int, int]]:
-        projected_history, origin, omitted = self._project_history_to_engine(board_history)
-        if omitted:
-            log.info(f"[AG] Rule-8 15x15 window origin={origin}; omitted {omitted} outside-window stone(s)")
-        self._send_info()
-        self._send("BOARD")
-        for (x, y, sym) in projected_history:
-            c = 1 if sym == self.my_side else 2
-            self._send(f"{x},{y},{c}")
-        self._send("DONE")
-        engine_move, _lines = self._read_until_coord_or_status(timeout=max(2.0, self.timeout_turn / 1000.0 + 2.0))
-        if engine_move is None:
-            return None
-        if not (0 <= engine_move[0] < self.ENGINE_SIZE and 0 <= engine_move[1] < self.ENGINE_SIZE):
-            log.warning(f"[AG] Engine returned out-of-window move: {engine_move}")
-            return None
-        return self._engine_to_live(engine_move, origin)
+        return self.start_game(
+            my_symbol=self.my_side, width=self.width, height=self.height)
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
@@ -314,15 +284,25 @@ class AlphaGomokuEngine:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
                 self.my_side = my_side
-                move = self._request_board_move(board_history)
-                if move is not None:
-                    self._expected_history_len = len(board_history) + 1
-                    return move
-                log.warning("[AG] Timed out or returned no coordinate")
-                self._initialized = False
-                return None
+                self._send_info()
+                self._send("BOARD")
+                for x, y, sym in board_history:
+                    color = 1 if sym == self.my_side else 2
+                    self._send(f"{int(x)},{int(y)},{color}")
+                self._send("DONE")
+                move = self._read_move(
+                    timeout=max(3.0, self.timeout_turn / 1000.0 + 3.0))
+                if move is None:
+                    log.warning("[JAX] Timed out or returned no coordinate")
+                    return None
+                x, y = move
+                if not (0 <= x < self.width and 0 <= y < self.height):
+                    log.warning(f"[JAX] Invalid move outside {self.width}x{self.height}: {move}")
+                    return None
+                self._expected_history_len = len(board_history) + 1
+                return move
             except Exception as e:
-                log.warning(f"[AG] get_move error: {e}")
+                log.warning(f"[JAX] get_move error: {e}")
                 self._initialized = False
                 return None
 
@@ -334,13 +314,16 @@ class AlphaGomokuEngine:
             except Exception:
                 pass
             try:
-                proc.terminate()
-                proc.wait(3)
+                proc.wait(timeout=2)
             except Exception:
                 try:
-                    proc.kill()
+                    proc.terminate()
+                    proc.wait(timeout=3)
                 except Exception:
-                    pass
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
         self.proc = None
         self._initialized = False
 
@@ -548,17 +531,21 @@ class CaroBot:
 
     def init_ag(self):
         if self.ag is not None: return self.ag_available
-        binary = detect_ag_binary()
-        if not binary: log.warning("[AG] No binary!"); self.ag_available = False; return False
+        binary = JAX_DIR / JAX_BINARY
+        runtime_ok = os.name == "nt" or detect_wine_binary() is not None
+        if not binary.exists() or not runtime_ok:
+            log.warning("[JAX] No binary or Wine runtime!")
+            self.ag_available = False
+            return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=max(self.board.width, self.board.height), rule=AG_RULE, width=self.board.width, height=self.board.height)
+            self.ag = JaxGomokuEngine(timeout_turn=JAX_TIMEOUT, board_size=max(self.board.width, self.board.height), rule=JAX_RULE, width=self.board.width, height=self.board.height)
             ok = self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] OK! Rule={AG_RULE}")
-            else: self.ag_available = False; log.warning("[AG] Start failed!")
+                log.info(f"[JAX] OK! Rule={JAX_RULE} native {self.board.width}x{self.board.height}")
+            else: self.ag_available = False; log.warning("[JAX] Start failed!")
             return self.ag_available
-        except Exception as e: log.error(f"[AG] Init error: {e}"); self.ag_available = False; return False
+        except Exception as e: log.error(f"[JAX] Init error: {e}"); self.ag_available = False; return False
 
     @property
     def running(self) -> bool: return self._running
@@ -1234,7 +1221,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO ALPHAGOMOKU - FULL_NAME + AVATAR v3.0")
+        log.info("BOT CARO JAX24 - NATIVE 15x19 + FULL_NAME/AVATAR v4.0")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -1288,9 +1275,9 @@ class CaroBot:
             if self.ag: self.ag.stop(); self.ag = None
 
 def main():
-    bin_path = auto_download_alphagomoku()
-    if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No AlphaGomoku - bot plays center only")
+    bin_path = auto_setup_jax()
+    if bin_path: print(f"[SETUP] JAX24 ready: {os.path.basename(bin_path)}")
+    else: print("[SETUP] No JAX24/Wine - bot uses fallback moves")
     
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
