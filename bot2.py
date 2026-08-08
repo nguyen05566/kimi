@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║ BOT CARO EMBRYO — AUTO IDENTITY RANDOMIZER v2.2                  ║
+║ BOT CARO EMBRYO — AUTO IDENTITY RANDOMIZER v2.0                  ║
 ║ Tự động đổi tên & avatar ngẫu nhiên mỗi lần khởi động            ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
@@ -39,20 +39,22 @@ NOUNS = ["Caro", "Gomoku", "Master", "Killer", "Storm", "Wolf", "Dragon", "Tiger
          "Phoenix", "Ninja", "Samurai", "Wizard", "Knight", "Sniper", "Viper", "Hawk",
          "Eagle", "Shark", "Bear", "Fox", "Panther", "Cobra", "Raven", "Bolt", "Blaze"]
 
-# Danh sách avatar ID hợp lệ trong game
+# Danh sách avatar ID hợp lệ trong game (đã dump từ server)
 VALID_AVATAR_IDS = (
-    list(range(0, 24)) +
-    list(range(38, 62)) +
-    list(range(100, 124)) +
-    list(range(200, 224)) +
-    list(range(300, 324)) +
-    list(range(400, 424))
+    list(range(0, 24)) +      # Category 1: builtin0-builtin23
+    list(range(38, 62)) +     # Category 2: builtin38-builtin61
+    list(range(100, 124)) +   # Category 3: builtin100-builtin123
+    list(range(200, 224)) +   # Category 4: builtin200-builtin223
+    list(range(300, 324)) +   # Category 5: builtin300-builtin323
+    list(range(400, 424))     # Category 6: builtin400-builtin423
 )
 
 def generate_random_name() -> str:
+    """Tạo tên ngẫu nhiên: AdjectiveNounNumber"""
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
 def generate_random_avatar_id() -> int:
+    """Chọn avatar ID ngẫu nhiên từ kho game"""
     return random.choice(VALID_AVATAR_IDS)
 
 # ======================== ALPHA GOMOKU CONFIG ========================
@@ -444,6 +446,95 @@ class Board:
                             return (x, y)
         return self.get_empty_near_center()
 
+# ======================== IDENTITY MANAGER ========================
+class IdentityManager:
+    """Quản lý đổi tên và avatar trước khi vào game"""
+
+    def __init__(self, user: str, passwd: str):
+        self.user = user
+        self.passwd = passwd
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': 'Mozilla/5.0'})
+
+    def _login_http(self) -> bool:
+        """Đăng nhập qua HTTP để lấy session"""
+        try:
+            self.session.get('https://gamevh.net/login.jsp', timeout=15)
+            resp = self.session.post('https://gamevh.net/login.jsp', timeout=15,
+                data={'redirect': '/', 'USER_NAME': self.user, 'PASSWORD': self.passwd,
+                      'AUTO_LOGIN': 'on', 'LOGIN': 'Dang nhap'},
+                headers={'Referer': 'https://gamevh.net/login.jsp',
+                         'Content-Type': 'application/x-www-form-urlencoded'})
+            return 'login.jsp' not in resp.url
+        except Exception as e:
+            log.error(f"[Identity] Login error: {e}")
+            return False
+
+    def change_name(self, new_name: str) -> bool:
+        """Đổi tên hiển thị qua HTTP form"""
+        try:
+            if not self._login_http():
+                log.error("[Identity] HTTP login failed")
+                return False
+
+            resp = self.session.post('https://gamevh.net/game/profile/change_user_name.jsp', timeout=15,
+                data={
+                    'redirect': '/',
+                    'processMode': '',
+                    'NICK_NAME': new_name,
+                    'OLD_PASSWORD': self.passwd,
+                    'SAVE': 'Cập nhật'
+                },
+                headers={'Referer': 'https://gamevh.net/game/profile/change_user_name.jsp'},
+                allow_redirects=True)
+
+            if resp.status_code == 200:
+                log.info(f"[Identity] Đổi tên thành: {new_name}")
+                return True
+            else:
+                log.error(f"[Identity] Đổi tên failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            log.error(f"[Identity] Change name error: {e}")
+            return False
+
+    def change_avatar(self, avatar_id: int) -> bool:
+        """Đổi avatar qua HTTP. avatar_id là số nguyên (vd: 5, 211, 300)"""
+        try:
+            if not self._login_http():
+                return False
+
+            resp = self.session.post(
+                f'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp?pk={avatar_id}&redirect=/',
+                timeout=15,
+                headers={'Referer': 'https://gamevh.net/game/profile/avatar.jsp'},
+                allow_redirects=True)
+
+            if resp.status_code == 200:
+                log.info(f"[Identity] Đổi avatar thành: builtin{avatar_id}")
+                return True
+            else:
+                log.error(f"[Identity] Đổi avatar failed: {resp.status_code}")
+                return False
+        except Exception as e:
+            log.error(f"[Identity] Change avatar error: {e}")
+            return False
+
+    def randomize(self) -> Tuple[str, int]:
+        """Đổi tên và avatar ngẫu nhiên, trả về (new_name, new_avatar_id)"""
+        new_name = generate_random_name()
+        new_avatar_id = generate_random_avatar_id()
+
+        name_ok = self.change_name(new_name)
+        avatar_ok = self.change_avatar(new_avatar_id)
+
+        if name_ok or avatar_ok:
+            log.info(f"[Identity] New identity: name={new_name}, avatar=builtin{new_avatar_id}")
+        else:
+            log.warning("[Identity] Failed to change identity")
+
+        return new_name, new_avatar_id
+
 # ======================== BOT ========================
 class CaroBot:
     def __init__(self):
@@ -467,6 +558,9 @@ class CaroBot:
         self.opponent_gone_at = None
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
+
+        # Identity manager
+        self.identity = IdentityManager(USER, PASSWD)
 
     def init_ag(self):
         if self.ag is not None: return self.ag_available
@@ -899,73 +993,7 @@ class CaroBot:
                     await self.send(self.make_create_rule())
             except Exception: pass
 
-    def randomize_identity(self) -> Tuple[str, int]:
-        """Đổi tên và avatar ngẫu nhiên. Dùng session riêng biệt, không ảnh hưởng đến http_login()"""
-        new_name = generate_random_name()
-        new_avatar_id = generate_random_avatar_id()
-        ok_name = False
-        ok_avatar = False
-
-        try:
-            session = requests.Session()
-            ua = "Mozilla/5.0"
-            session.get('https://gamevh.net/login.jsp', timeout=10, headers={'User-Agent': ua})
-            resp = session.post('https://gamevh.net/login.jsp', timeout=10,
-                                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
-                                      'AUTO_LOGIN': 'on', 'LOGIN': 'Dang nhap'},
-                                headers={'User-Agent': ua, 'Referer': 'https://gamevh.net/login.jsp',
-                                         'Content-Type': 'application/x-www-form-urlencoded'})
-            if 'login.jsp' in resp.url:
-                log.warning("[Identity] Login failed for identity change")
-                return new_name, new_avatar_id
-
-            # Đổi tên
-            try:
-                r = session.post('https://gamevh.net/game/profile/change_user_name.jsp', timeout=15,
-                    data={
-                        'redirect': '/',
-                        'processMode': '',
-                        'NICK_NAME': new_name,
-                        'OLD_PASSWORD': PASSWD,
-                        'SAVE': 'Cập nhật'
-                    },
-                    headers={'Referer': 'https://gamevh.net/game/profile/change_user_name.jsp'},
-                    allow_redirects=True)
-                if r.status_code == 200:
-                    log.info(f"[Identity] Đổi tên thành: {new_name}")
-                    ok_name = True
-                else:
-                    log.warning(f"[Identity] Đổi tên failed: {r.status_code}")
-            except Exception as e:
-                log.warning(f"[Identity] Change name error: {e}")
-
-            # Đổi avatar
-            try:
-                r = session.post(
-                    f'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp?pk={new_avatar_id}&redirect=/',
-                    timeout=15,
-                    headers={'Referer': 'https://gamevh.net/game/profile/avatar.jsp'},
-                    allow_redirects=True)
-                if r.status_code == 200:
-                    log.info(f"[Identity] Đổi avatar thành: builtin{new_avatar_id}")
-                    ok_avatar = True
-                else:
-                    log.warning(f"[Identity] Đổi avatar failed: {r.status_code}")
-            except Exception as e:
-                log.warning(f"[Identity] Change avatar error: {e}")
-
-            if ok_name or ok_avatar:
-                log.info(f"[Identity] New identity: name={new_name}, avatar=builtin{new_avatar_id}")
-            else:
-                log.warning("[Identity] All identity changes failed")
-
-        except Exception as e:
-            log.error(f"[Identity] Error: {e}")
-
-        return new_name, new_avatar_id
-
     def http_login(self) -> bool:
-        """Giữ nguyên như file gốc - không động chạm"""
         try:
             session = requests.Session()
             ua = "Mozilla/5.0"
@@ -1034,17 +1062,20 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'=' * 50}")
-        log.info(f"BOT CARO EMBRYO — AUTO IDENTITY v2.2")
+        log.info(f"BOT CARO EMBRYO — AUTO IDENTITY v2.0")
         log.info(f"{'=' * 50}")
 
         retry_count = 0
         while self.running:
             if time.time() - self.start_time > RUNTIME: break
 
-            # ====== ĐỔI TÊN & AVATAR TRƯỚC MỖI PHIÊN (session riêng) ======
+            # ====== ĐỔI TÊN & AVATAR TRƯỚC MỖI PHIÊN ======
             log.info("[Identity] Randomizing identity...")
-            await asyncio.get_event_loop().run_in_executor(None, self.randomize_identity)
-            # ================================================================
+            new_name, new_avatar_id = await asyncio.get_event_loop().run_in_executor(
+                None, self.identity.randomize
+            )
+            log.info(f"[Identity] New name: {new_name}, Avatar: builtin{new_avatar_id}")
+            # ================================================
 
             was_in_table = self.in_table or self.is_playing
             self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
