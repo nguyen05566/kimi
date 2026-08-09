@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """BOTTRAIN - AlphaZero Self-Learning Caro Bot (15x19, Rule 8, Pure NumPy)"""
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
-import logging, asyncio, random, threading, traceback
+import logging, asyncio, random, threading, traceback, re
 from pathlib import Path
 from typing import Optional, Tuple, List
 
@@ -135,11 +135,33 @@ class CaroBotTrain:
         if m in self.board.availables: self.board.do_move(m)
 
     async def http_login(self)->bool:
+        """Login via HTML form like bot2: POST /login.jsp, parse token from JS"""
         try:
-            resp=requests.post("https://gamevh.net/signin",json={"username":USER,"password":PASSWD},headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"},timeout=15)
-            if resp.status_code!=200: log.error(f"[LOGIN] POST /signin: {resp.status_code}");return False
-            data=resp.json();self.token=data.get("token",0);self.nickname=data.get("displayName",data.get("username","BOTTRAIN"))
-            log.info(f"[LOGIN] {self.nickname} token={self.token}");return True
+            session = requests.Session()
+            ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36"
+            session.headers.update({'User-Agent': ua, 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'})
+            session.get("https://gamevh.net/login.jsp", timeout=10)
+            resp = session.post(
+                "https://gamevh.net/login.jsp", timeout=10,
+                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
+                      'AUTO_LOGIN': 'true', 'LOGIN': 'Dang nhap'},
+                headers={'Origin': 'https://gamevh.net',
+                         'Referer': 'https://gamevh.net/login.jsp',
+                         'Content-Type': 'application/x-www-form-urlencoded'},
+                allow_redirects=True)
+            if 'login.jsp' in resp.url:
+                log.error(f"[LOGIN] Login failed")
+                return False
+            game_resp = session.get("https://gamevh.net/play/caro/0", timeout=10)
+            self.cookie = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
+            page_html = game_resp.text
+            tm = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
+            if not tm: log.error("[LOGIN] Token not found");return False
+            self.token = int(tm.group(1))
+            nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", page_html)
+            self.nickname = nm.group(1) if nm else "BOTTRAIN"
+            log.info(f"[LOGIN] OK - {self.nickname} (token={self.token})")
+            return True
         except Exception as e: log.error(f"[LOGIN] {e}");return False
 
     def make_login(self)->bytes:
@@ -169,7 +191,7 @@ class CaroBotTrain:
             elif cmd=="PING": await self.send(self.make_pong())
             elif cmd=="LOGIN":
                 ok=r.i8()
-                if ok==0: log.info(f"[LOGIN] WS OK");await self.send(self.make_enter("Lobby.caro.0"))
+                if ok==0: log.info("[LOGIN] WS OK");await self.send(self.make_enter("Lobby.caro.0"))
                 else: log.error("[LOGIN] WS FAILED")
             elif cmd=="ENTER_PLACE":
                 if r.i8()==0: log.info("[PLACE] OK");await self.send(self.make_create_rule())
@@ -195,8 +217,8 @@ class CaroBotTrain:
             elif cmd=="GAMEOVER":
                 res=r.u8();r.read_utf();r.u8()
                 if res==self.my_symbol: self.wins+=1;log.info(f"[WIN] W{self.wins}/L{self.losses}/D{self.draws}")
-                elif res==-1: self.draws+=1;log.info(f"[DRAW] W{self.wins}/L{self.losses}/D{self.draws}")
-                else: self.losses+=1;log.info(f"[LOSS] W{self.wins}/L{self.losses}/D{self.draws}")
+                elif res==-1: self.draws+=1;log.info(f"[DRAW]")
+                else: self.losses+=1;log.info(f"[LOSS]")
                 self.is_playing=False;self._moving=False
             elif cmd=="SURRENDER": self.is_playing=False;self._moving=False
             else: log.info(f"[CMD] {cmd}")
@@ -208,7 +230,7 @@ class CaroBotTrain:
         self.start_time=time.time()
         while self._running:
             try:
-                async with websockets.connect(WS_URL) as ws:
+                async with websockets.connect(WS_URL, extra_headers={"Cookie": self.cookie, "User-Agent": "Mozilla/5.0"}) as ws:
                     self.ws=ws;await self.send(self.make_login())
                     while self._running:
                         try:
