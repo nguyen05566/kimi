@@ -1234,8 +1234,7 @@ class CaroBot:
             if self.ag: self.ag.stop(); self.ag = None
 
 def main():
-    bin_path = detect_rapfi_binary() or auto_download_engine(AG_BINARY, AG_DOWNLOAD_URL, fmt="7z")
-            log.info(f"[PREP] Rapfi engine: {'OK' if bin_path else 'FAIL'}")
+    bin_path = auto_download_alphagomoku()
     if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
     else: print("[SETUP] No AlphaGomoku - bot plays center only")
     
