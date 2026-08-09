@@ -59,7 +59,7 @@ AG_BINARY = "pbrain-rapfi-linux-clang-avx2"
 AG_VERSION = "2025-06-15"
 AG_DOWNLOAD_URL = "https://github.com/dhbloo/rapfi/releases/download/250615/Rapfi-engine.7z"
 
-AG_RULE = 1  # Rapfi: rule 1 = Freestyle (chặn 2 đầu xử lý Python-side)
+AG_RULE = 1  # Rapfi: rule 1 = Freestyle
 AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_engine(binary_name: str, download_url: str, fmt: str = "bz2") -> Optional[str]:
@@ -578,6 +578,25 @@ class CaroBot:
         else:
             await self.send(self.make_create_rule())
 
+    def _is_legal_caro(self, x: int, y: int) -> bool:
+        """Kiểm tra nước đi có bị chặn 2 đầu không (Rule 8 - Caro)."""
+        dirs = [(1,0), (0,1), (1,1), (1,-1)]
+        b = self.board
+        for dx, dy in dirs:
+            count = 1; blocked = 0
+            for sign in [-1, 1]:
+                for step in range(1, 6):
+                    nx, ny = x + sign*dx*step, y + sign*dy*step
+                    if 0 <= nx < b.width and 0 <= ny < b.height:
+                        if b.get(nx, ny) != 0:
+                            count += 1
+                        else: break
+                    else:
+                        blocked += 1; break
+            if count >= 5 and blocked >= 2:
+                return False
+        return True
+
     async def do_move(self):
         if not self.is_playing or not self.running or self.slot < 0: return
         if self._moving:
@@ -635,6 +654,12 @@ class CaroBot:
             log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [RAPFI]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
+            # Rule 8 check: không đi vào giữa khi bị chặn 2 đầu
+            if not self._is_legal_caro(x, y):
+                nx2, ny2 = self.board.get_empty_near(x, y)
+                if self.board.get(nx2, ny2) == EMPTY and self._is_legal_caro(nx2, ny2):
+                    x, y = nx2, ny2
+                    log.warning(f"[RAPFI] Rule8 correction: {x},{y}")
             self.board.put(x, y, self.my_symbol)
         finally:
             self._moving = False
