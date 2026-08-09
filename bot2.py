@@ -53,9 +53,9 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo25_c5.exe"
-AG_VERSION = "2025"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO25.zip"
+AG_BINARY = "pbrain-embryo26_c5.exe"
+AG_VERSION = "2026"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
 AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
 AG_TIMEOUT = 2000  # 2 giây
 
@@ -70,7 +70,7 @@ def auto_download_alphagomoku() -> Optional[str]:
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/embryo25.zip")
+        archive = Path("/tmp/embryo26.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -90,13 +90,13 @@ def auto_download_alphagomoku() -> Optional[str]:
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     # Embryo 2025: Windows exe chạy qua wine
-    for f in ENGINE_DIR.glob("pbrain-embryo25_c5.exe"):
+    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
         try: f.chmod(0o644)
         except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo25_c5*"):
+    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo25*.exe"):
+    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
         return str(f)
     return None
 
