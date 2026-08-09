@@ -24,24 +24,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Wine (for EMBRYO26 Windows binary)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wine64 wine32 2>/dev/null || sudo apt-get install -y -qq wine
+          wine64 --version 2>/dev/null || wine --version 2>/dev/null || echo "[WARN] Wine not available"
+
+      - name: Install Python dependencies
         run: |
           pip install websockets requests --break-system-packages
 
-      - name: Download AlphaGomoku engine
-        run: |
-          mkdir -p alphagomoku-engine
-          if [ ! -f alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6 ]; then
-            echo "[SETUP] Downloading AlphaGomoku engine..."
-            curl -sL "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2" -o /tmp/embryo.bz2
-            python3 -c "import bz2; bz2.BZ2File('/tmp/embryo.bz2','rb').read(); import shutil; open('alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6','wb').write(bz2.BZ2File('/tmp/embryo.bz2','rb').read()); import os; os.remove('/tmp/embryo.bz2')"
-            chmod +x alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6
-            echo "[SETUP] AlphaGomoku ready!"
-          else
-            echo "[SETUP] Engine already exists"
-          fi
-
-      - name: Run Caro Bot
+      - name: Run Caro Bot (EMBRYO26)
         env:
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
