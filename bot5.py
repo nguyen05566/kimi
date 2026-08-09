@@ -1272,17 +1272,9 @@ class CaroBot:
 
 def main():
     # Pre-download both engines
-    import os as _os
-    log.info(f"[PREP] ENGINE_DIR contents: {list(ENGINE_DIR.glob('*'))[:10] if ENGINE_DIR.exists() else 'NOT FOUND'}")
-    p = detect_primary_binary()
-    if not p:
-        log.info("[PREP] Primary not found, downloading...")
-        p = auto_download_engine(AG_PRIMARY_BINARY, AG_PRIMARY_DOWNLOAD_URL, fmt="zip")
-    f = detect_fallback_binary()
-    if not f:
-        log.info("[PREP] Fallback not found, downloading...")
-        f = auto_download_engine(AG_FALLBACK_BINARY, AG_FALLBACK_DOWNLOAD_URL, fmt="bz2")
-    log.info(f"[PREP] Primary: {_os.path.basename(p) if p else 'FAIL'} | Fallback: {_os.path.basename(f) if f else 'FAIL'}")
+    p = detect_primary_binary() or auto_download_engine(AG_PRIMARY_BINARY, AG_PRIMARY_DOWNLOAD_URL, is_zip=True)
+    f = detect_fallback_binary() or auto_download_engine(AG_FALLBACK_BINARY, AG_FALLBACK_DOWNLOAD_URL, is_zip=False)
+    log.info(f"[PREP] Primary: {'OK' if p else 'FAIL'} | Fallback: {'OK' if f else 'FAIL'}")
     
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
