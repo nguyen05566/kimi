@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO JAX24 - NATIVE 15x19 + MOVE SYNC GUARD v4.2        ║
+║  BOT CARO JAX24 - NATIVE 15x19 + OPEN-FOUR GUARD v4.3       ║
 ║  Engine: JAX24 StandardCaro via Wine                                   ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
@@ -601,15 +601,41 @@ class Board:
                     result.append((x, y))
         return result
 
+    def fork_creating_moves(self, symbol: int) -> List[Tuple[int, int]]:
+        """Moves that create at least two distinct wins on the next turn."""
+        forks = []
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.grid[y][x] != EMPTY:
+                    continue
+                self.grid[y][x] = symbol
+                try:
+                    next_wins = self.immediate_winning_moves(symbol)
+                finally:
+                    self.grid[y][x] = EMPTY
+                if len(next_wins) >= 2:
+                    forks.append((x, y))
+        return forks
+
     def forced_tactical_move(self, my_symbol: int,
                              opponent_symbol: int) -> Tuple[Optional[str], Optional[Tuple[int, int]]]:
-        """Win immediately or block an opponent's immediate five before JAX."""
+        """Handle wins, direct blocks and open-four prevention before JAX."""
         wins = self.immediate_winning_moves(my_symbol)
         if wins:
             return "WIN", self._prefer_tactical_cell(wins)
         blocks = self.immediate_winning_moves(opponent_symbol)
         if blocks:
             return "BLOCK", self._prefer_tactical_cell(blocks)
+
+        # An open three can become an open four with two winning endpoints.
+        # Once that happens, blocking only one endpoint is already too late.
+        opponent_forks = self.fork_creating_moves(opponent_symbol)
+        if opponent_forks:
+            return "PREVENT_FOUR", self._prefer_tactical_cell(opponent_forks)
+
+        own_forks = self.fork_creating_moves(my_symbol)
+        if own_forks:
+            return "CREATE_FORK", self._prefer_tactical_cell(own_forks)
         return None, None
 
     def _prefer_tactical_cell(self, cells: List[Tuple[int, int]]) -> Tuple[int, int]:
@@ -1429,7 +1455,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO JAX24 - NATIVE 15x19 + MOVE SYNC GUARD v4.2")
+        log.info("BOT CARO JAX24 - NATIVE 15x19 + OPEN-FOUR GUARD v4.3")
         log.info(f"{'='*50}")
         
         retry_count = 0
