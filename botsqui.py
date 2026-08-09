@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO SQUIRREL24 - PROXY ENGINE v3.0 (FINAL FIX)            ║
-║  FIX: Luôn gửi FULL BOARD, không dùng TURN                      ║
-║  FIX: Thêm lệnh BEGIN khi đi trước                              ║
-║  FIX: Symbol mapping đúng 100%                                  ║
+║  BOT CARO SQUIRREL24 - FIXED v3.1 (theo chuẩn bot2.py)          ║
+║  Engine: Embryo Caro6 v1.2.3 (Linux Native) – FIXED             ║
+║  FIX: Khôi phục RECTSTART 15,19 native (bỏ proxy clipping lỗi)  ║
+║  FIX: Sửa _calculate_offset clipping, BEGIN sai tâm, RESTART    ║
+║  FIX: Đồng bộ AlphaGomokuEngine như bot2.py (chuẩn)             ║
+║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -15,7 +17,7 @@ from urllib.parse import urljoin
 
 # ======================== LOGGING ========================
 log = logging.getLogger("caro")
-log.setLevel(logging.DEBUG if os.environ.get("CARO_DEBUG") == "1" else logging.INFO)
+log.setLevel(logging.INFO)
 if not log.handlers:
     h = logging.StreamHandler(sys.stdout)
     h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
@@ -34,6 +36,7 @@ for pkg in REQUIRED:
 import websockets, requests
 
 # ======================== SAFE IDENTITY CONFIG ========================
+# Đây là TÊN ĐẦY ĐỦ (FULL_NAME), không phải tên đăng nhập.
 ADJECTIVES = ["Pro", "Dark", "Light", "Shadow", "Ghost", "Fire", "Ice", "Thunder",
               "Silent", "Swift", "Crazy", "Lucky", "Mega", "Super", "Ultra", "Hyper",
               "Cyber", "Neo", "Tech", "Alpha", "Beta", "Zero", "Max", "King", "Queen"]
@@ -43,35 +46,31 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== SQUIRREL24 CONFIG ========================
+# ======================== ALPHA GOMOKU CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "squirrel24-engine"
-AG_BINARY = "pbrain-squirrel.exe"
-AG_VERSION = "2024"
-AG_DOWNLOAD_URL = "https://download.gomocup.com/ai/SQUIRREL24.zip"
-AG_RULE = 8
-AG_TIMEOUT = 2000
-
-# ======================== CONSTANTS ========================
-EMPTY = -1
-CIRCLE = 0
-CROSS = 1
+ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
+AG_BINARY = "pbrain-embryo26_c5.exe"
+AG_VERSION = "2026"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
+AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
+AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
-        try: binary_path.chmod(0o755)
+        try:
+            binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    log.info(f"[AG] Downloading SQUIRREL {AG_VERSION}...")
+    log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/squirrel24.zip")
+        archive = Path("/tmp/embryo26.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -80,7 +79,8 @@ def auto_download_alphagomoku() -> Optional[str]:
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
-        try: binary_path.chmod(0o755)
+        try:
+            binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
     except Exception as e:
@@ -89,279 +89,167 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    for f in ENGINE_DIR.glob("pbrain-squirrel.exe"):
-        try: f.chmod(0o755)
+    # Embryo 2025: Windows exe chạy qua wine
+    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
+        try: f.chmod(0o644)
         except Exception: pass
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
         return str(f)
     return None
 
-# ═══════════════════════════════════════════════════════════════════════
-#  SQUIRREL PROXY ENGINE v3.0 - ALWAYS FULL BOARD, NO TURN
-# ═══════════════════════════════════════════════════════════════════════
-class SquirrelProxyEngine:
-    """
-    Proxy Engine v3.0:
-    - LUÔN gửi FULL BOARD (không dùng TURN) để tránh mất đồng bộ
-    - Gửi BEGIN khi bàn trống (bot đi trước)
-    - Symbol mapping: my_stones=1, opponent_stones=2
-    """
-    VIRTUAL_WIDTH = 15
-    VIRTUAL_HEIGHT = 19
-    ENGINE_SIZE = 15
-    MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_SIZE  # = 4
-
-    def __init__(self, timeout_turn: int = 2000, rule: int = 8):
-        self.binary = None
+# ======================== ENGINE WRAPPER ========================
+class AlphaGomokuEngine:
+    def __init__(self, timeout_turn=2000, board_size=15, rule=9):
+        self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
+        self.board_size = board_size
         self.rule = rule
-        
-        self.proc: Optional[subprocess.Popen] = None
+        self.proc = None
         self.lock = threading.Lock()
         self._buffer = b""
+        self.my_side = 1
         self._initialized = False
-        self.my_side = CROSS
-        self.debug = os.environ.get("CARO_DEBUG") == "1"
-
-    def _log(self, msg: str):
-        if self.debug:
-            log.info(f"[PROXY] {msg}")
 
     def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
-                if self.debug:
-                    log.debug(f"[SEND] {cmd}")
-            except Exception as e:
-                log.error(f"Send error: {e}")
+            except Exception: pass
 
-    def _read_line(self, timeout: float = 10.0) -> str:
-        if not self.proc or self.proc.poll() is not None:
-            return ""
+    def _read_line(self, timeout=10.0) -> str:
+        if not self.proc or self.proc.poll() is not None: return ""
         deadline = time.monotonic() + timeout
         while True:
             idx = self._buffer.find(b"\n")
             if idx >= 0:
                 line_bytes = self._buffer[:idx].strip()
                 self._buffer = self._buffer[idx + 1:]
-                line = line_bytes.decode("utf-8", errors="replace")
-                if self.debug:
-                    log.debug(f"[RECV] {line}")
-                return line
+                return line_bytes.decode("utf-8", errors="replace")
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return ""
+            if remaining <= 0: return ""
             try:
                 sel = selectors.DefaultSelector()
                 sel.register(self.proc.stdout, selectors.EVENT_READ)
-                ready = sel.select(timeout=min(remaining, 0.5))
+                ready = sel.select(timeout=min(remaining, 2.0))
                 sel.close()
                 if ready:
                     chunk = os.read(self.proc.stdout.fileno(), 4096)
                     if not chunk: return ""
                     self._buffer += chunk
-            except Exception:
-                return ""
+            except Exception: return ""
 
-    def start_engine(self) -> bool:
-        if self._initialized:
-            return True
-        if not self.binary:
-            log.error("[PROXY] Binary not set!")
-            return False
-        try:
-            is_exe = self.binary.lower().endswith('.exe')
-            cmd = ["wine", self.binary] if is_exe else [self.binary]
-            log.info(f"[PROXY] Starting: {' '.join(cmd)}")
-            self.proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                cwd=os.path.dirname(self.binary) or "."
-            )
-            self._buffer = b""
-            
-            # Khởi động engine với bàn 15x15
-            self._send("START 15")
-            for _ in range(10):
-                line = self._read_line(timeout=2.0)
-                if line.upper() == "OK":
-                    log.info("[PROXY] ✓ Engine START OK")
-                    break
-            else:
-                log.warning("[PROXY] ⚠ No OK response to START")
-            
+    def start_game(self, my_symbol=1) -> bool:
+        self._synced = False
+        if self.proc and self.proc.poll() is None:
+            self._send("RESTART")
+            for _ in range(5):
+                if self._read_line(timeout=0.5).upper() == "OK": break
+            self._send("RECTSTART 15,19")
+            for _ in range(5):
+                if self._read_line(timeout=0.5).upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send("INFO ponder 1")
-            time.sleep(0.3)
+            self.my_side = my_symbol
+            self._initialized = True
+            return True
+
+        self.stop()
+        if not self.binary: return False
+        try:
+            # Embryo 2025 là Windows exe → chạy qua Wine
+            is_exe = self.binary.lower().endswith('.exe')
+            if is_exe:
+                cmd = ["wine", self.binary]
+            else:
+                cmd = [self.binary]
+            self.proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
+            )
+            self._buffer = b""
+            self.my_side = my_symbol
+            self._send("RECTSTART 15,19")
+            for _ in range(10):
+                line = self._read_line(timeout=1.0)
+                if line.upper() == "OK": break
+            self._send(f"INFO rule {self.rule}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO ponder 1")
+            time.sleep(0.2)
             self._initialized = True
             return True
         except Exception as e:
-            log.error(f"[PROXY] Start error: {e}")
+            log.error(f"[AG] Start error: {e}")
+            self._initialized = False
             return False
 
-    def start_game(self, my_symbol: int = CROSS) -> bool:
-        """Reset engine cho ván mới"""
-        self.my_side = my_symbol
-        side_str = "X (CROSS)" if my_symbol == CROSS else "O (CIRCLE)"
-        log.info(f"[PROXY] New game - I am {side_str}")
-        
-        if not self._initialized:
-            return self.start_engine()
-        
-        self._send("RESTART")
-        for _ in range(5):
-            line = self._read_line(timeout=2.0)
-            if line.upper() == "OK":
-                log.info("[PROXY] ✓ RESTART OK")
-                break
-        return True
-
     def restart_game(self) -> bool:
-        return self.start_game(self.my_side)
+        with self.lock:
+            if not self._initialized or not self.proc or self.proc.poll() is not None:
+                return False
+            self._send("RESTART")
+            for _ in range(5):
+                line = self._read_line(timeout=2.0)
+                if line.upper() == "OK":
+                    log.info("[AG] RESTART successful")
+                    return True
+            log.warning("[AG] RESTART did not return OK, assuming reset")
+            return True
 
+    def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+        with self.lock:
+            try:
+                if not self._initialized or not self.proc or self.proc.poll() is not None: return None
+                
+                self._send(f"INFO timeout_turn {self.timeout_turn}")
+                self._send(f"INFO time_left {self.timeout_turn * 20}")
+                
+                can_use_turn = getattr(self, '_synced', False) and len(board_history) == getattr(self, '_expected_history_len', -1) + 1
+                
+                if can_use_turn:
+                    last_x, last_y, _ = board_history[-1]
+                    self._send(f"TURN {last_x},{last_y}")
+                else:
+                    self._send("BOARD")
+                    for (x, y, sym) in board_history:
+                        c = 1 if sym == self.my_side else 2
+                        self._send(f"{x},{y},{c}")
+                    self._send("DONE")
+                
+                for _ in range(300):
+                    line = self._read_line(timeout=0.1)
+                    if not line: continue
+                    if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
+                        continue
+                    if "," in line:
+                        parts = line.split(",")
+                        if len(parts) == 2:
+                            self._synced = True
+                            self._expected_history_len = len(board_history) + 1
+                            return int(parts[0].strip()), int(parts[1].strip())
+                return None
+            except Exception as e:
+                log.warning(f"[AG] get_move error: {e}")
+                self._synced = False
+                return None
+                
     def stop(self):
         if self.proc:
             try: self._send("END")
             except Exception: pass
             try:
                 self.proc.terminate()
-                self.proc.wait(timeout=3)
+                self.proc.wait(3)
             except Exception:
                 try: self.proc.kill()
                 except Exception: pass
             self.proc = None
             self._initialized = False
-
-    def _calculate_offset(self, history: list) -> int:
-        """Tính offset Y để cửa sổ 15x15 bao quanh vùng đang đánh"""
-        if not history:
-            return 0
-        last_y = history[-1][1]
-        desired = last_y - (self.ENGINE_SIZE // 2)
-        return max(0, min(self.MAX_Y_OFFSET, desired))
-
-    def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
-        """
-        Lấy nước đi từ engine.
-        
-        board_history: [(x, y, symbol), ...] với symbol = CIRCLE(0) hoặc CROSS(1)
-        my_side: CIRCLE(0) hoặc CROSS(1) - quân của bot
-        
-        Engine protocol:
-          1 = quân của engine (my stones)
-          2 = quân của đối thủ (opponent stones)
-        """
-        with self.lock:
-            if not self._initialized:
-                if not self.start_engine():
-                    return None
-            
-            self.my_side = my_side
-            
-            # ═══ TÍNH WINDOW OFFSET ═══
-            offset_y = self._calculate_offset(board_history)
-            self._log(f"Window offset_y={offset_y}, history_len={len(board_history)}")
-            
-            # ═══ GỬI INFO ═══
-            self._send(f"INFO timeout_turn {self.timeout_turn}")
-            self._send(f"INFO time_left {self.timeout_turn * 20}")
-            
-            # ═══ TRƯỜNG HỢP 1: BÀN TRỐNG → BOT ĐI TRƯỚC ═══
-            if len(board_history) == 0:
-                self._log("Empty board -> sending BEGIN")
-                self._send("BEGIN")
-                
-                for _ in range(300):
-                    line = self._read_line(timeout=0.1)
-                    if not line: continue
-                    if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
-                        log.info(f"[ENGINE] {line}")
-                        continue
-                    if "," in line:
-                        parts = line.split(",")
-                        if len(parts) == 2:
-                            try:
-                                ex, ey = int(parts[0].strip()), int(parts[1].strip())
-                                vx, vy = ex, ey + offset_y
-                                if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
-                                    log.info(f"[PROXY] ✓ BEGIN move: engine({ex},{ey}) -> virtual({vx},{vy})")
-                                    return (vx, vy)
-                            except ValueError:
-                                continue
-                return None
-            
-            # ═══ TRƯỜNG HỢP 2: GỬI FULL BOARD ═══
-            # LUÔN gửi FULL BOARD để engine có đầy đủ thông tin
-            self._send("BOARD")
-            
-            my_count = 0
-            opp_count = 0
-            
-            for (x, y, sym) in board_history:
-                # Kiểm tra tọa độ nằm trong cửa sổ 15x15
-                if not (0 <= x < self.VIRTUAL_WIDTH):
-                    continue
-                if not (offset_y <= y < offset_y + self.ENGINE_SIZE):
-                    continue
-                
-                # Chuyển tọa độ virtual -> engine
-                ex = x
-                ey = y - offset_y
-                
-                # Chuyển symbol:
-                # sym == my_side → engine symbol 1 (quân của engine)
-                # sym != my_side → engine symbol 2 (quân đối thủ)
-                if sym == my_side:
-                    engine_sym = 1
-                    my_count += 1
-                else:
-                    engine_sym = 2
-                    opp_count += 1
-                
-                self._send(f"{ex},{ey},{engine_sym}")
-            
-            self._send("DONE")
-            
-            log.info(f"[PROXY] BOARD sent: {my_count} my stones (sym=1) + {opp_count} opponent stones (sym=2), offset_y={offset_y}")
-            
-            if my_count == 0 and opp_count == 0:
-                log.warning("[PROXY] ⚠ No stones in window! All moves outside 15x15 view.")
-            
-            # ═══ ĐỌC PHẢN HỒI ═══
-            for _ in range(300):
-                line = self._read_line(timeout=0.1)
-                if not line: continue
-                if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
-                    log.info(f"[ENGINE] {line}")
-                    continue
-                if "," in line:
-                    parts = line.split(",")
-                    if len(parts) == 2:
-                        try:
-                            ex, ey = int(parts[0].strip()), int(parts[1].strip())
-                            # Chuyển engine -> virtual
-                            vx, vy = ex, ey + offset_y
-                            
-                            if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
-                                # Kiểm tra ô trống
-                                is_occupied = any(hx == vx and hy == vy for hx, hy, _ in board_history)
-                                if not is_occupied:
-                                    log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
-                                    return (vx, vy)
-                                else:
-                                    log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, engine returned invalid move")
-                            else:
-                                log.warning(f"[PROXY] ⚠ ({vx},{vy}) out of bounds")
-                        except ValueError:
-                            continue
-            
-            log.error("[PROXY] ✗ No valid move from engine")
-            return None
-
-    def __del__(self):
-        self.stop()
 
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
@@ -371,7 +259,6 @@ PASSWD = os.environ.get("CARO_PASSWD", "")
 if not USER or not PASSWD:
     print("[BOT] Thiếu CARO_USER / CARO_PASSWD (GitHub Secrets) - thoát")
     sys.exit(1)
-
 VERSION = "5.0.2"
 GAME_ID = "caro"
 RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
@@ -381,6 +268,9 @@ IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
 BOT_MATCH_DURATION = '0'
 BOT_TURN_DURATION = '60'
+EMPTY = -1
+CIRCLE = 0
+CROSS = 1
 
 CMD_MAP = {
     300: "PONG", 301: "PING", 302: "LOGIN", 303: "ALERT", 304: "RIBBON_MESSAGE",
@@ -557,6 +447,8 @@ class CaroBot:
         self.opponent_gone_at = None
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
+
+        # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
         self._identity_attempted = False
         self.identity_result = {}
 
@@ -570,12 +462,12 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = SquirrelProxyEngine(timeout_turn=AG_TIMEOUT, rule=AG_RULE)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] SQUIRREL {AG_VERSION} OK! Rule={AG_RULE}")
+                log.info(f"[AG] Embryo v{AG_VERSION} OK! Rule={AG_RULE}")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
@@ -668,10 +560,11 @@ class CaroBot:
         try:
             start = time.time()
             x, y = -1, -1
-            history = list(self.board.history)
             
             if self.ag_available:
                 try:
+                    history = list(self.board.history)
+                    
                     move = await asyncio.get_event_loop().run_in_executor(
                         None, 
                         lambda: self.ag.get_move(history, self.my_symbol)
@@ -682,7 +575,7 @@ class CaroBot:
                         x, y = move; self.ag_moves += 1
                     else:
                         self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
+                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
                         if history:
                             lx, ly = history[-1][0], history[-1][1]
                         else:
@@ -701,6 +594,7 @@ class CaroBot:
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
+                history = self.board.history
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
                 else:
@@ -709,7 +603,7 @@ class CaroBot:
                 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s")
+            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
@@ -832,6 +726,7 @@ class CaroBot:
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
             
+            # --- KIỂM TRA ĐỐI THỦ THỰC SỰ NGỒI GHẾ ---
             has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
             
             self.is_playing = is_playing
@@ -843,11 +738,11 @@ class CaroBot:
             elif not is_playing and self.slot >= 0:
                 if has_opponent:
                     if not self.ready:
-                        log.info("[BOT] Phát hiện đối thủ. Bấm Sẵn sàng!")
+                        log.info("[BOT] Phát hiện đối thủ thực sự đã ngồi vào ghế. Bấm Sẵn sàng!")
                         self.ready = True; await self.send(self.make_ready())
                 else:
                     if self.ready:
-                        log.info("[BOT] Không có đối thủ. Hủy Sẵn sàng.")
+                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
@@ -941,6 +836,7 @@ class CaroBot:
     async def _delay_ready(self, delay: float):
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
+            # Sẽ gửi yêu cầu bàn cờ để kiểm tra và cập nhật ready đồng bộ thay vì ép buộc gửi ready
             await self.send(self.make_get_table())
 
     async def handle_player_enter(self, r: BinaryReader):
@@ -948,16 +844,19 @@ class CaroBot:
         pid = r.i64(); name = r.read_utf()
         if r.remaining() >= 36:
             r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
+            
         if place_level < 4: return
-        log.info(f"[BOT] Phát hiện {name} vào bàn cờ.")
+        log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
         await self.send(self.make_get_table())
 
     async def handle_player_exit(self, r: BinaryReader):
         place_level = r.i8()
         pid = r.i64() if r.remaining() >= 8 else -1
         if place_level < 4: return
+        
         slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
         if pid >= 0: self.player_slot_by_id.pop(pid, None)
+        
         if slot is not None and slot == self.slot:
             if self.is_playing:
                 self.in_table = False; self._table_lost_at = time.time()
@@ -966,8 +865,9 @@ class CaroBot:
         elif self.is_playing:
             if self.opponent_gone_at is None:
                 self.opponent_gone_at = time.time()
-                log.info("[BOT] Đối thủ rời giữa ván -> chờ GAMEOVER")
+                log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
         elif self.in_table:
+            log.info("[BOT] Phát hiện có người rời bàn. Đang cập nhật lại trạng thái...")
             await self.send(self.make_get_table())
 
     async def watchdog(self):
@@ -975,18 +875,23 @@ class CaroBot:
             try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
             if not self.running: return
+            
             if self.start_time and time.time() - self.start_time > RUNTIME:
                 self.save_stats(); self.stop(); return
+            
             if not self.ws or self.ws.close_code is not None: continue
+            
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
                     and time.time() - self.opponent_gone_at > 15):
                     self.opponent_gone_at = None
                     await self.send(self.make_get_table())
+                
                 if (self._table_lost_at is not None
                     and time.time() - self._table_lost_at > 8):
                     self._table_lost_at = None; self.table_id = None
                     await self.create_new_table()
+                
                 if (not self.is_playing and not self.in_table and not self._joining_table
                     and not self._rejoining and self._bet_amts_loaded):
                     await self.send(self.make_create_rule())
@@ -998,54 +903,84 @@ class CaroBot:
         return html_lib.unescape(m.group(2)) if m else ""
 
     def _read_profile_form(self, page_text: str, page_url: str):
+        """Đọc form hồ sơ và giữ nguyên mọi trường hiện có."""
         form_match = re.search(
-            r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>', page_text)
-        if not form_match: return None, None
+            r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>',
+            page_text)
+        if not form_match:
+            return None, None
         form = form_match.group(0)
         open_tag = re.search(r'(?is)<form\b[^>]*>', form).group(0)
         action = urljoin(page_url, self._html_attr(open_tag, 'action'))
         data = {}
+
         for tag in re.findall(r'(?is)<input\b[^>]*>', form):
             name = self._html_attr(tag, 'name')
             input_type = self._html_attr(tag, 'type').lower()
-            if not name or input_type in ('submit', 'button', 'image', 'file', 'reset'): continue
-            if input_type in ('checkbox', 'radio') and not re.search(r'\bchecked\b', tag, re.I): continue
+            if not name or input_type in ('submit', 'button', 'image', 'file', 'reset'):
+                continue
+            if input_type in ('checkbox', 'radio') and not re.search(r'\bchecked\b', tag, re.I):
+                continue
             data[name] = self._html_attr(tag, 'value')
+
         for match in re.finditer(r'(?is)<select\b([^>]*)>(.*?)</select>', form):
             name = self._html_attr('<select ' + match.group(1) + '>', 'name')
-            if not name: continue
-            selected = re.search(r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>', match.group(2))
-            if selected: data[name] = self._html_attr('<option ' + selected.group(1) + '>', 'value')
+            if not name:
+                continue
+            selected = re.search(
+                r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>',
+                match.group(2))
+            if selected:
+                data[name] = self._html_attr('<option ' + selected.group(1) + '>', 'value')
+
         for match in re.finditer(r'(?is)<textarea\b([^>]*)>(.*?)</textarea>', form):
             name = self._html_attr('<textarea ' + match.group(1) + '>', 'name')
-            if name: data[name] = html_lib.unescape(match.group(2)).strip()
+            if name:
+                data[name] = html_lib.unescape(match.group(2)).strip()
         return action, data
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
+        """Đổi FULL_NAME mà không chạm tới endpoint đổi tên đăng nhập."""
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
         new_name = generate_random_full_name()
         page = session.get(edit_url, timeout=15, allow_redirects=True)
         action, data = self._read_profile_form(page.text, page.url)
         if not action or data is None:
+            log.warning('[Identity] Không đọc được form FULL_NAME')
             return {'ok': False, 'new_full_name': new_name, 'error': 'form_not_found'}
+
         old_name = data.get('FULL_NAME', '')
         data['FULL_NAME'] = new_name
         data['OLD_PASSWORD'] = PASSWD
         data['SAVE'] = '\uf046'
-        session.post(action, timeout=20, data=data,
+        response = session.post(
+            action, timeout=20, data=data,
             headers={'Origin': 'https://gamevh.net', 'Referer': page.url,
-                     'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True)
+                     'Content-Type': 'application/x-www-form-urlencoded'},
+            allow_redirects=True)
+
         verify_page = session.get(edit_url, timeout=15, allow_redirects=True)
         _, verify_data = self._read_profile_form(verify_page.text, verify_page.url)
         verified_name = (verify_data or {}).get('FULL_NAME')
         ok = verified_name == new_name
-        if ok: log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
-        return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name}
+        if ok:
+            log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
+        else:
+            log.warning(
+                f'[Identity] FULL_NAME verify failed: expected={new_name!r}, '
+                f'actual={verified_name!r}, HTTP={response.status_code}')
+        return {
+            'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name,
+            'verified_full_name': verified_name, 'http_status': response.status_code
+        }
 
     @staticmethod
     def _extract_profile_balance(page_text: str) -> Optional[int]:
-        m = re.search(r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>', page_text)
-        if not m: return None
+        m = re.search(
+            r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>',
+            page_text)
+        if not m:
+            return None
         digits = re.sub(r'[^0-9-]', '', html_lib.unescape(re.sub(r'<[^>]+>', '', m.group(1))))
         return int(digits) if digits and digits != '-' else None
 
@@ -1055,69 +990,129 @@ class CaroBot:
         return int(m.group(1)) if m else None
 
     def _load_avatar_catalog(self, session: requests.Session) -> List[Dict]:
-        catalog = []; seen = set()
-        pattern = re.compile(r'''buyAvatar\(\s*(["']?)(\d+)\1\s*,\s*(["'])(.*?)\3\s*,\s*(["']?)([\d,.]+)\5\s*\)''', re.I | re.S)
+        catalog = []
+        seen = set()
+        pattern = re.compile(
+            r'''buyAvatar\(\s*(["']?)(\d+)\1\s*,\s*(["'])(.*?)\3\s*,\s*(["']?)([\d,.]+)\5\s*\)''',
+            re.I | re.S)
         for category in range(1, 7):
-            url = f'https://gamevh.net/com/ftl/game/profile/avatar_by_category.jsp?excludeLayout=true&category_id={category}'
+            url = ('https://gamevh.net/com/ftl/game/profile/'
+                   f'avatar_by_category.jsp?excludeLayout=true&category_id={category}')
             page = session.get(url, timeout=15)
             for match in pattern.finditer(page.text):
                 avatar_id = int(match.group(2))
-                if avatar_id in seen: continue
+                if avatar_id in seen:
+                    continue
                 seen.add(avatar_id)
                 cost = int(re.sub(r'[^0-9]', '', match.group(6)) or '0')
-                catalog.append({'id': avatar_id, 'name': html_lib.unescape(match.group(4)), 'cost': cost, 'category': category})
+                catalog.append({
+                    'id': avatar_id,
+                    'name': html_lib.unescape(match.group(4)),
+                    'cost': cost,
+                    'category': category
+                })
         return catalog
 
     def update_random_avatar(self, session: requests.Session) -> Dict:
+        """Chọn avatar ngẫu nhiên từ catalog sống; có thể phát sinh phí xu."""
         profile_url = 'https://gamevh.net/com/ftl/game/profile/player_profile.jsp'
         before_page = session.get(profile_url, timeout=15)
         old_avatar = self._extract_profile_avatar(before_page.text)
+        balance_before = self._extract_profile_balance(before_page.text)
         catalog = self._load_avatar_catalog(session)
         choices = [item for item in catalog if item['id'] != old_avatar]
-        if not choices: return {'ok': False, 'error': 'avatar_catalog_empty'}
+        if not choices:
+            log.warning('[Identity] Không tải được catalog avatar')
+            return {'ok': False, 'error': 'avatar_catalog_empty'}
+
         selected = random.choice(choices)
-        update_url = f'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp?pk={selected["id"]}&redirect=/'
-        session.post(update_url, timeout=20, headers={'Origin': 'https://gamevh.net'}, allow_redirects=True)
+        update_url = (
+            'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp'
+            f"?pk={selected['id']}&redirect=/")
+        response = session.post(
+            update_url, timeout=20,
+            headers={'Origin': 'https://gamevh.net',
+                     'Referer': 'https://gamevh.net/com/ftl/game/profile/avatar.jsp'},
+            allow_redirects=True)
+
         after_page = session.get(profile_url, timeout=15)
         new_avatar = self._extract_profile_avatar(after_page.text)
+        balance_after = self._extract_profile_balance(after_page.text)
         ok = new_avatar == selected['id']
-        if ok: log.info(f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}")
-        return {'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar}
+        if ok:
+            log.info(
+                f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}; "
+                f"giá niêm yết={selected['cost']} xu; số dư={balance_before}->{balance_after}")
+        else:
+            log.warning(
+                f"[Identity] Avatar verify failed: expected=builtin{selected['id']}, "
+                f"actual=builtin{new_avatar}, HTTP={response.status_code}")
+        return {
+            'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar,
+            'selected_avatar': selected, 'balance_before': balance_before,
+            'balance_after': balance_after, 'http_status': response.status_code
+        }
 
     def update_profile_identity(self, session: requests.Session) -> Dict:
-        log.info('[Identity] Updating FULL_NAME + avatar...')
-        result = {'full_name': self.update_random_full_name(session), 'avatar': self.update_random_avatar(session)}
+        log.info('[Identity] Updating FULL_NAME + avatar (không đổi tên đăng nhập)...')
+        result = {
+            'full_name': self.update_random_full_name(session),
+            'avatar': self.update_random_avatar(session)
+        }
         self.identity_result = result
         return result
 
     def http_login(self) -> bool:
         try:
             session = requests.Session()
-            ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36"
-            session.headers.update({'User-Agent': ua, 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'})
+            ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+            session.headers.update({
+                'User-Agent': ua,
+                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'
+            })
             session.get('https://gamevh.net/login.jsp', timeout=10)
-            resp = session.post('https://gamevh.net/login.jsp', timeout=10,
+            resp = session.post(
+                'https://gamevh.net/login.jsp', timeout=10,
                 data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
                       'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
-                headers={'Origin': 'https://gamevh.net', 'Referer': 'https://gamevh.net/login.jsp',
-                         'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True)
+                headers={'Origin': 'https://gamevh.net',
+                         'Referer': 'https://gamevh.net/login.jsp',
+                         'Content-Type': 'application/x-www-form-urlencoded'},
+                allow_redirects=True)
             if 'login.jsp' in resp.url:
                 log.error(f'[BOT] HTTP login failed: {resp.url}')
                 return False
+
             if AUTO_IDENTITY and not self._identity_attempted:
                 self._identity_attempted = True
                 self.update_profile_identity(session)
+
             game_resp = session.get(GAME_URL, timeout=10)
             self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
             page_html = game_resp.text
+
             tm = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
-            if not tm: log.error('[BOT] Token not found'); return False
+            if not tm:
+                log.error('[BOT] Token not found')
+                return False
             self.token = int(tm.group(1))
+
             nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", page_html)
-            if not nm: log.error('[BOT] currentPlayerNickName not found'); return False
+            if not nm:
+                log.error('[BOT] currentPlayerNickName not found')
+                return False
             self.nickname = nm.group(1)
+
             pm = re.search(r'var\s+placePath\s*=\s*\"([^\"]+)\"', page_html)
-            if pm: self.place_path = pm.group(1)
+            if pm:
+                self.place_path = pm.group(1)
+
+            if self.nickname == USER:
+                log.info(f'[Identity] Tên đăng nhập giữ nguyên: {self.nickname}')
+            else:
+                log.warning(
+                    f'[Identity] Server nickname={self.nickname!r} khác CARO_USER={USER!r}')
             log.info(f'[BOT] Login OK: {self.nickname}')
             return True
         except Exception as e:
@@ -1155,47 +1150,65 @@ class CaroBot:
 
     async def run(self):
         self.start_time = time.time(); self._running = True
-        log.info(f"{'='*60}")
-        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE v3.0 (FINAL FIX)")
-        log.info(f"{'='*60}")
+        log.info(f"{'='*50}")
+        log.info("BOT CARO EMBRYO - FULL_NAME + AVATAR v3.0")
+        log.info(f"{'='*50}")
         
         retry_count = 0
         while self.running:
             if time.time() - self.start_time > RUNTIME: break
+            
             was_in_table = self.in_table or self.is_playing
             self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
+            
             self.is_playing = False; self.pending_move = False
             self.in_table = False; self.ready = False
             self.board = Board(width=15, height=19); self.players.clear()
             self.bet_amts = []; self._resolved_bet_id = None
             self._bet_amts_loaded = False; self._joining_table = False
             self.opponent_gone_at = None; self._table_lost_at = None
+            
             if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
             
+            # Một lần đăng nhập mỗi chu kỳ để tránh giới hạn/brute-force.
             login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
             if not login_ok:
                 retry_count += 1
                 retry_delay = min(30 * (2 ** (retry_count - 1)), 300)
                 remaining = RUNTIME - (time.time() - self.start_time)
-                if remaining <= 0: break
+                if remaining <= 0:
+                    break
                 retry_delay = min(retry_delay, remaining)
                 log.warning(f'[BOT] Login thất bại; thử lại sau {retry_delay:.0f}s')
                 await asyncio.sleep(retry_delay)
                 continue
+
             retry_count = 0
             if IDENTITY_TEST_ONLY:
+                # Chế độ kiểm tra: cập nhật + xác minh hồ sơ, không kết nối
+                # WebSocket, không vào phòng, không đặt cược/chơi game.
                 remaining = RUNTIME - (time.time() - self.start_time)
-                if remaining > 0: await asyncio.sleep(remaining)
-                self.stop(); break
+                log.info(
+                    f'[TEST] Identity test only; không chạy game. '
+                    f'Chờ hết {max(0, remaining):.1f}s...')
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                self.stop()
+                break
+
             await self.run_ws()
-            if not (self.in_table or self.is_playing): self.table_id = None
+            
+            if not (self.in_table or self.is_playing):
+                self.table_id = None
+            
             self.save_stats()
             if self.ag: self.ag.stop(); self.ag = None
 
 def main():
     bin_path = auto_download_alphagomoku()
-    if bin_path: print(f"[SETUP] SQUIRREL24 ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No SQUIRREL24 - bot plays center only")
+    if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
+    else: print("[SETUP] No AlphaGomoku - bot plays center only")
+    
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
 
