@@ -92,6 +92,7 @@ class CaroBotTrain:
   self.players={};self.nickname="";self.token=0;self.cookie=""
   self.start_time=None;self.last_activity=time.time();self._running=True
   self.wins=0;self.losses=0;self.draws=0;self.table_id=None;self._moving=False
+  self._my_turn=False
   self.net=None;self.mcts_player=None;self.load_or_init_model()
  def load_or_init_model(self):
   if MODEL_PATH.exists():
@@ -102,7 +103,7 @@ class CaroBotTrain:
   else:log.info("[MODEL] No saved model, random weights");net_params=init_net_params(BOARD_WIDTH,BOARD_HEIGHT)
   self.net=PolicyValueNetNumpy(BOARD_WIDTH,BOARD_HEIGHT,net_params)
   self.mcts_player=MCTSPlayer(self.net.policy_value_fn,c_puct=MCTS_CPUCT,n_playout=MCTS_PLAYOUT,is_selfplay=0)
- def init_board_for_game(self):self.board.init_board();self.mcts_player.reset_player()
+ def init_board_for_game(self):self.board.init_board();self.mcts_player.reset_player();self._my_turn=False
  def bot_to_board_move(self,x,y):return y*self.board.width+x
  def get_ai_move(self)->Optional[Tuple[int,int]]:
   try:
@@ -157,6 +158,13 @@ class CaroBotTrain:
   if self.ws and data:
    try:await self.ws.send(data)
    except:pass
+ async def do_ai_move(self):
+  log.info("[TURN] My turn - thinking...")
+  ai=self.get_ai_move()
+  if ai:
+   ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax))
+   log.info(f"[MOVE] BOT ({ax},{ay})")
+   self._my_turn=False
  async def handle_message(self,raw:bytes):
   try:
    r=BinaryReader(raw);cmd=r.read_command()
@@ -181,17 +189,20 @@ class CaroBotTrain:
     self.init_board_for_game();self.is_playing=True;self.start_time=time.time()
    elif cmd=="SET_TURN":
     self.is_playing=True
+    # Only move if it's our turn (set after opponent's MOVE or first move)
+    # If no stones on board yet, gamevh will auto-place first stone
     if len(self.board.availables)<BOARD_WIDTH*BOARD_HEIGHT:
-     log.info("[TURN] My turn - thinking...")
-     ai=self.get_ai_move()
-     if ai:
-      ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax))
-      log.info(f"[MOVE] BOT ({ax},{ay})")
+     await self.do_ai_move()
    elif cmd=="MOVE":
     mt=r.u8();x=r.u8();y=r.u8();sym=r.u8()
     if sym!=self.my_symbol:
      self.apply_opponent_move(x,y);log.info(f"[MOVE] Opp ({x},{y})")
-    else:self.apply_my_move(x,y);self._moving=False;log.info(f"[MOVE] Me ({x},{y})")
+     # After opponent moves, it becomes our turn
+     self._my_turn=True
+    else:
+     self.apply_my_move(x,y);self._moving=False;log.info(f"[MOVE] Me ({x},{y})")
+     # After our move, not our turn anymore
+     self._my_turn=False
    elif cmd=="GAMEOVER":
     res=r.u8();r.read_utf();r.u8()
     if res==self.my_symbol:self.wins+=1;log.info(f"[WIN] W{self.wins}/L{self.losses}/D{self.draws}")
