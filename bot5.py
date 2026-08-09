@@ -56,7 +56,7 @@ ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 AG_BINARY = "pbrain-AlphaGomoku"
 AG_VERSION = "5.9.3"
 AG_DOWNLOAD_URL = "https://github.com/MaciejKozarzewski/AlphaGomoku/releases/download/v5.9.3/AlphaGomoku_linux.zip"
-AG_RULE = 8  # Caro rule (AlphaGomoku supports rule 8 natively)
+AG_RULE = 8  # Caro rule (Gomocup protocol: caro6)
 AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
@@ -90,7 +90,7 @@ def auto_download_alphagomoku() -> Optional[str]:
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
-        if "cuda" not in f.name and "opencl" not in f.name:
+        if "cuda" not in f.name.lower() and "opencl" not in f.name.lower():
             try:
                 f.chmod(0o755)
             except Exception: pass
@@ -102,7 +102,7 @@ def detect_ag_binary() -> Optional[str]:
         return str(f)
     return None
 
-# ======================== ALPHAGOMOKU ENGINE WRAPPER ========================
+# ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
     def __init__(self, timeout_turn=2000, board_size=15, rule=9):
         self.binary = detect_ag_binary()
