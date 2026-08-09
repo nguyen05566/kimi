@@ -29,19 +29,13 @@ jobs:
       - name: Download Embryo engine (Linux native)
         run: |
           mkdir -p alphagomoku-engine
-          if [ ! -f alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6 ]; then
+          ENGINE_BIN="alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6"
+          if [ ! -f "$ENGINE_BIN" ]; then
             echo "[SETUP] Downloading Embryo 1.2.0..."
-            curl -sL -H "User-Agent: Mozilla/5.0" \
-              "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2" \
-              -o /tmp/embryo.bz2
-            python3 -c "
-import bz2, shutil
-data = bz2.BZ2File('/tmp/embryo.bz2','rb').read()
-with open('alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6','wb') as f:
-    f.write(data)
-import os; os.remove('/tmp/embryo.bz2')
-"
-            chmod +x alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6
+            curl -sL -H "User-Agent: Mozilla/5.0" -o /tmp/embryo.bz2 "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
+            python3 -c "import bz2; data=bz2.BZ2File('/tmp/embryo.bz2','rb').read(); open('$ENGINE_BIN','wb').write(data)"
+            rm -f /tmp/embryo.bz2
+            chmod +x "$ENGINE_BIN"
             echo "[SETUP] Embryo 1.2.0 ready!"
           else
             echo "[SETUP] Engine already exists"
