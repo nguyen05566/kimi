@@ -61,6 +61,11 @@ class BinaryReader:
   bl=n*2
   if self.pos+bl>len(self.data):bl=len(self.data)-self.pos
   s=self.data[self.pos:self.pos+bl].decode('utf-16-be','replace');self.pos+=bl;return s
+ def read_bytes(self)->List[int]:
+  if self.pos+2>len(self.data):return[]
+  n=self.i16()
+  if self.pos+n>len(self.data):n=len(self.data)-self.pos
+  result=list(self.data[self.pos:self.pos+n]);self.pos+=n;return result
  def read_command(self)->str:
   first=self.i8()
   if first<0:
@@ -92,7 +97,6 @@ class CaroBotTrain:
   self.players={};self.nickname="";self.token=0;self.cookie=""
   self.start_time=None;self.last_activity=time.time();self._running=True
   self.wins=0;self.losses=0;self.draws=0;self.table_id=None;self._moving=False
-  self._my_turn=False
   self.net=None;self.mcts_player=None;self.load_or_init_model()
  def load_or_init_model(self):
   if MODEL_PATH.exists():
@@ -103,8 +107,9 @@ class CaroBotTrain:
   else:log.info("[MODEL] No saved model, random weights");net_params=init_net_params(BOARD_WIDTH,BOARD_HEIGHT)
   self.net=PolicyValueNetNumpy(BOARD_WIDTH,BOARD_HEIGHT,net_params)
   self.mcts_player=MCTSPlayer(self.net.policy_value_fn,c_puct=MCTS_CPUCT,n_playout=MCTS_PLAYOUT,is_selfplay=0)
- def init_board_for_game(self):self.board.init_board();self.mcts_player.reset_player();self._my_turn=False
+ def init_board_for_game(self):self.board.init_board();self.mcts_player.reset_player()
  def bot_to_board_move(self,x,y):return y*self.board.width+x
+ def pos_to_xy(self,pos:int)->tuple:return pos%self.board.width,pos//self.board.width
  def get_ai_move(self)->Optional[Tuple[int,int]]:
   try:
    if len(self.board.availables)<=1:return None
@@ -159,12 +164,12 @@ class CaroBotTrain:
    try:await self.ws.send(data)
    except:pass
  async def do_ai_move(self):
-  log.info("[TURN] My turn - thinking...")
+  log.info("[TURN] Thinking...")
   ai=self.get_ai_move()
   if ai:
-   ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax))
-   log.info(f"[MOVE] BOT ({ax},{ay})")
-   self._my_turn=False
+   ax,ay=ai;pos=ay*self.board.width+ax
+   self.apply_my_move(ax,ay);await self.send(self.make_play(pos))
+   log.info(f"[MOVE] BOT ({ax},{ay}) pos={pos}")
  async def handle_message(self,raw:bytes):
   try:
    r=BinaryReader(raw);cmd=r.read_command()
@@ -183,26 +188,42 @@ class CaroBotTrain:
    elif cmd=="PLAYER_ENTERED":r.i32();nick=r.read_utf();s=r.i16();log.info(f"[+] {nick} slot={s}")
    elif cmd=="PLAYER_EXITED":pid=r.i32();log.info(f"[-] {pid} left")
    elif cmd=="START_MATCH":
-    self.slot=r.i16();self.my_symbol=r.i16();bw=r.i16();bh=r.i16()
-    log.info(f"[MATCH] slot={self.slot} sym={self.my_symbol} {bw}x{bh}")
-    if bw!=self.board.width or bh!=self.board.height:self.board=Board(width=bw,height=bh,n_in_row=N_IN_ROW)
-    self.init_board_for_game();self.is_playing=True;self.start_time=time.time()
+    # Bot2 format: player_count(u8), skip, width(u8), height(u8), skip, board RLE
+    pc=r.u8()
+    for _ in range(pc):r.i8();r.i32()
+    bw=r.u8();bh=r.u8()
+    log.info(f"[MATCH] board={bw}x{bh}")
+    r.i16()
+    self.board=Board(width=bw,height=bh,n_in_row=N_IN_ROW)
+    self.init_board_for_game()
+    bd=r.read_bytes()
+    if bd:
+     fp=0
+     for v in bd:
+      sym=v-256 if v>127 else v
+      if sym>=0:
+       y,x=fp//bw,fp%bw
+       if 0<=x<bw and 0<=y<bh:
+        m=self.bot_to_board_move(x,y)
+        if m in self.board.availables:self.board.do_move(m)
+       fp+=1
+      else:fp+=-sym
+    self.is_playing=True;self.start_time=time.time()
+    log.info(f"[MATCH] {len(self.board.states)} existing stones")
    elif cmd=="SET_TURN":
+    sid=r.i8();r.i16();r.i16()
     self.is_playing=True
-    # Only move if it's our turn (set after opponent's MOVE or first move)
-    # If no stones on board yet, gamevh will auto-place first stone
-    if len(self.board.availables)<BOARD_WIDTH*BOARD_HEIGHT:
+    log.info(f"[TURN] slot={sid} my_slot={self.slot}")
+    if sid==self.slot and self.is_playing and not self._moving:
+     await asyncio.sleep(0.3)
      await self.do_ai_move()
    elif cmd=="MOVE":
-    mt=r.u8();x=r.u8();y=r.u8();sym=r.u8()
+    pos=r.i16();sym=r.i8()
+    x,y=pos%self.board.width,pos//self.board.width
     if sym!=self.my_symbol:
-     self.apply_opponent_move(x,y);log.info(f"[MOVE] Opp ({x},{y})")
-     # After opponent moves, it becomes our turn
-     self._my_turn=True
+     self.apply_opponent_move(x,y);log.info(f"[MOVE] Opp ({x},{y}) sym={sym}")
     else:
      self.apply_my_move(x,y);self._moving=False;log.info(f"[MOVE] Me ({x},{y})")
-     # After our move, not our turn anymore
-     self._my_turn=False
    elif cmd=="GAMEOVER":
     res=r.u8();r.read_utf();r.u8()
     if res==self.my_symbol:self.wins+=1;log.info(f"[WIN] W{self.wins}/L{self.losses}/D{self.draws}")
