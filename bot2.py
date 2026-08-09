@@ -200,6 +200,11 @@ class AlphaGomokuEngine:
             # EMBRYO26 Windows binary → dùng Wine
             wine_bin = shutil.which("wine64") or shutil.which("wine") or "wine"
             self._use_wine = True
+            # Set env cho Wine headless (CI không có display)
+            if "DISPLAY" not in os.environ:
+                os.environ["DISPLAY"] = ":99"
+            os.environ.setdefault("WINEDEBUG", "-all")
+            os.environ.setdefault("WINEPREFIX", os.path.join(str(ENGINE_DIR), ".wine"))
             return [wine_bin, self.binary]
         else:
             self._use_wine = False
@@ -236,7 +241,9 @@ class AlphaGomokuEngine:
             log.info(f"[AG] Starting: {' '.join(cmd)}{wine_str}")
             self.proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
+                stderr=subprocess.PIPE if self._use_wine else subprocess.DEVNULL,
+                cwd=str(ENGINE_DIR),
+                env={**os.environ}  # Pass full env (DISPLAY, WINEDEBUG, WINEPREFIX)
             )
             self._buffer = b""
             self.my_side = my_symbol
