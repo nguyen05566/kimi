@@ -181,11 +181,12 @@ class CaroBotTrain:
     self.init_board_for_game();self.is_playing=True;self.start_time=time.time()
    elif cmd=="SET_TURN":
     self.is_playing=True
-    log.info("[TURN] My turn - thinking...")
-    ai=self.get_ai_move()
-    if ai:
-     ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax))
-     log.info(f"[MOVE] BOT ({ax},{ay})")
+    if len(self.board.availables)<BOARD_WIDTH*BOARD_HEIGHT:
+     log.info("[TURN] My turn - thinking...")
+     ai=self.get_ai_move()
+     if ai:
+      ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax))
+      log.info(f"[MOVE] BOT ({ax},{ay})")
    elif cmd=="MOVE":
     mt=r.u8();x=r.u8();y=r.u8();sym=r.u8()
     if sym!=self.my_symbol:
