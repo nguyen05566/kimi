@@ -593,8 +593,8 @@ class CaroBot:
                         else: break
                     else:
                         blocked += 1; break
-            if count > 4 and blocked >= 2:
-                return False  # Rule 8: dãy >4 quân bị chặn 2 đầu
+            if count > 3 and blocked >= 2:
+                return False  # Rule 8: dãy 4+ quân bị chặn 2 đầu
         return True
 
     async def do_move(self):
