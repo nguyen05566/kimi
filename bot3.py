@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO JAX24 - NATIVE 15x19 + TACTICAL GUARD v4.1         ║
+║  BOT CARO JAX24 - NATIVE 15x19 + MOVE SYNC GUARD v4.2        ║
 ║  Engine: JAX24 StandardCaro via Wine                                   ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
@@ -641,7 +641,7 @@ class CaroBot:
         
         self.ag = None; self.ag_available = False
         self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
-        self._moving = False; self._last_move_xy = None
+        self._moving = False; self._last_move_xy = None; self._move_sent_at = None
         
         self.table_id = None
         self.player_slot_by_id = {}
@@ -749,8 +749,11 @@ class CaroBot:
             log.warning("[BOT] do_move đang chạy -> bỏ qua")
             return
         self._moving = True
-        self.pending_move = False
+        # Keep pending_move=True until the server echoes our MOVE. A table
+        # snapshot can arrive before that echo and still say it is our turn.
+        self.pending_move = True
         self._last_move_xy = None
+        self._move_sent_at = None
         try:
             start = time.time()
             x, y = -1, -1
@@ -826,9 +829,13 @@ class CaroBot:
             log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [JAX]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
+            self._move_sent_at = time.time()
             self.board.put(x, y, self.my_symbol)
         finally:
             self._moving = False
+            if self._last_move_xy is None:
+                self.pending_move = False
+                self._move_sent_at = None
 
     async def handle(self, raw: bytes):
         r = BinaryReader(raw)
@@ -946,6 +953,23 @@ class CaroBot:
             # safely reuse the previous MCTS tree after this snapshot.
             if self.ag:
                 self.ag.invalidate_sync()
+            if self.pending_move and self._last_move_xy is not None:
+                px, py = self._last_move_xy
+                if self.board.get(px, py) == self.my_symbol:
+                    log.info(
+                        f"[COORD] Snapshot confirmed sent move ({px},{py})")
+                    self.pending_move = False
+                    self._last_move_xy = None
+                    self._move_sent_at = None
+                elif current_player != self.slot and self._move_sent_at is not None:
+                    # Turn already advanced, therefore the move was processed;
+                    # wait no longer even if this snapshot omitted the echo.
+                    log.warning(
+                        f"[COORD] Turn advanced without matching MOVE echo; "
+                        f"clearing pending sent={self._last_move_xy}")
+                    self.pending_move = False
+                    self._last_move_xy = None
+                    self._move_sent_at = None
             
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
@@ -977,7 +1001,7 @@ class CaroBot:
 
     async def handle_start(self, r: BinaryReader):
         self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
-        self._moving = False; self._last_move_xy = None
+        self._moving = False; self._last_move_xy = None; self._move_sent_at = None
         self.opponent_gone_at = None
         
         player_count = r.u8()
@@ -1015,10 +1039,23 @@ class CaroBot:
             return
         x, y = self.board.pos_to_xy(pos)
         log.info(f"[BOARD] Server MOVE pos={pos} -> ({x},{y}) symbol={symbol}")
+
+        if symbol == self.my_symbol and self.pending_move and self._last_move_xy is not None:
+            sent_xy = self._last_move_xy
+            if sent_xy == (x, y):
+                log.info(f"[COORD] Server confirmed exact sent move {sent_xy}")
+            else:
+                log.error(
+                    f"[COORD] MISMATCH: sent={sent_xy}, server=({x},{y}), pos={pos}")
+                if self.ag:
+                    self.ag.invalidate_sync()
+            self.pending_move = False
+            self._last_move_xy = None
+            self._move_sent_at = None
+
         current = self.board.get(x, y)
         if current == symbol:
-            if symbol == self.my_symbol and self._last_move_xy is not None:
-                self._last_move_xy = None
+            pass
         elif current != EMPTY and current != symbol:
             # The server is authoritative. Repair the local cell, but never
             # change my_symbol here: the side is determined only by self.slot.
@@ -1040,10 +1077,12 @@ class CaroBot:
             if self._last_move_xy:
                 self.board.undo(*self._last_move_xy)
                 self._last_move_xy = None
+            self._move_sent_at = None
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
 
     async def handle_gameover(self, r: BinaryReader):
         self.is_playing = False; self.pending_move = False
+        self._last_move_xy = None; self._move_sent_at = None
         self.opponent_gone_at = None
         player_count = r.u8(); my_result = None
         for _ in range(player_count):
@@ -1068,6 +1107,7 @@ class CaroBot:
     async def handle_kick(self, r: BinaryReader):
         r.i8(); r.read_utf()
         self.is_playing = False; self.in_table = False; self.pending_move = False
+        self._last_move_xy = None; self._move_sent_at = None
         self.table_id = None
         await asyncio.sleep(1); await self.create_new_table()
 
@@ -1389,7 +1429,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO JAX24 - NATIVE 15x19 + TACTICAL GUARD v4.1")
+        log.info("BOT CARO JAX24 - NATIVE 15x19 + MOVE SYNC GUARD v4.2")
         log.info(f"{'='*50}")
         
         retry_count = 0
