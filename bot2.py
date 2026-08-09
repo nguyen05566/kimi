@@ -2,7 +2,8 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
-║  Engine: Embryo Caro6 v1.2.0                                   ║
+║  Engine: Embryo Caro6 v1.2.3 (EMBRYO26 - Gomocup 2026)        ║
+║  UPGRADE: embryo 1.2.0 → 1.2.3 (EMBRYO26)                      ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
 ║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
@@ -53,48 +54,89 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
-AG_VERSION = "1.2.0"
-AG_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
+# EMBRYO26 (v1.2.3) - Gomocup 2026
+# EMBRYO26.zip chỉ có Windows binary, cần Wine để chạy trên Linux
+AG_BINARY = "pbrain-embryo26.exe"           # EMBRYO26 Windows binary (chạy qua Wine)
+AG_BINARY_FALLBACK = "pbrain-embryo26_f.exe" # Bản nhẹ hơn (fast)
+AG_VERSION = "1.2.3"
+AG_DOWNLOAD_URL = "https://download.gomocup.com/ai/EMBRYO26.zip"
 AG_RULE = 8  # Freestyle Caro
 AG_TIMEOUT = 2000  # 2 giây
+AG_USE_WINE = True  # EMBRYO26 là Windows binary → cần Wine trên Linux
 
 def auto_download_alphagomoku() -> Optional[str]:
+    """Tải EMBRYO26 (Windows binary) và đảm bảo Wine sẵn sàng trên Linux."""
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
-        try:
-            binary_path.chmod(0o755)
-        except Exception: pass
+        print(f"[AG] EMBRYO26 binary found at {binary_path}")
         return str(binary_path)
-    print(f"[AG] Downloading Embryo {AG_VERSION}...")
+    
+    print(f"[AG] Downloading EMBRYO26 v{AG_VERSION} from Gomocup...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        archive = Path("/tmp/embryo.bz2")
+        archive = Path("/tmp/EMBRYO26.zip")
         urllib.request.urlretrieve(AG_DOWNLOAD_URL, archive)
-        import bz2
-        with bz2.BZ2File(archive, "rb") as f_in, open(binary_path, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+        import zipfile
+        with zipfile.ZipFile(archive, "r") as zf:
+            # Giải nén tất cả file .exe vào ENGINE_DIR
+            for member in zf.namelist():
+                if member.endswith('.exe'):
+                    zf.extract(member, ENGINE_DIR)
+                    extracted = ENGINE_DIR / member
+                    print(f"[AG] Extracted: {extracted}")
         archive.unlink(missing_ok=True)
-        try:
-            binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
+        
+        if binary_path.exists():
+            return str(binary_path)
+        else:
+            print(f"[AG] EMBRYO26.zip extracted but {AG_BINARY} not found!")
+            return None
     except Exception as e:
         print(f"[AG] Download failed: {e}")
         return None
 
+def ensure_wine_installed() -> bool:
+    """Kiểm tra và cài đặt Wine nếu cần (cho EMBRYO26 Windows binary)."""
+    wine_path = shutil.which("wine64") or shutil.which("wine")
+    if wine_path:
+        print(f"[WINE] Found: {wine_path}")
+        return True
+    print("[WINE] Not found. Installing wine...")
+    try:
+        # Thử cài wine qua apt
+        subprocess.run(
+            ["apt-get", "update", "-qq"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60
+        )
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "wine64", "wine"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180
+        )
+        wine_path = shutil.which("wine64") or shutil.which("wine")
+        if wine_path:
+            print(f"[WINE] Installed: {wine_path}")
+            # Khởi tạo wine prefix
+            subprocess.run(
+                ["wine64", "wineboot", "-u"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+            )
+            return True
+    except Exception as e:
+        print(f"[WINE] Install failed: {e}")
+    return False
+
 def detect_ag_binary() -> Optional[str]:
+    """Tìm EMBRYO26 binary. Ưu tiên bản chuẩn, fallback sang bản fast."""
     if not ENGINE_DIR.exists(): return None
-    for f in ENGINE_DIR.glob("pbrain-embryo*"):
-        try:
-            f.chmod(0o755)
-        except Exception: pass
+    # EMBRYO26: tìm file .exe (Windows binary chạy qua Wine)
+    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
         return str(f)
+    # Fallback: tìm bản cũ Linux
+    for f in ENGINE_DIR.glob("pbrain-embryo*"):
+        if f.suffix in ('.exe', ''):
+            return str(f)
     for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
         if "cuda" not in f.name and "opencl" not in f.name:
-            try:
-                f.chmod(0o755)
-            except Exception: pass
             return str(f)
     return None
 
@@ -110,6 +152,7 @@ class AlphaGomokuEngine:
         self._buffer = b""  # Bộ đệm nhị phân (bytes) để tránh lỗi unicode bị cắt đôi
         self.my_side = 1
         self._initialized = False
+        self._use_wine = False  # Sẽ được set khi start_game nếu binary là .exe
 
     def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
@@ -140,6 +183,19 @@ class AlphaGomokuEngine:
                     self._buffer += chunk
             except Exception: return ""
 
+    def _build_cmd(self) -> list:
+        """Xây dựng command line để chạy engine. Nếu binary là .exe → dùng Wine."""
+        if self.binary is None:
+            return []
+        if self.binary.endswith('.exe'):
+            # EMBRYO26 Windows binary → dùng Wine
+            wine_bin = shutil.which("wine64") or shutil.which("wine") or "wine"
+            self._use_wine = True
+            return [wine_bin, self.binary]
+        else:
+            self._use_wine = False
+            return [self.binary]
+
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
         if self.proc and self.proc.poll() is None:
@@ -160,24 +216,33 @@ class AlphaGomokuEngine:
 
         self.stop()
         if not self.binary: return False
+        
+        cmd = self._build_cmd()
+        if not cmd:
+            return False
+        
         try:
-            # Khởi tạo tiến trình AI ở chế độ Binary để xử lý đồng bộ chuẩn xác
+            # Khởi tạo tiến trình AI
+            wine_str = " (via Wine)" if self._use_wine else ""
+            log.info(f"[AG] Starting: {' '.join(cmd)}{wine_str}")
             self.proc = subprocess.Popen(
-                [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
             )
             self._buffer = b""
             self.my_side = my_symbol
             self._send(f"RECTSTART 15,19")
             for _ in range(10):
-                line = self._read_line(timeout=1.0)
-                if line.upper() == "OK": break
+                line = self._read_line(timeout=2.0)
+                if line.upper() == "OK":
+                    break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left 100000")
             self._send("INFO ponder 1")
-            time.sleep(0.2)
+            time.sleep(0.3)
             self._initialized = True
+            log.info(f"[AG] Engine started successfully{wine_str}")
             return True
         except Exception as e:
             log.error(f"[AG] Start error: {e}")
@@ -450,17 +515,39 @@ class CaroBot:
 
     def init_ag(self):
         if self.ag is not None: return self.ag_available
+        
+        # Kiểm tra Wine nếu binary là .exe (EMBRYO26)
         binary = detect_ag_binary()
-        if not binary: log.warning("[AG] No binary!"); self.ag_available = False; return False
+        if binary and binary.endswith('.exe'):
+            if not ensure_wine_installed():
+                log.warning("[AG] Wine not available, EMBRYO26 requires Wine!")
+                # Fallback: thử dùng binary Linux cũ nếu có
+                self.ag_available = False
+                return False
+        
+        if not binary:
+            # Thử auto-download
+            binary = auto_download_alphagomoku()
+        if not binary:
+            log.warning("[AG] No binary found!")
+            self.ag_available = False
+            return False
+        
         try:
             self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
+            self.ag.binary = binary  # Gán binary đã detect
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] OK! Rule={AG_RULE}")
-            else: self.ag_available = False; log.warning("[AG] Start failed!")
+                log.info(f"[AG] EMBRYO26 v{AG_VERSION} OK! Rule={AG_RULE}")
+            else:
+                self.ag_available = False
+                log.warning("[AG] Start failed!")
             return self.ag_available
-        except Exception as e: log.error(f"[AG] Init error: {e}"); self.ag_available = False; return False
+        except Exception as e:
+            log.error(f"[AG] Init error: {e}")
+            self.ag_available = False
+            return False
 
     @property
     def running(self) -> bool: return self._running
