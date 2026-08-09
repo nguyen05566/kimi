@@ -1,0 +1,23 @@
+name: BOTTRAIN-Play
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+env:
+  CARO_USER: ${{ secrets.CARO_USER }}
+  CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
+  CARO_RUNTIME_HOURS: '1.8'
+  MCTS_PLAYOUT: '200'
+jobs:
+  play-gamevh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install numpy websockets requests
+      - name: Run BOTTRAIN on gamevh
+        run: python3 bottrain.py
