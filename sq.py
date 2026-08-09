@@ -51,10 +51,10 @@ try:
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "AlphaGomoku-engine"
-AG_BINARY = "pbrain-AlphaGomoku.exe"
+ENGINE_DIR = _BASE_DIR / "katagomo-engine"
+AG_BINARY = "pbrain-katagomo_caro-15.exe"
 AG_VERSION = "2024"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
 AG_RULE = 8
 AG_TIMEOUT = 2000
 
@@ -73,7 +73,7 @@ def auto_download_alphagomoku() -> Optional[str]:
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/ALPHAGOMOKU.MK26.zip")
+        archive = Path("/tmp/KATAGOMO26.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -92,7 +92,7 @@ def auto_download_alphagomoku() -> Optional[str]:
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     # Hỗ trợ nhiều pattern như bot2 (phòng zip giải nén khác tên/thư mục con)
-    for pattern in ["pbrain-AlphaGomoku.exe", "pbrain-AlphaGomoku*"]:
+    for pattern in ["pbrain-katagomo_caro-15.exe", "pbrain-katagomo_caro-15*"]:
         for f in ENGINE_DIR.glob(pattern):
             if f.is_file():
                 try: f.chmod(0o755)
@@ -316,7 +316,7 @@ class SquirrelProxyEngine:
                 self._send("BEGIN")
                 
                 for _ in range(300):
-                    line = self._read_line(timeout=0.1)
+                    line = self._read_line(timeout=0.5)
                     if not line: continue
                     if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                         log.info(f"[ENGINE] {line}")
@@ -380,7 +380,7 @@ class SquirrelProxyEngine:
             
             # ═══ ĐỌC PHẢN HỒI ═══
             for _ in range(300):
-                line = self._read_line(timeout=0.1)
+                line = self._read_line(timeout=0.5)
                 if not line: continue
                 if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                     log.info(f"[ENGINE] {line}")
