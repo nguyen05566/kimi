@@ -1,43 +1,9 @@
-name: BOTTRAIN
+# DEPRECATED - replaced by bottrain-train.yml and bottrain-play.yml
+name: BOTTRAIN (old)
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
-env:
-  CARO_USER: ${{ secrets.CARO_USER }}
-  CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
-  CARO_RUNTIME_HOURS: '5.5'
-  MCTS_PLAYOUT: '200'
-  TRAIN_GAMES: '30'
-  TRAIN_PLAYOUT: '200'
 jobs:
-  train-model:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install deps
-        run: pip install numpy websockets requests
-      - name: Train model via self-play
-        run: python3 train_bottrain.py
-      - name: Commit & push trained model
-        run: |
-          git config user.name "bottrain-bot"
-          git config user.email "bottrain@caro.ai"
-          git add bottrain_model.npy bottrain_data/
-          git diff --staged --quiet || (git commit -m "[bottrain] Auto-train: $(date +%Y-%m-%d_%H:%M)" && git push)
-  play-gamevh:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install deps
-        run: pip install numpy websockets requests
-      - name: Run BOTTRAIN on gamevh
-        run: python3 bottrain.py
+      - run: echo "Use bottrain-train.yml or bottrain-play.yml instead"
