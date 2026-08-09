@@ -1,0 +1,27 @@
+name: BOTTRAIN-Train
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+env:
+  TRAIN_GAMES: '30'
+  TRAIN_PLAYOUT: '200'
+jobs:
+  train-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install numpy
+      - name: Train model via self-play
+        run: python3 train_bottrain.py
+      - name: Commit & push model
+        run: |
+          git config user.name "bottrain-bot"
+          git config user.email "bottrain@caro.ai"
+          git add bottrain_model.npy bottrain_data/
+          git diff --staged --quiet || (git commit -m "[bottrain] Train: $(date +%Y-%m-%d_%H:%M)" && git push)
