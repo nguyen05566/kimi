@@ -23,23 +23,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Wine (for Embryo 2025 Windows exe)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wine wine32 wine64 xvfb 2>/dev/null || echo "Wine partial install, continuing..."
+          wine --version || echo "Wine not found but continuing"
+
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
-
-      - name: Download Embryo engine (Linux native)
-        run: |
-          mkdir -p alphagomoku-engine
-          ENGINE_BIN="alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6"
-          if [ ! -f "$ENGINE_BIN" ]; then
-            echo "[SETUP] Downloading Embryo 1.2.0..."
-            curl -sL -H "User-Agent: Mozilla/5.0" -o /tmp/embryo.bz2 "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
-            python3 -c "import bz2; data=bz2.BZ2File('/tmp/embryo.bz2','rb').read(); open('$ENGINE_BIN','wb').write(data)"
-            rm -f /tmp/embryo.bz2
-            chmod +x "$ENGINE_BIN"
-            echo "[SETUP] Embryo 1.2.0 ready!"
-          else
-            echo "[SETUP] Engine already exists"
-          fi
 
       - name: Run Caro Bot
         env:
