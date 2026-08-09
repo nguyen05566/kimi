@@ -1,1 +1,30 @@
-bmFtZTogQk9UVFJBSU4tUGxheQ0Kb246DQogIHdvcmtmbG93X3J1bjoNCiAgICB3b3JrZmxvd3M6IFtCT1RUUkFJTi1UcmFpbl0NCiAgICB0eXBlczogW2NvbXBsZXRlZF0NCiAgd29ya2Zsb3dfZGlzcGF0Y2g6DQplbnY6DQogIENBUk9fVVNFUjogJHsgeyBzZWNyZXRzLkNBUk9fVVNFUiB9fQ0KICBDQVJPX1BBU1NXRDogJHsgeyBzZWNyZXRzLkNBUk9fUEFTU1dEIH19DQogIENBUk9fUlVOVElNRV9IT1VSUzogJzInDQogIE1DVFNfUExBWU9VVDogJzIwMCcNCmpvYnM6DQogIHBsYXktZ2FtZXZoOg0KICAgIGlmOiAk{{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}DQogICAgcnVucy1vbjogdWJ1bnR1LWxhdGVzdA0KICAgIHRpbWVvdXQtbWludXRlczogMTMwDQogICAgc3RlcHM6DQogICAgICAtIHVzZXM6IGFjdGlvbnMvY2hlY2tvdXRAdjQNCiAgICAgIC0gdXNlczogYWN0aW9ucy9zZXR1cC1weXRob25AdjUNCiAgICAgICAgd2l0aDoNCiAgICAgICAgICBweXRob24tdmVyc2lvbjogJzMuMTEnDQogICAgICAtIG5hbWU6IEluc3RhbGwgZGVwcw0KICAgICAgICBydW46IHBpcCBpbnN0YWxsIG51bXB5IHdlYnNvY2tldHMgcmVxdWVzdHMNCiAgICAgIC0gbmFtZTogUnVuIEJPVFRSQUlOIG9uIGdhbWV2aA0KICAgICAgICBydW46IHB5dGhvbjMgYm90dHJhaW4ucHk=
+name: BOTTRAIN-Play
+
+on:
+  workflow_run:
+    workflows:
+      - BOTTRAIN-Train
+    types:
+      - completed
+  workflow_dispatch:
+
+env:
+  CARO_USER: ${{ secrets.CARO_USER }}
+  CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
+  CARO_RUNTIME_HOURS: '2'
+  MCTS_PLAYOUT: '200'
+
+jobs:
+  play-gamevh:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install numpy websockets requests
+      - name: Run BOTTRAIN on gamevh
+        run: python3 bottrain.py
