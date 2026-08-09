@@ -3,50 +3,46 @@
 import numpy as np, copy
 def softmax(x): probs=np.exp(x-np.max(x)); probs/=np.sum(probs); return probs
 class TreeNode:
-    def __init__(self,parent,prior_p): self._parent=parent; self._children={}; self._n_visits=0; self._Q=0; self._u=0; self._P=prior_p
-    def expand(self,priors):
-        for a,prob in priors:
-            if a not in self._children: self._children[a]=TreeNode(self,prob)
-    def select(self,cp): return max(self._children.items(),key=lambda x:x[1].get_value(cp))
-    def update(self,lv): self._n_visits+=1; self._Q+=1.0*(lv-self._Q)/self._n_visits
-    def update_recursive(self,lv):
-        if self._parent: self._parent.update_recursive(-lv)
-        self.update(lv)
-    def get_value(self,cp): self._u=cp*self._P*np.sqrt(self._parent._n_visits)/(1+self._n_visits); return self._Q+self._u
-    def is_leaf(self): return self._children=={}
-    def is_root(self): return self._parent is None
+    def __init__(s,p,pr): s._p=p; s._c={}; s._nv=0; s._Q=0; s._u=0; s._P=pr
+    def expand(s,ap):
+        for a,pr in ap:
+            if a not in s._c: s._c[a]=TreeNode(s,pr)
+    def select(s,cpu): return max(s._c.items(),key=lambda x:x[1].gv(cpu))
+    def update(s,lv): s._nv+=1; s._Q+=1.0*(lv-s._Q)/s._nv
+    def urec(s,lv):
+        if s._p: s._p.urec(-lv)
+        s.update(lv)
+    def gv(s,cpu): s._u=cpu*s._P*np.sqrt(s._p._nv)/(1+s._nv); return s._Q+s._u
+    def il(s): return s._c=={}
+    def ir(s): return s._p is None
 class MCTS:
-    def __init__(self,pvf,cp=5,n_playout=400): self._root=TreeNode(None,1.0); self._policy=pvf; self._cp=cp; self._np=n_playout
-    def _playout(self,state):
-        node=self._root
-        while True:
-            if node.is_leaf(): break
-            action,node=node.select(self._cp); state.do_move(action)
-        ap,lv=self._policy(state); end,winner=state.game_end()
-        if not end: node.expand(ap)
-        else: lv=0.0 if winner==-1 else (1.0 if winner==state.get_current_player() else -1.0)
-        node.update_recursive(-lv)
-    def get_move_probs(self,state,temp=1e-3):
-        for _ in range(self._np):
-            sc=copy.deepcopy(state); self._playout(sc)
-        av=[(a,n._n_visits)for a,n in self._root._children.items()]
-        acts,visits=zip(*av); ap=softmax(1.0/temp*np.log(np.array(visits)+1e-10)); return acts,ap
-    def update_with_move(self,lm):
-        if lm in self._root._children: self._root=self._root._children[lm]; self._root._parent=None
-        else: self._root=TreeNode(None,1.0)
+    def __init__(s,pvf,cpu=5,np_val=400): s._rt=TreeNode(None,1.0); s._pol=pvf; s._cpu=cpu; s._np=np_val
+    def _po(s,st):
+        n=s._rt
+        while not n.il(): a,n=n.select(s._cpu); st.dm(a)
+        ap,lv=s._pol(st); end,wr=st.ge()
+        if not end: n.expand(ap)
+        else: lv=0.0 if wr==-1 else(1.0 if wr==st.gcp() else-1.0)
+        n.urec(-lv)
+    def gmp(s,st,t=1e-3):
+        for _ in range(s._np): sc=copy.deepcopy(st); s._po(sc)
+        av=[(a,nd._nv)for a,nd in s._rt._c.items()]
+        ac,vs=zip(*av); ap=softmax(1.0/t*np.log(np.array(vs)+1e-10)); return ac,ap
+    def uwm(s,lm):
+        if lm in s._rt._c: s._rt=s._rt._c[lm]; s._rt._p=None
+        else: s._rt=TreeNode(None,1.0)
 class MCTSPlayer:
-    def __init__(self,pvf,cp=5,n_playout=400,is_selfplay=0):
-        self.mcts=MCTS(pvf,cp,n_playout); self._sp=is_selfplay
-    def set_player_ind(self,p): self.player=p
-    def reset_player(self): self.mcts.update_with_move(-1)
-    def get_action(self,board,temp=1e-3,return_prob=0):
-        moves=board.availables; mp=np.zeros(board.width*board.height)
-        if len(moves)>0:
-            acts,probs=self.mcts.get_move_probs(board,temp); mp[list(acts)]=probs
-            if self._sp:
-                move=np.random.choice(acts,p=0.75*probs+0.25*np.random.dirichlet(0.3*np.ones(len(probs))))
-                self.mcts.update_with_move(move)
-            else: move=np.random.choice(acts,p=probs); self.mcts.update_with_move(-1)
-            return(move,mp)if return_prob else move
-        return-1
-    def __str__(self): return"MCTS {}".format(self.player)
+    def __init__(s,pvf,c_puct=5,n_playout=400,is_selfplay=0):
+        s.mcts=MCTS(pvf,c_puct,n_playout); s._sp=is_selfplay
+    def set_player_ind(s,p): s.player=p
+    def rp(s): s.mcts.uwm(-1)
+    def get_action(s,board,temp=1e-3,return_prob=0):
+        mv=board.av; mp=np.zeros(board.width*board.height)
+        if len(mv)>0:
+            ac,pr=s.mcts.gmp(board,temp); mp[list(ac)]=pr
+            if s._sp:
+                m=np.random.choice(ac,p=0.75*pr+0.25*np.random.dirichlet(0.3*np.ones(len(pr))))
+                s.mcts.uwm(m)
+            else: m=np.random.choice(ac,p=pr); s.mcts.uwm(-1)
+            return(m,mp)if return_prob else m
+        return -1
