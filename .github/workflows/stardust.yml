@@ -1,0 +1,59 @@
+name: Caro Bot STARDUST 15x19
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.9'
+        type: string
+  schedule:
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: caro-bot-gamevh-account
+  cancel-in-progress: false
+
+jobs:
+  run-bot-stardust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 370
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Wine (for Stardust Windows exe)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wine wine32 wine64 xvfb 2>/dev/null || echo "Wine partial install, continuing..."
+          wine --version || echo "Wine not found but continuing"
+
+      - name: Install Python dependencies
+        run: pip install websockets requests --break-system-packages
+
+      - name: Run STARDUST Caro Bot
+        env:
+          CARO_USER: ${{ secrets.CARO_USER }}
+          CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
+          CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
+        run: python3 STARDUST.py
+
+      - name: Show match statistics
+        if: always()
+        run: |
+          if [ -f /tmp/caro_ag_stats.json ]; then
+            cat /tmp/caro_ag_stats.json
+          else
+            echo "No statistics file was produced."
+          fi
