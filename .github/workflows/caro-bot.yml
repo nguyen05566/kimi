@@ -23,26 +23,33 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Setup Wine + Xvfb (for EMBRYO26)
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wine64 wine32 xvfb
-          # Start virtual display
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1024x768x16 &
-          sleep 1
-          wine64 --version || wine --version || echo "[WARN] Wine unavailable"
-
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot (EMBRYO26 via Wine)
+      - name: Download Embryo engine (Linux native)
+        run: |
+          mkdir -p alphagomoku-engine
+          if [ ! -f alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6 ]; then
+            echo "[SETUP] Downloading Embryo 1.2.0..."
+            curl -sL -H "User-Agent: Mozilla/5.0" \
+              "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2" \
+              -o /tmp/embryo.bz2
+            python3 -c "
+import bz2, shutil
+data = bz2.BZ2File('/tmp/embryo.bz2','rb').read()
+with open('alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6','wb') as f:
+    f.write(data)
+import os; os.remove('/tmp/embryo.bz2')
+"
+            chmod +x alphagomoku-engine/pbrain-embryo-1.2.0-6f650fab-c6
+            echo "[SETUP] Embryo 1.2.0 ready!"
+          else
+            echo "[SETUP] Engine already exists"
+          fi
+
+      - name: Run Caro Bot
         env:
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
-          DISPLAY: ':99'
-          WINEDEBUG: '-all'
-          WINEPREFIX: '/tmp/.wine'
         run: python3 bot2.py
