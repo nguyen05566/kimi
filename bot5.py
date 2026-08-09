@@ -1271,7 +1271,10 @@ class CaroBot:
             if self.ag: self.ag.stop(); self.ag = None
 
 def main():
-    bin_path = auto_download_alphagomoku()
+    # Pre-download engines
+            p = detect_primary_binary() or auto_download_engine(AG_PRIMARY_BINARY, AG_PRIMARY_DOWNLOAD_URL, fmt="zip")
+            f = detect_fallback_binary() or auto_download_engine(AG_FALLBACK_BINARY, AG_FALLBACK_DOWNLOAD_URL, fmt="bz2")
+            log.info(f"[PREP] Primary: {'OK' if p else 'FAIL'} | Fallback: {'OK' if f else 'FAIL'}")
     if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
     else: print("[SETUP] No AlphaGomoku - bot plays center only")
     
