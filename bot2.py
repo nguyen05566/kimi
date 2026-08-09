@@ -75,7 +75,12 @@ def auto_download_alphagomoku() -> Optional[str]:
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         archive = Path("/tmp/EMBRYO26.zip")
-        urllib.request.urlretrieve(AG_DOWNLOAD_URL, archive)
+        # Cần User-Agent để tránh 403 Forbidden từ Cloudflare
+        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            archive.write_bytes(resp.read())
         import zipfile
         with zipfile.ZipFile(archive, "r") as zf:
             # Giải nén tất cả file .exe vào ENGINE_DIR
@@ -101,28 +106,32 @@ def ensure_wine_installed() -> bool:
     if wine_path:
         print(f"[WINE] Found: {wine_path}")
         return True
-    print("[WINE] Not found. Installing wine...")
+    print("[WINE] Not found. Trying to install...")
     try:
-        # Thử cài wine qua apt
+        # Thử apt (Ubuntu/Debian)
         subprocess.run(
             ["apt-get", "update", "-qq"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60
         )
         subprocess.run(
             ["apt-get", "install", "-y", "-qq", "wine64", "wine"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300
         )
-        wine_path = shutil.which("wine64") or shutil.which("wine")
-        if wine_path:
-            print(f"[WINE] Installed: {wine_path}")
-            # Khởi tạo wine prefix
+    except Exception:
+        pass
+    wine_path = shutil.which("wine64") or shutil.which("wine")
+    if wine_path:
+        print(f"[WINE] Installed: {wine_path}")
+        # Khởi tạo wine prefix (bỏ qua lỗi nếu không cần)
+        try:
             subprocess.run(
-                ["wine64", "wineboot", "-u"],
+                [wine_path, "wineboot", "-u"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
             )
-            return True
-    except Exception as e:
-        print(f"[WINE] Install failed: {e}")
+        except Exception:
+            pass
+        return True
+    print("[WINE] Could not install Wine. EMBRYO26 requires Wine!")
     return False
 
 def detect_ag_binary() -> Optional[str]:
