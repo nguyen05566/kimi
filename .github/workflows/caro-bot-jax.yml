@@ -1,6 +1,9 @@
 name: Caro Bot JAX24 Native 15x19
 
 on:
+  push:
+    paths:
+      - ".github/CANCEL_JAX_RUN"
   workflow_dispatch:
     inputs:
       runtime_hours:
@@ -22,7 +25,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  cancel-current-run:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Cancellation trigger completed."
+
   run-bot-jax24:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 370
 
