@@ -2,7 +2,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
-║  Engine: Embryo Caro6 v1.2.0 (Linux Native)                    ║
+║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                    ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
 ║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
