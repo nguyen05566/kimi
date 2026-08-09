@@ -52,9 +52,9 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "AlphaGomoku-engine"
-AG_BINARY = "pbrain-squirrel.exe"
+AG_BINARY = "pbrain-AlphaGomoku.exe"
 AG_VERSION = "2024"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
 AG_RULE = 8
 AG_TIMEOUT = 2000
 
