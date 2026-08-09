@@ -59,7 +59,7 @@ AG_BINARY = "pbrain-rapfi-linux-clang-avx2"
 AG_VERSION = "2025-06-15"
 AG_DOWNLOAD_URL = "https://github.com/dhbloo/rapfi/releases/download/250615/Rapfi-engine.7z"
 
-AG_RULE = 1  # Rapfi: rule 1 = Freestyle
+AG_RULE = 1  # Rapfi: rule 1 = Freestyle (chặn 2 đầu xử lý Python-side)
 AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_engine(binary_name: str, download_url: str, fmt: str = "bz2") -> Optional[str]:
