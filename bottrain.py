@@ -17,12 +17,12 @@ for pkg in REQUIRED:
 import websockets,requests,numpy as np
 
 try:
-    from game_15x19 import Board as GBoard
+    from game_15x19 import Board
     from policy_value_net import PolicyValueNetNumpy,init_net_params
     from mcts import MCTSPlayer
 except ImportError:
     sys.path.insert(0,str(Path(__file__).parent))
-    from game_15x19 import Board as GBoard
+    from game_15x19 import Board
     from policy_value_net import PolicyValueNetNumpy,init_net_params
     from mcts import MCTSPlayer
 
@@ -64,11 +64,6 @@ class BR:
         bl=n*2
         if s.p+bl>len(s.d):bl=len(s.d)-s.p
         r=s.d[s.p:s.p+bl].decode('utf-16-be','replace');s.p+=bl;return r
-    def rbytes(s):
-        if s.p+2>len(s.d):return[]
-        n=s.i16()
-        if s.p+n>len(s.d):n=len(s.d)-s.p
-        r=list(s.d[s.p:s.p+n]);s.p+=n;return r
     def rcmd(s):
         f=s.i16()
         if f<0:
@@ -88,7 +83,7 @@ class BW:
 
 class CaroBotTrain:
     def __init__(s):
-        s.ws=None;s.board=GBoard(width=BW,height=BH,n_in_row=N_ROW)
+        s.ws=None;s.board=Board(width=BW,height=BH,n_in_row=N_ROW)
         s.slot=-1;s.my_symbol=CROSS;s.is_playing=False;s.in_table=False
         s.players={};s.nickname="";s.token=0;s.cookie=""
         s.start_time=None;s.last_activity=time.time();s._running=True
@@ -96,7 +91,7 @@ class CaroBotTrain:
         s.net=None;s.mcts_player=None;s.load_model()
     def load_model(s):
         if MODEL_PATH.exists():
-            try:params=np.load(MODEL_PATH,allow_pickle=True);log.info(f"[MODEL]Loaded")
+            try:params=np.load(MODEL_PATH,allow_pickle=True);log.info("[MODEL]Loaded")
             except:log.warning("[MODEL]Failed,init new");params=init_net_params(BW,BH)
         else:log.info("[MODEL]No model,init random");params=init_net_params(BW,BH)
         s.net=PolicyValueNetNumpy(BW,BH,params)
@@ -125,7 +120,7 @@ class CaroBotTrain:
             r2=session.post("https://gamevh.net/api/signin",json={"username":USER,"password":PASSWD},headers=hd,timeout=15)
             if r2.status_code!=200:log.error(f"[LOGIN]POST failed:{r2.status_code}");return False
             d=r2.json();s.token=d.get("token",0);s.nickname=d.get("displayName",d.get("username","BOTTRAIN"))
-            log.info(f"[LOGIN]OK-{s.nickname}(token={s.token})");return True
+            log.info(f"[LOGIN]OK-{s.nickname}(t={s.token})");return True
         except Exception as e:log.error(f"[LOGIN]Error:{e}");return False
     def _bmsg(s,cmd,flds):
         w=BW();w.i16(len(cmd));w.pt.append(cmd.encode('ascii'))
@@ -161,15 +156,15 @@ class CaroBotTrain:
                 n=r.i16();amts=[r.i32()for _ in range(n)]
                 if amts and s.table_id is not None:await s.send_bet()
             elif cmd in("GET_TABLE_DATA","GET_TABLE_DATA_EX"):
-                s.table_id=r.i32();name=r.rascii();nc=r.i16()
+                s.table_id=r.i32();r.rascii();nc=r.i16()
                 for _ in range(nc):r.i32();r.i16();r.i16();r.i16();r.rascii()
                 if not s.in_table and s.table_id:await s.send_join(s.table_id)
-            elif cmd=="PLAYER_ENTERED":log.info(f"[PLAYER]{r.rascii()}joined");r.i32()
-            elif cmd=="PLAYER_EXITED":log.info(f"[PLAYER]{r.i32()}left")
+            elif cmd=="PLAYER_ENTERED":r.i32();log.info(f"[PLAYER]{r.rascii()}joined")
+            elif cmd=="PLAYER_EXITED":r.i32();log.info("[PLAYER]left")
             elif cmd=="START_MATCH":
                 s.slot=r.i16();s.my_symbol=r.i16();bw2=r.i16();bh2=r.i16()
-                log.info(f"[MATCH]START slot={s.slot}sym={s.my_symbol}board={bw2}x{bh2}")
-                if bw2!=s.board.width or bh2!=s.board.height:s.board=GBoard(width=bw2,height=bh2,n_in_row=N_ROW)
+                log.info(f"[MATCH]START slot={s.slot}sym={s.my_symbol}{bw2}x{bh2}")
+                if bw2!=s.board.width or bh2!=s.board.height:s.board=Board(width=bw2,height=bh2,n_in_row=N_ROW)
                 s.init_board();s.is_playing=True;s.start_time=time.time()
             elif cmd=="SET_TURN":s.is_playing=True
             elif cmd=="MOVE":
@@ -184,8 +179,8 @@ class CaroBotTrain:
             elif cmd=="GAMEOVER":
                 rs=r.u8();r.rascii();r.u8()
                 if rs==s.my_symbol:s.wins+=1;log.info(f"[GAMEOVER]WIN!(W:{s.wins}L:{s.losses}D:{s.draws})")
-                elif rs==-1:s.draws+=1;log.info(f"[GAMEOVER]DRAW")
-                else:s.losses+=1;log.info(f"[GAMEOVER]LOSS")
+                elif rs==-1:s.draws+=1;log.info("[GAMEOVER]DRAW")
+                else:s.losses+=1;log.info("[GAMEOVER]LOSS")
                 s.is_playing=False;s._moving=False
             elif cmd in("SURRENDER","RETREAT"):s.is_playing=False;s._moving=False
         except Exception as e:log.error(f"[MSG]Error:{e}")
