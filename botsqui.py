@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO SQUIRREL24 - FIXED PROXY ENGINE v2.0                  ║
-║  Engine: SQUIRREL24 (Gomocup) via Sliding Window Proxy          ║
-║  FIX: Corrected symbol mapping (CIRCLE/CROSS → BLACK/WHITE)     ║
-║  FIX: Fixed EMPTY initialization (-1 instead of 0)              ║
-║  FIX: Added debug logging for coordinate tracking               ║
+║  BOT CARO SQUIRREL24 - PROXY ENGINE v3.0 (FINAL FIX)            ║
+║  FIX: Luôn gửi FULL BOARD, không dùng TURN                      ║
+║  FIX: Thêm lệnh BEGIN khi đi trước                              ║
+║  FIX: Symbol mapping đúng 100%                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -54,17 +53,13 @@ ENGINE_DIR = _BASE_DIR / "squirrel24-engine"
 AG_BINARY = "pbrain-squirrel.exe"
 AG_VERSION = "2024"
 AG_DOWNLOAD_URL = "https://download.gomocup.com/ai/SQUIRREL24.zip"
-AG_RULE = 8      # Freestyle Caro (Rule 8)
-AG_TIMEOUT = 2000 # 2 seconds
+AG_RULE = 8
+AG_TIMEOUT = 2000
 
 # ======================== CONSTANTS ========================
 EMPTY = -1
 CIRCLE = 0
 CROSS = 1
-
-# Gomocup protocol symbols (ENGINE uses 1=black, 2=white)
-ENGINE_SYMBOL_BLACK = 1
-ENGINE_SYMBOL_WHITE = 2
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
@@ -101,61 +96,47 @@ def detect_ag_binary() -> Optional[str]:
     return None
 
 # ═══════════════════════════════════════════════════════════════════════
-#  FIXED SQUIRREL PROXY ENGINE - Corrected Symbol & Coordinate Logic
+#  SQUIRREL PROXY ENGINE v3.0 - ALWAYS FULL BOARD, NO TURN
 # ═══════════════════════════════════════════════════════════════════════
 class SquirrelProxyEngine:
     """
-    Proxy Engine: Dịch bàn cờ 15×19 của game thành 15×15 cho SQUIRREL24.
-    FIX: Correct symbol mapping, EMPTY handling, debug logging.
+    Proxy Engine v3.0:
+    - LUÔN gửi FULL BOARD (không dùng TURN) để tránh mất đồng bộ
+    - Gửi BEGIN khi bàn trống (bot đi trước)
+    - Symbol mapping: my_stones=1, opponent_stones=2
     """
     VIRTUAL_WIDTH = 15
     VIRTUAL_HEIGHT = 19
-    ENGINE_WIDTH = 15
-    ENGINE_HEIGHT = 15
-    MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_HEIGHT  # = 4
+    ENGINE_SIZE = 15
+    MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_SIZE  # = 4
 
     def __init__(self, timeout_turn: int = 2000, rule: int = 8):
         self.binary = None
         self.timeout_turn = timeout_turn
         self.rule = rule
         
-        # Virtual board (15×19) - KHỞI TẠO VỚI EMPTY (-1), KHÔNG PHẢI 0
-        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
-        self.move_history: List[Tuple[int, int, int]] = []
-        
-        # Sliding window
-        self.window_y_offset = 0
-        self._last_offset = 0
-        
-        # Engine process
         self.proc: Optional[subprocess.Popen] = None
         self.lock = threading.Lock()
         self._buffer = b""
         self._initialized = False
-        
-        # Tracking
-        self.my_side = CROSS  # 1 = CROSS (X), 0 = CIRCLE (O)
-        self._synced = False
-        self._expected_history_len = -1
-        
-        # Debug
+        self.my_side = CROSS
         self.debug = os.environ.get("CARO_DEBUG") == "1"
 
-    def _log_debug(self, msg: str):
+    def _log(self, msg: str):
         if self.debug:
-            log.info(f"[PROXY DEBUG] {msg}")
+            log.info(f"[PROXY] {msg}")
 
-    def _send_to_engine(self, cmd: str):
+    def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
                 if self.debug:
-                    log.debug(f"[SEND -> ENGINE] {cmd}")
+                    log.debug(f"[SEND] {cmd}")
             except Exception as e:
                 log.error(f"Send error: {e}")
 
-    def _read_from_engine(self, timeout: float = 10.0) -> str:
+    def _read_line(self, timeout: float = 10.0) -> str:
         if not self.proc or self.proc.poll() is not None:
             return ""
         deadline = time.monotonic() + timeout
@@ -166,7 +147,7 @@ class SquirrelProxyEngine:
                 self._buffer = self._buffer[idx + 1:]
                 line = line_bytes.decode("utf-8", errors="replace")
                 if self.debug:
-                    log.debug(f"[RECV <- ENGINE] {line}")
+                    log.debug(f"[RECV] {line}")
                 return line
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -192,28 +173,27 @@ class SquirrelProxyEngine:
         try:
             is_exe = self.binary.lower().endswith('.exe')
             cmd = ["wine", self.binary] if is_exe else [self.binary]
-            log.info(f"[PROXY] Starting engine: {' '.join(cmd)}")
+            log.info(f"[PROXY] Starting: {' '.join(cmd)}")
             self.proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 cwd=os.path.dirname(self.binary) or "."
             )
             self._buffer = b""
             
-            self._send_to_engine("START 15")
+            # Khởi động engine với bàn 15x15
+            self._send("START 15")
             for _ in range(10):
-                line = self._read_from_engine(timeout=2.0)
+                line = self._read_line(timeout=2.0)
                 if line.upper() == "OK":
-                    log.info("[PROXY] ✓ Engine started (15x15 mode)")
+                    log.info("[PROXY] ✓ Engine START OK")
                     break
             else:
-                log.warning("[PROXY] ⚠ Engine did not respond OK to START")
+                log.warning("[PROXY] ⚠ No OK response to START")
             
-            self._send_to_engine(f"INFO rule {self.rule}")
-            self._send_to_engine(f"INFO timeout_turn {self.timeout_turn}")
-            self._send_to_engine("INFO ponder 1")
+            self._send(f"INFO rule {self.rule}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO ponder 1")
             time.sleep(0.3)
             self._initialized = True
             return True
@@ -222,23 +202,17 @@ class SquirrelProxyEngine:
             return False
 
     def start_game(self, my_symbol: int = CROSS) -> bool:
-        """Khởi tạo ván mới. my_symbol: CROSS (1) hoặc CIRCLE (0)"""
-        self._synced = False
-        # KHỞI TẠO VỚI EMPTY, KHÔNG PHẢI 0
-        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
-        self.move_history.clear()
-        self.window_y_offset = 0
-        self._last_offset = 0
+        """Reset engine cho ván mới"""
         self.my_side = my_symbol
-        
-        log.info(f"[PROXY] New game - I am {'X (CROSS)' if my_symbol == CROSS else 'O (CIRCLE)'}")
+        side_str = "X (CROSS)" if my_symbol == CROSS else "O (CIRCLE)"
+        log.info(f"[PROXY] New game - I am {side_str}")
         
         if not self._initialized:
             return self.start_engine()
         
-        self._send_to_engine("RESTART")
+        self._send("RESTART")
         for _ in range(5):
-            line = self._read_from_engine(timeout=2.0)
+            line = self._read_line(timeout=2.0)
             if line.upper() == "OK":
                 log.info("[PROXY] ✓ RESTART OK")
                 break
@@ -249,7 +223,7 @@ class SquirrelProxyEngine:
 
     def stop(self):
         if self.proc:
-            try: self._send_to_engine("END")
+            try: self._send("END")
             except Exception: pass
             try:
                 self.proc.terminate()
@@ -260,97 +234,24 @@ class SquirrelProxyEngine:
             self.proc = None
             self._initialized = False
 
-    def _calculate_window_offset(self) -> int:
-        if not self.move_history:
+    def _calculate_offset(self, history: list) -> int:
+        """Tính offset Y để cửa sổ 15x15 bao quanh vùng đang đánh"""
+        if not history:
             return 0
-        last_y = self.move_history[-1][1]
-        desired_offset = last_y - (self.ENGINE_HEIGHT // 2)
-        offset = max(0, min(self.MAX_Y_OFFSET, desired_offset))
-        self._log_debug(f"Window offset: {offset} (last_y={last_y})")
-        return offset
-
-    def _game_symbol_to_engine(self, game_sym: int) -> int:
-        """
-        Chuyển game symbol → engine symbol.
-        Engine luôn coi "người hỏi" là BLACK (1), đối thủ là WHITE (2).
-        
-        Nếu tôi cầm CROSS:
-          - CROSS (của tôi) → BLACK (1)
-          - CIRCLE (đối thủ) → WHITE (2)
-        Nếu tôi cầm CIRCLE:
-          - CIRCLE (của tôi) → BLACK (1)
-          - CROSS (đối thủ) → WHITE (2)
-        """
-        if self.my_side == CROSS:
-            return ENGINE_SYMBOL_BLACK if game_sym == CROSS else ENGINE_SYMBOL_WHITE
-        else:
-            return ENGINE_SYMBOL_BLACK if game_sym == CIRCLE else ENGINE_SYMBOL_WHITE
-
-    def _virtual_to_engine(self, vx: int, vy: int) -> Optional[Tuple[int, int]]:
-        if vy < self.window_y_offset or vy >= self.window_y_offset + self.ENGINE_HEIGHT:
-            return None
-        return (vx, vy - self.window_y_offset)
-
-    def _engine_to_virtual(self, ex: int, ey: int) -> Tuple[int, int]:
-        return (ex, ey + self.window_y_offset)
-
-    def _send_full_board(self):
-        """Gửi toàn bộ bàn cờ trong cửa sổ cho engine"""
-        self._send_to_engine("BOARD")
-        
-        count_black = 0
-        count_white = 0
-        stones_info = []
-        
-        for vx in range(self.VIRTUAL_WIDTH):
-            for vy_window in range(self.ENGINE_HEIGHT):
-                vy_virtual = vy_window + self.window_y_offset
-                game_symbol = self.virtual_board[vx][vy_virtual]
-                
-                if game_symbol != EMPTY:
-                    engine_symbol = self._game_symbol_to_engine(game_symbol)
-                    self._send_to_engine(f"{vx},{vy_window},{engine_symbol}")
-                    
-                    if engine_symbol == ENGINE_SYMBOL_BLACK:
-                        count_black += 1
-                    else:
-                        count_white += 1
-                    
-                    sym_char = "X" if game_symbol == CROSS else "O"
-                    stones_info.append(f"({vx},{vy_virtual}){sym_char}->({vx},{vy_window})e{engine_symbol}")
-                    count_black + count_white
-        
-        self._send_to_engine("DONE")
-        
-        log.info(f"[PROXY] BOARD sent: {count_black} black + {count_white} white stones (offset={self.window_y_offset})")
-        if self.debug:
-            for info in stones_info[:15]:
-                self._log_debug(f"  {info}")
-            if len(stones_info) > 15:
-                self._log_debug(f"  ... and {len(stones_info) - 15} more")
-
-    def _send_last_turn(self) -> bool:
-        if not self.move_history:
-            return False
-        last_x, last_y, last_sym = self.move_history[-1]
-        engine_coord = self._virtual_to_engine(last_x, last_y)
-        if engine_coord:
-            ex, ey = engine_coord
-            self._send_to_engine(f"TURN {ex},{ey}")
-            self._log_debug(f"TURN: virtual({last_x},{last_y}) -> engine({ex},{ey})")
-            return True
-        return False
+        last_y = history[-1][1]
+        desired = last_y - (self.ENGINE_SIZE // 2)
+        return max(0, min(self.MAX_Y_OFFSET, desired))
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         """
         Lấy nước đi từ engine.
         
-        Args:
-            board_history: [(x, y, symbol), ...] với symbol = CROSS (1) hoặc CIRCLE (0)
-            my_side: CROSS (1) hoặc CIRCLE (0)
+        board_history: [(x, y, symbol), ...] với symbol = CIRCLE(0) hoặc CROSS(1)
+        my_side: CIRCLE(0) hoặc CROSS(1) - quân của bot
         
-        Returns:
-            Tuple (x, y) trong tọa độ virtual 15×19
+        Engine protocol:
+          1 = quân của engine (my stones)
+          2 = quân của đối thủ (opponent stones)
         """
         with self.lock:
             if not self._initialized:
@@ -359,86 +260,104 @@ class SquirrelProxyEngine:
             
             self.my_side = my_side
             
-            # ═══ BƯỚC 1: Cập nhật Virtual Board ═══
-            # KHỞI TẠO VỚI EMPTY, KHÔNG PHẢI 0
-            self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
-            self.move_history = list(board_history)
+            # ═══ TÍNH WINDOW OFFSET ═══
+            offset_y = self._calculate_offset(board_history)
+            self._log(f"Window offset_y={offset_y}, history_len={len(board_history)}")
             
-            self._log_debug(f"Board history: {len(board_history)} moves")
+            # ═══ GỬI INFO ═══
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send(f"INFO time_left {self.timeout_turn * 20}")
+            
+            # ═══ TRƯỜNG HỢP 1: BÀN TRỐNG → BOT ĐI TRƯỚC ═══
+            if len(board_history) == 0:
+                self._log("Empty board -> sending BEGIN")
+                self._send("BEGIN")
+                
+                for _ in range(300):
+                    line = self._read_line(timeout=0.1)
+                    if not line: continue
+                    if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
+                        log.info(f"[ENGINE] {line}")
+                        continue
+                    if "," in line:
+                        parts = line.split(",")
+                        if len(parts) == 2:
+                            try:
+                                ex, ey = int(parts[0].strip()), int(parts[1].strip())
+                                vx, vy = ex, ey + offset_y
+                                if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
+                                    log.info(f"[PROXY] ✓ BEGIN move: engine({ex},{ey}) -> virtual({vx},{vy})")
+                                    return (vx, vy)
+                            except ValueError:
+                                continue
+                return None
+            
+            # ═══ TRƯỜNG HỢP 2: GỬI FULL BOARD ═══
+            # LUÔN gửi FULL BOARD để engine có đầy đủ thông tin
+            self._send("BOARD")
+            
+            my_count = 0
+            opp_count = 0
             
             for (x, y, sym) in board_history:
-                if 0 <= x < self.VIRTUAL_WIDTH and 0 <= y < self.VIRTUAL_HEIGHT:
-                    self.virtual_board[x][y] = sym
-                    sym_char = "X" if sym == CROSS else "O"
-                    self._log_debug(f"  Placed {sym_char} at ({x},{y})")
-                else:
-                    log.warning(f"⚠ Move ({x},{y},{sym}) out of bounds!")
-            
-            # ═══ BƯỚC 2: Tính Window Offset ═══
-            new_offset = self._calculate_window_offset()
-            offset_changed = (new_offset != self._last_offset)
-            self.window_y_offset = new_offset
-            
-            # ═══ BƯỚC 3: Gửi BOARD hoặc TURN ═══
-            can_use_turn = (
-                self._synced
-                and not offset_changed
-                and len(board_history) == self._expected_history_len + 1
-            )
-            
-            if can_use_turn:
-                if not self._send_last_turn():
-                    log.info("[PROXY] Last move outside window -> BOARD")
-                    self._send_full_board()
-            else:
-                if offset_changed:
-                    log.info(f"[PROXY] Window moved: {self._last_offset} -> {new_offset}")
-                self._send_full_board()
-            
-            self._last_offset = new_offset
-            
-            # ═══ BƯỚC 4: Gửi INFO ═══
-            self._send_to_engine(f"INFO timeout_turn {self.timeout_turn}")
-            self._send_to_engine(f"INFO time_left {self.timeout_turn * 20}")
-            
-            # ═══ BƯỚC 5: Đọc phản hồi ═══
-            for _ in range(300):
-                line = self._read_from_engine(timeout=0.1)
-                if not line:
+                # Kiểm tra tọa độ nằm trong cửa sổ 15x15
+                if not (0 <= x < self.VIRTUAL_WIDTH):
+                    continue
+                if not (offset_y <= y < offset_y + self.ENGINE_SIZE):
                     continue
                 
+                # Chuyển tọa độ virtual -> engine
+                ex = x
+                ey = y - offset_y
+                
+                # Chuyển symbol:
+                # sym == my_side → engine symbol 1 (quân của engine)
+                # sym != my_side → engine symbol 2 (quân đối thủ)
+                if sym == my_side:
+                    engine_sym = 1
+                    my_count += 1
+                else:
+                    engine_sym = 2
+                    opp_count += 1
+                
+                self._send(f"{ex},{ey},{engine_sym}")
+            
+            self._send("DONE")
+            
+            log.info(f"[PROXY] BOARD sent: {my_count} my stones (sym=1) + {opp_count} opponent stones (sym=2), offset_y={offset_y}")
+            
+            if my_count == 0 and opp_count == 0:
+                log.warning("[PROXY] ⚠ No stones in window! All moves outside 15x15 view.")
+            
+            # ═══ ĐỌC PHẢN HỒI ═══
+            for _ in range(300):
+                line = self._read_line(timeout=0.1)
+                if not line: continue
                 if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                     log.info(f"[ENGINE] {line}")
                     continue
-                
                 if "," in line:
                     parts = line.split(",")
                     if len(parts) == 2:
                         try:
-                            ex = int(parts[0].strip())
-                            ey = int(parts[1].strip())
-                            vx, vy = self._engine_to_virtual(ex, ey)
+                            ex, ey = int(parts[0].strip()), int(parts[1].strip())
+                            # Chuyển engine -> virtual
+                            vx, vy = ex, ey + offset_y
                             
-                            if (0 <= vx < self.VIRTUAL_WIDTH 
-                                and 0 <= vy < self.VIRTUAL_HEIGHT):
-                                current_sym = self.virtual_board[vx][vy]
-                                if current_sym == EMPTY:
+                            if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
+                                # Kiểm tra ô trống
+                                is_occupied = any(hx == vx and hy == vy for hx, hy, _ in board_history)
+                                if not is_occupied:
                                     log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
-                                    self._synced = True
-                                    self._expected_history_len = len(board_history) + 1
                                     return (vx, vy)
                                 else:
-                                    sym_char = "X" if current_sym == CROSS else "O"
-                                    log.warning(f"[PROXY] ⚠ Cell ({vx},{vy}) already occupied by {sym_char}!")
+                                    log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, engine returned invalid move")
                             else:
-                                log.warning(f"[PROXY] ⚠ Move ({vx},{vy}) out of virtual board!")
-                            
-                            self._synced = False
+                                log.warning(f"[PROXY] ⚠ ({vx},{vy}) out of bounds")
                         except ValueError:
                             continue
             
-            log.error("[PROXY] ✗ No valid move received")
-            self._synced = False
+            log.error("[PROXY] ✗ No valid move from engine")
             return None
 
     def __del__(self):
@@ -753,7 +672,6 @@ class CaroBot:
             
             if self.ag_available:
                 try:
-                    log.info(f"[BOT] Requesting move from engine... (history={len(history)} moves, my_side={'X' if self.my_symbol == CROSS else 'O'})")
                     move = await asyncio.get_event_loop().run_in_executor(
                         None, 
                         lambda: self.ag.get_move(history, self.my_symbol)
@@ -762,7 +680,6 @@ class CaroBot:
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
                         and self.board.get(*move) == EMPTY):
                         x, y = move; self.ag_moves += 1
-                        log.info(f"[BOT] ✓ Engine move: ({x},{y})")
                     else:
                         self.ag_errors += 1
                         log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
@@ -792,7 +709,7 @@ class CaroBot:
                 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s [AG]")
+            log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
@@ -926,11 +843,11 @@ class CaroBot:
             elif not is_playing and self.slot >= 0:
                 if has_opponent:
                     if not self.ready:
-                        log.info("[BOT] Phát hiện đối thủ thực sự đã ngồi vào ghế. Bấm Sẵn sàng!")
+                        log.info("[BOT] Phát hiện đối thủ. Bấm Sẵn sàng!")
                         self.ready = True; await self.send(self.make_ready())
                 else:
                     if self.ready:
-                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện. Hủy Sẵn sàng.")
+                        log.info("[BOT] Không có đối thủ. Hủy Sẵn sàng.")
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
@@ -1031,19 +948,16 @@ class CaroBot:
         pid = r.i64(); name = r.read_utf()
         if r.remaining() >= 36:
             r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
-            
         if place_level < 4: return
-        log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
+        log.info(f"[BOT] Phát hiện {name} vào bàn cờ.")
         await self.send(self.make_get_table())
 
     async def handle_player_exit(self, r: BinaryReader):
         place_level = r.i8()
         pid = r.i64() if r.remaining() >= 8 else -1
         if place_level < 4: return
-        
         slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
         if pid >= 0: self.player_slot_by_id.pop(pid, None)
-        
         if slot is not None and slot == self.slot:
             if self.is_playing:
                 self.in_table = False; self._table_lost_at = time.time()
@@ -1052,9 +966,8 @@ class CaroBot:
         elif self.is_playing:
             if self.opponent_gone_at is None:
                 self.opponent_gone_at = time.time()
-                log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
+                log.info("[BOT] Đối thủ rời giữa ván -> chờ GAMEOVER")
         elif self.in_table:
-            log.info("[BOT] Phát hiện có người rời bàn. Đang cập nhật lại trạng thái...")
             await self.send(self.make_get_table())
 
     async def watchdog(self):
@@ -1062,23 +975,18 @@ class CaroBot:
             try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
             if not self.running: return
-            
             if self.start_time and time.time() - self.start_time > RUNTIME:
                 self.save_stats(); self.stop(); return
-            
             if not self.ws or self.ws.close_code is not None: continue
-            
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
                     and time.time() - self.opponent_gone_at > 15):
                     self.opponent_gone_at = None
                     await self.send(self.make_get_table())
-                
                 if (self._table_lost_at is not None
                     and time.time() - self._table_lost_at > 8):
                     self._table_lost_at = None; self.table_id = None
                     await self.create_new_table()
-                
                 if (not self.is_playing and not self.in_table and not self._joining_table
                     and not self._rejoining and self._bet_amts_loaded):
                     await self.send(self.make_create_rule())
@@ -1091,38 +999,26 @@ class CaroBot:
 
     def _read_profile_form(self, page_text: str, page_url: str):
         form_match = re.search(
-            r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>',
-            page_text)
-        if not form_match:
-            return None, None
+            r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>', page_text)
+        if not form_match: return None, None
         form = form_match.group(0)
         open_tag = re.search(r'(?is)<form\b[^>]*>', form).group(0)
         action = urljoin(page_url, self._html_attr(open_tag, 'action'))
         data = {}
-
         for tag in re.findall(r'(?is)<input\b[^>]*>', form):
             name = self._html_attr(tag, 'name')
             input_type = self._html_attr(tag, 'type').lower()
-            if not name or input_type in ('submit', 'button', 'image', 'file', 'reset'):
-                continue
-            if input_type in ('checkbox', 'radio') and not re.search(r'\bchecked\b', tag, re.I):
-                continue
+            if not name or input_type in ('submit', 'button', 'image', 'file', 'reset'): continue
+            if input_type in ('checkbox', 'radio') and not re.search(r'\bchecked\b', tag, re.I): continue
             data[name] = self._html_attr(tag, 'value')
-
         for match in re.finditer(r'(?is)<select\b([^>]*)>(.*?)</select>', form):
             name = self._html_attr('<select ' + match.group(1) + '>', 'name')
-            if not name:
-                continue
-            selected = re.search(
-                r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>',
-                match.group(2))
-            if selected:
-                data[name] = self._html_attr('<option ' + selected.group(1) + '>', 'value')
-
+            if not name: continue
+            selected = re.search(r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>', match.group(2))
+            if selected: data[name] = self._html_attr('<option ' + selected.group(1) + '>', 'value')
         for match in re.finditer(r'(?is)<textarea\b([^>]*)>(.*?)</textarea>', form):
             name = self._html_attr('<textarea ' + match.group(1) + '>', 'name')
-            if name:
-                data[name] = html_lib.unescape(match.group(2)).strip()
+            if name: data[name] = html_lib.unescape(match.group(2)).strip()
         return action, data
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
@@ -1131,41 +1027,25 @@ class CaroBot:
         page = session.get(edit_url, timeout=15, allow_redirects=True)
         action, data = self._read_profile_form(page.text, page.url)
         if not action or data is None:
-            log.warning('[Identity] Không đọc được form FULL_NAME')
             return {'ok': False, 'new_full_name': new_name, 'error': 'form_not_found'}
-
         old_name = data.get('FULL_NAME', '')
         data['FULL_NAME'] = new_name
         data['OLD_PASSWORD'] = PASSWD
         data['SAVE'] = '\uf046'
-        response = session.post(
-            action, timeout=20, data=data,
+        session.post(action, timeout=20, data=data,
             headers={'Origin': 'https://gamevh.net', 'Referer': page.url,
-                     'Content-Type': 'application/x-www-form-urlencoded'},
-            allow_redirects=True)
-
+                     'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True)
         verify_page = session.get(edit_url, timeout=15, allow_redirects=True)
         _, verify_data = self._read_profile_form(verify_page.text, verify_page.url)
         verified_name = (verify_data or {}).get('FULL_NAME')
         ok = verified_name == new_name
-        if ok:
-            log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
-        else:
-            log.warning(
-                f'[Identity] FULL_NAME verify failed: expected={new_name!r}, '
-                f'actual={verified_name!r}, HTTP={response.status_code}')
-        return {
-            'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name,
-            'verified_full_name': verified_name, 'http_status': response.status_code
-        }
+        if ok: log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
+        return {'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name}
 
     @staticmethod
     def _extract_profile_balance(page_text: str) -> Optional[int]:
-        m = re.search(
-            r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>',
-            page_text)
-        if not m:
-            return None
+        m = re.search(r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>', page_text)
+        if not m: return None
         digits = re.sub(r'[^0-9-]', '', html_lib.unescape(re.sub(r'<[^>]+>', '', m.group(1))))
         return int(digits) if digits and digits != '-' else None
 
@@ -1175,128 +1055,69 @@ class CaroBot:
         return int(m.group(1)) if m else None
 
     def _load_avatar_catalog(self, session: requests.Session) -> List[Dict]:
-        catalog = []
-        seen = set()
-        pattern = re.compile(
-            r'''buyAvatar\(\s*(["']?)(\d+)\1\s*,\s*(["'])(.*?)\3\s*,\s*(["']?)([\d,.]+)\5\s*\)''',
-            re.I | re.S)
+        catalog = []; seen = set()
+        pattern = re.compile(r'''buyAvatar\(\s*(["']?)(\d+)\1\s*,\s*(["'])(.*?)\3\s*,\s*(["']?)([\d,.]+)\5\s*\)''', re.I | re.S)
         for category in range(1, 7):
-            url = ('https://gamevh.net/com/ftl/game/profile/'
-                   f'avatar_by_category.jsp?excludeLayout=true&category_id={category}')
+            url = f'https://gamevh.net/com/ftl/game/profile/avatar_by_category.jsp?excludeLayout=true&category_id={category}'
             page = session.get(url, timeout=15)
             for match in pattern.finditer(page.text):
                 avatar_id = int(match.group(2))
-                if avatar_id in seen:
-                    continue
+                if avatar_id in seen: continue
                 seen.add(avatar_id)
                 cost = int(re.sub(r'[^0-9]', '', match.group(6)) or '0')
-                catalog.append({
-                    'id': avatar_id,
-                    'name': html_lib.unescape(match.group(4)),
-                    'cost': cost,
-                    'category': category
-                })
+                catalog.append({'id': avatar_id, 'name': html_lib.unescape(match.group(4)), 'cost': cost, 'category': category})
         return catalog
 
     def update_random_avatar(self, session: requests.Session) -> Dict:
         profile_url = 'https://gamevh.net/com/ftl/game/profile/player_profile.jsp'
         before_page = session.get(profile_url, timeout=15)
         old_avatar = self._extract_profile_avatar(before_page.text)
-        balance_before = self._extract_profile_balance(before_page.text)
         catalog = self._load_avatar_catalog(session)
         choices = [item for item in catalog if item['id'] != old_avatar]
-        if not choices:
-            log.warning('[Identity] Không tải được catalog avatar')
-            return {'ok': False, 'error': 'avatar_catalog_empty'}
-
+        if not choices: return {'ok': False, 'error': 'avatar_catalog_empty'}
         selected = random.choice(choices)
-        update_url = (
-            'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp'
-            f"?pk={selected['id']}&redirect=/")
-        response = session.post(
-            update_url, timeout=20,
-            headers={'Origin': 'https://gamevh.net',
-                     'Referer': 'https://gamevh.net/com/ftl/game/profile/avatar.jsp'},
-            allow_redirects=True)
-
+        update_url = f'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp?pk={selected["id"]}&redirect=/'
+        session.post(update_url, timeout=20, headers={'Origin': 'https://gamevh.net'}, allow_redirects=True)
         after_page = session.get(profile_url, timeout=15)
         new_avatar = self._extract_profile_avatar(after_page.text)
-        balance_after = self._extract_profile_balance(after_page.text)
         ok = new_avatar == selected['id']
-        if ok:
-            log.info(
-                f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}; "
-                f"giá niêm yết={selected['cost']} xu; số dư={balance_before}->{balance_after}")
-        else:
-            log.warning(
-                f"[Identity] Avatar verify failed: expected=builtin{selected['id']}, "
-                f"actual=builtin{new_avatar}, HTTP={response.status_code}")
-        return {
-            'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar,
-            'selected_avatar': selected, 'balance_before': balance_before,
-            'balance_after': balance_after, 'http_status': response.status_code
-        }
+        if ok: log.info(f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}")
+        return {'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar}
 
     def update_profile_identity(self, session: requests.Session) -> Dict:
-        log.info('[Identity] Updating FULL_NAME + avatar (không đổi tên đăng nhập)...')
-        result = {
-            'full_name': self.update_random_full_name(session),
-            'avatar': self.update_random_avatar(session)
-        }
+        log.info('[Identity] Updating FULL_NAME + avatar...')
+        result = {'full_name': self.update_random_full_name(session), 'avatar': self.update_random_avatar(session)}
         self.identity_result = result
         return result
 
     def http_login(self) -> bool:
         try:
             session = requests.Session()
-            ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
-            session.headers.update({
-                'User-Agent': ua,
-                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'
-            })
+            ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36"
+            session.headers.update({'User-Agent': ua, 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'})
             session.get('https://gamevh.net/login.jsp', timeout=10)
-            resp = session.post(
-                'https://gamevh.net/login.jsp', timeout=10,
+            resp = session.post('https://gamevh.net/login.jsp', timeout=10,
                 data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
                       'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
-                headers={'Origin': 'https://gamevh.net',
-                         'Referer': 'https://gamevh.net/login.jsp',
-                         'Content-Type': 'application/x-www-form-urlencoded'},
-                allow_redirects=True)
+                headers={'Origin': 'https://gamevh.net', 'Referer': 'https://gamevh.net/login.jsp',
+                         'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True)
             if 'login.jsp' in resp.url:
                 log.error(f'[BOT] HTTP login failed: {resp.url}')
                 return False
-
             if AUTO_IDENTITY and not self._identity_attempted:
                 self._identity_attempted = True
                 self.update_profile_identity(session)
-
             game_resp = session.get(GAME_URL, timeout=10)
             self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
             page_html = game_resp.text
-
             tm = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
-            if not tm:
-                log.error('[BOT] Token not found')
-                return False
+            if not tm: log.error('[BOT] Token not found'); return False
             self.token = int(tm.group(1))
-
             nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", page_html)
-            if not nm:
-                log.error('[BOT] currentPlayerNickName not found')
-                return False
+            if not nm: log.error('[BOT] currentPlayerNickName not found'); return False
             self.nickname = nm.group(1)
-
             pm = re.search(r'var\s+placePath\s*=\s*\"([^\"]+)\"', page_html)
-            if pm:
-                self.place_path = pm.group(1)
-
-            if self.nickname == USER:
-                log.info(f'[Identity] Tên đăng nhập giữ nguyên: {self.nickname}')
-            else:
-                log.warning(
-                    f'[Identity] Server nickname={self.nickname!r} khác CARO_USER={USER!r}')
+            if pm: self.place_path = pm.group(1)
             log.info(f'[BOT] Login OK: {self.nickname}')
             return True
         except Exception as e:
@@ -1335,24 +1156,20 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*60}")
-        log.info("BOT CARO SQUIRREL24 - FIXED PROXY ENGINE v2.0")
-        log.info("FIX: Symbol mapping, EMPTY init, coordinate tracking")
+        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE v3.0 (FINAL FIX)")
         log.info(f"{'='*60}")
         
         retry_count = 0
         while self.running:
             if time.time() - self.start_time > RUNTIME: break
-            
             was_in_table = self.in_table or self.is_playing
             self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
-            
             self.is_playing = False; self.pending_move = False
             self.in_table = False; self.ready = False
             self.board = Board(width=15, height=19); self.players.clear()
             self.bet_amts = []; self._resolved_bet_id = None
             self._bet_amts_loaded = False; self._joining_table = False
             self.opponent_gone_at = None; self._table_lost_at = None
-            
             if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
             
             login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
@@ -1360,29 +1177,18 @@ class CaroBot:
                 retry_count += 1
                 retry_delay = min(30 * (2 ** (retry_count - 1)), 300)
                 remaining = RUNTIME - (time.time() - self.start_time)
-                if remaining <= 0:
-                    break
+                if remaining <= 0: break
                 retry_delay = min(retry_delay, remaining)
                 log.warning(f'[BOT] Login thất bại; thử lại sau {retry_delay:.0f}s')
                 await asyncio.sleep(retry_delay)
                 continue
-
             retry_count = 0
             if IDENTITY_TEST_ONLY:
                 remaining = RUNTIME - (time.time() - self.start_time)
-                log.info(
-                    f'[TEST] Identity test only; không chạy game. '
-                    f'Chờ hết {max(0, remaining):.1f}s...')
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                self.stop()
-                break
-
+                if remaining > 0: await asyncio.sleep(remaining)
+                self.stop(); break
             await self.run_ws()
-            
-            if not (self.in_table or self.is_playing):
-                self.table_id = None
-            
+            if not (self.in_table or self.is_playing): self.table_id = None
             self.save_stats()
             if self.ag: self.ag.stop(); self.ag = None
 
@@ -1390,7 +1196,6 @@ def main():
     bin_path = auto_download_alphagomoku()
     if bin_path: print(f"[SETUP] SQUIRREL24 ready: {os.path.basename(bin_path)}")
     else: print("[SETUP] No SQUIRREL24 - bot plays center only")
-    
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
 
@@ -1401,170 +1206,3 @@ async def _run_bot():
 
 if __name__ == "__main__": main()
 elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
-CROSS = 1
-
-# Gomocup protocol symbols (ENGINE uses 1=black, 2=white)
-ENGINE_SYMBOL_BLACK = 1
-ENGINE_SYMBOL_WHITE = 2
-
-def auto_download_alphagomoku() -> Optional[str]:
-    binary_path = ENGINE_DIR / AG_BINARY
-    if binary_path.exists():
-        try: binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
-    log.info(f"[AG] Downloading SQUIRREL {AG_VERSION}...")
-    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        import zipfile
-        archive = Path("/tmp/squirrel24.zip")
-        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-        })
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            archive.write_bytes(resp.read())
-        with zipfile.ZipFile(archive, "r") as zf:
-            zf.extractall(str(ENGINE_DIR))
-        archive.unlink(missing_ok=True)
-        try: binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
-    except Exception as e:
-        log.error(f"[AG] Download failed: {e}")
-        return None
-
-def detect_ag_binary() -> Optional[str]:
-    if not ENGINE_DIR.exists(): return None
-    for f in ENGINE_DIR.glob("pbrain-squirrel.exe"):
-        try: f.chmod(0o755)
-        except Exception: pass
-        return str(f)
-    return None
-
-# ═══════════════════════════════════════════════════════════════════════
-#  FIXED SQUIRREL PROXY ENGINE - Corrected Symbol & Coordinate Logic
-# ═══════════════════════════════════════════════════════════════════════
-class SquirrelProxyEngine:
-    """
-    Proxy Engine: Dịch bàn cờ 15×19 của game thành 15×15 cho SQUIRREL24.
-    FIX: Correct symbol mapping, EMPTY handling, debug logging.
-    """
-    VIRTUAL_WIDTH = 15
-    VIRTUAL_HEIGHT = 19
-    ENGINE_WIDTH = 15
-    ENGINE_HEIGHT = 15
-    MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_HEIGHT  # = 4
-
-    def __init__(self, timeout_turn: int = 2000, rule: int = 8):
-        self.binary = None
-        self.timeout_turn = timeout_turn
-        self.rule = rule
-        
-        # Virtual board (15×19) - KHỞI TẠO VỚI EMPTY (-1), KHÔNG PHẢI 0
-        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
-        self.move_history: List[Tuple[int, int, int]] = []
-        
-        # Sliding window
-        self.window_y_offset = 0
-        self._last_offset = 0
-        
-        # Engine process
-        self.proc: Optional[subprocess.Popen] = None
-        self.lock = threading.Lock()
-        self._buffer = b""
-        self._initialized = False
-        
-        # Tracking
-        self.my_side = CROSS  # 1 = CROSS (X), 0 = CIRCLE (O)
-        self._synced = False
-        self._expected_history_len = -1
-        
-        # Debug
-        self.debug = os.environ.get("CARO_DEBUG") == "1"
-
-    def _log_debug(self, msg: str):
-        if self.debug:
-            log.info(f"[PROXY DEBUG] {msg}")
-
-    def _send_to_engine(self, cmd: str):
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.stdin.write((cmd + "\n").encode("utf-8"))
-                self.proc.stdin.flush()
-                if self.debug:
-                    log.debug(f"[SEND -> ENGINE] {cmd}")
-            except Exception as e:
-                log.error(f"Send error: {e}")
-
-    def _read_from_engine(self, timeout: float = 10.0) -> str:
-        if not self.proc or self.proc.poll() is not None:
-            return ""
-        deadline = time.monotonic() + timeout
-        while True:
-            idx = self._buffer.find(b"\n")
-            if idx >= 0:
-                line_bytes = self._buffer[:idx].strip()
-                self._buffer = self._buffer[idx + 1:]
-                line = line_bytes.decode("utf-8", errors="replace")
-                if self.debug:
-                    log.debug(f"[RECV <- ENGINE] {line}")
-                return line
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return ""
-            try:
-                sel = selectors.DefaultSelector()
-                sel.register(self.proc.stdout, selectors.EVENT_READ)
-                ready = sel.select(timeout=min(remaining, 0.5))
-                sel.close()
-                if ready:
-                    chunk = os.read(self.proc.stdout.fileno(), 4096)
-                    if not chunk: return ""
-                    self._buffer += chunk
-            except Exception:
-                return ""
-
-    def start_engine(self) -> bool:
-        if self._initialized:
-            return True
-        if not self.binary:
-            log.error("[PROXY] Binary not set!")
-            return False
-        try:
-            is_exe = self.binary.lower().endswith('.exe')
-            cmd = ["wine", self.binary] if is_exe else [self.binary]
-            log.info(f"[PROXY] Starting engine: {' '.join(cmd)}")
-            self.proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                cwd=os.path.dirname(self.binary) or "."
-            )
-            self._buffer = b""
-            
-            self._send_to_engine("START 15")
-            for _ in range(10):
-                line = self._read_from_engine(timeout=2.0)
-                if line.upper() == "OK":
-                    log.info("[PROXY] ✓ Engine started (15x15 mode)")
-                    break
-            else:
-                log.warning("[PROXY] ⚠ Engine did not respond OK to START")
-            
-            self._send_to_engine(f"INFO rule {self.rule}")
-            self._send_to_engine(f"INFO timeout_turn {self.timeout_turn}")
-            self._send_to_engine("INFO ponder 1")
-            time.sleep(0.3)
-            self._initialized = True
-            return True
-        except Exception as e:
-            log.error(f"[PROXY] Start error: {e}")
-            return False
-
-    def start_game(self, my_symbol: int = CROSS) -> bool:
-        """Khởi tạo ván mới. my_symbol: CROSS (1) hoặc CIRCLE (0)"""
-        self._synced = False
-        # KHỞI TẠO VỚI EMPTY, KHÔNG PHẢI 0
-        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
-        self.move_history.clear()
