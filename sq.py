@@ -51,10 +51,10 @@ try:
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "squirrel24-engine"
+ENGINE_DIR = _BASE_DIR / "AlphaGomoku-engine"
 AG_BINARY = "pbrain-squirrel.exe"
 AG_VERSION = "2024"
-AG_DOWNLOAD_URL = "https://download.gomocup.com/ai/SQUIRREL24.zip"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
 AG_RULE = 8
 AG_TIMEOUT = 2000
 
@@ -73,7 +73,7 @@ def auto_download_alphagomoku() -> Optional[str]:
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/squirrel24.zip")
+        archive = Path("/tmp/ALPHAGOMOKU.MK26.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -92,7 +92,7 @@ def auto_download_alphagomoku() -> Optional[str]:
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     # Hỗ trợ nhiều pattern như bot2 (phòng zip giải nén khác tên/thư mục con)
-    for pattern in ["pbrain-squirrel.exe", "pbrain-squirrel*", "pbrain*.exe"]:
+    for pattern in ["pbrain-AlphaGomoku.exe", "pbrain-AlphaGomoku*"]:
         for f in ENGINE_DIR.glob(pattern):
             if f.is_file():
                 try: f.chmod(0o755)
