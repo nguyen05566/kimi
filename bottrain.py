@@ -104,7 +104,7 @@ class CaroBotTrain:
   self.mcts_player=MCTSPlayer(self.net.policy_value_fn,c_puct=MCTS_CPUCT,n_playout=MCTS_PLAYOUT,is_selfplay=0)
  def init_board_for_game(self):self.board.init_board();self.mcts_player.reset_player()
  def bot_to_board_move(self,x,y):return y*self.board.width+x
- def get_ai_move(self,ox,oy)->Optional[Tuple[int,int]]:
+ def get_ai_move(self)->Optional[Tuple[int,int]]:
   try:
    if len(self.board.availables)<=1:return None
    move=self.mcts_player.get_action(self.board,temp=1e-3,return_prob=0)
@@ -179,13 +179,17 @@ class CaroBotTrain:
     log.info(f"[MATCH] slot={self.slot} sym={self.my_symbol} {bw}x{bh}")
     if bw!=self.board.width or bh!=self.board.height:self.board=Board(width=bw,height=bh,n_in_row=N_IN_ROW)
     self.init_board_for_game();self.is_playing=True;self.start_time=time.time()
-   elif cmd=="SET_TURN":self.is_playing=True
+   elif cmd=="SET_TURN":
+    self.is_playing=True
+    log.info("[TURN] My turn - thinking...")
+    ai=self.get_ai_move()
+    if ai:
+     ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax))
+     log.info(f"[MOVE] BOT ({ax},{ay})")
    elif cmd=="MOVE":
     mt=r.u8();x=r.u8();y=r.u8();sym=r.u8()
     if sym!=self.my_symbol:
      self.apply_opponent_move(x,y);log.info(f"[MOVE] Opp ({x},{y})")
-     ai=self.get_ai_move(x,y)
-     if ai:ax,ay=ai;self.apply_my_move(ax,ay);await self.send(self.make_play(ay*BOARD_WIDTH+ax));log.info(f"[MOVE] BOT ({ax},{ay})")
     else:self.apply_my_move(x,y);self._moving=False;log.info(f"[MOVE] Me ({x},{y})")
    elif cmd=="GAMEOVER":
     res=r.u8();r.read_utf();r.u8()
