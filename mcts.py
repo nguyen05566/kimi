@@ -118,6 +118,3 @@ class MCTSPlayer(object):
                 return move
         else:
             return -1
-
-    def __str__(self):
-        return "MCTS {}".format(self.player)
