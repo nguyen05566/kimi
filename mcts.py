@@ -1,48 +1,123 @@
 # -*- coding: utf-8 -*-
 """MCTS in AlphaZero style for 15x19 Caro board"""
-import numpy as np, copy
-def softmax(x): probs=np.exp(x-np.max(x)); probs/=np.sum(probs); return probs
-class TreeNode:
-    def __init__(s,p,pr): s._p=p; s._c={}; s._nv=0; s._Q=0; s._u=0; s._P=pr
-    def expand(s,ap):
-        for a,pr in ap:
-            if a not in s._c: s._c[a]=TreeNode(s,pr)
-    def select(s,cpu): return max(s._c.items(),key=lambda x:x[1].gv(cpu))
-    def update(s,lv): s._nv+=1; s._Q+=1.0*(lv-s._Q)/s._nv
-    def urec(s,lv):
-        if s._p: s._p.urec(-lv)
-        s.update(lv)
-    def gv(s,cpu): s._u=cpu*s._P*np.sqrt(s._p._nv)/(1+s._nv); return s._Q+s._u
-    def il(s): return s._c=={}
-    def ir(s): return s._p is None
-class MCTS:
-    def __init__(s,pvf,cpu=5,np_val=400): s._rt=TreeNode(None,1.0); s._pol=pvf; s._cpu=cpu; s._np=np_val
-    def _po(s,st):
-        n=s._rt
-        while not n.il(): a,n=n.select(s._cpu); st.dm(a)
-        ap,lv=s._pol(st); end,wr=st.ge()
-        if not end: n.expand(ap)
-        else: lv=0.0 if wr==-1 else(1.0 if wr==st.gcp() else-1.0)
-        n.urec(-lv)
-    def gmp(s,st,t=1e-3):
-        for _ in range(s._np): sc=copy.deepcopy(st); s._po(sc)
-        av=[(a,nd._nv)for a,nd in s._rt._c.items()]
-        ac,vs=zip(*av); ap=softmax(1.0/t*np.log(np.array(vs)+1e-10)); return ac,ap
-    def uwm(s,lm):
-        if lm in s._rt._c: s._rt=s._rt._c[lm]; s._rt._p=None
-        else: s._rt=TreeNode(None,1.0)
-class MCTSPlayer:
-    def __init__(s,pvf,c_puct=5,n_playout=400,is_selfplay=0):
-        s.mcts=MCTS(pvf,c_puct,n_playout); s._sp=is_selfplay
-    def set_player_ind(s,p): s.player=p
-    def rp(s): s.mcts.uwm(-1)
-    def get_action(s,board,temp=1e-3,return_prob=0):
-        mv=board.av; mp=np.zeros(board.width*board.height)
-        if len(mv)>0:
-            ac,pr=s.mcts.gmp(board,temp); mp[list(ac)]=pr
-            if s._sp:
-                m=np.random.choice(ac,p=0.75*pr+0.25*np.random.dirichlet(0.3*np.ones(len(pr))))
-                s.mcts.uwm(m)
-            else: m=np.random.choice(ac,p=pr); s.mcts.uwm(-1)
-            return(m,mp)if return_prob else m
-        return -1
+import numpy as np
+import copy
+
+
+def softmax(x):
+    probs = np.exp(x - np.max(x))
+    probs /= np.sum(probs)
+    return probs
+
+
+class TreeNode(object):
+    def __init__(self, parent, prior_p):
+        self._parent = parent
+        self._children = {}
+        self._n_visits = 0
+        self._Q = 0
+        self._u = 0
+        self._P = prior_p
+
+    def expand(self, action_priors):
+        for action, prob in action_priors:
+            if action not in self._children:
+                self._children[action] = TreeNode(self, prob)
+
+    def select(self, c_puct):
+        return max(self._children.items(), key=lambda act_node: act_node[1].get_value(c_puct))
+
+    def update(self, leaf_value):
+        self._n_visits += 1
+        self._Q += 1.0 * (leaf_value - self._Q) / self._n_visits
+
+    def update_recursive(self, leaf_value):
+        if self._parent:
+            self._parent.update_recursive(-leaf_value)
+        self.update(leaf_value)
+
+    def get_value(self, c_puct):
+        self._u = (c_puct * self._P * np.sqrt(self._parent._n_visits) / (1 + self._n_visits))
+        return self._Q + self._u
+
+    def is_leaf(self):
+        return self._children == {}
+
+    def is_root(self):
+        return self._parent is None
+
+
+class MCTS(object):
+    def __init__(self, policy_value_fn, c_puct=5, n_playout=400):
+        self._root = TreeNode(None, 1.0)
+        self._policy = policy_value_fn
+        self._c_puct = c_puct
+        self._n_playout = n_playout
+
+    def _playout(self, state):
+        node = self._root
+        while True:
+            if node.is_leaf():
+                break
+            action, node = node.select(self._c_puct)
+            state.do_move(action)
+        action_probs, leaf_value = self._policy(state)
+        end, winner = state.game_end()
+        if not end:
+            node.expand(action_probs)
+        else:
+            if winner == -1:
+                leaf_value = 0.0
+            else:
+                leaf_value = 1.0 if winner == state.get_current_player() else -1.0
+        node.update_recursive(-leaf_value)
+
+    def get_move_probs(self, state, temp=1e-3):
+        for n in range(self._n_playout):
+            state_copy = copy.deepcopy(state)
+            self._playout(state_copy)
+        act_visits = [(act, node._n_visits) for act, node in self._root._children.items()]
+        acts, visits = zip(*act_visits)
+        act_probs = softmax(1.0 / temp * np.log(np.array(visits) + 1e-10))
+        return acts, act_probs
+
+    def update_with_move(self, last_move):
+        if last_move in self._root._children:
+            self._root = self._root._children[last_move]
+            self._root._parent = None
+        else:
+            self._root = TreeNode(None, 1.0)
+
+
+class MCTSPlayer(object):
+    def __init__(self, policy_value_function, c_puct=5, n_playout=400, is_selfplay=0):
+        self.mcts = MCTS(policy_value_function, c_puct, n_playout)
+        self._is_selfplay = is_selfplay
+
+    def set_player_ind(self, p):
+        self.player = p
+
+    def reset_player(self):
+        self.mcts.update_with_move(-1)
+
+    def get_action(self, board, temp=1e-3, return_prob=0):
+        sensible_moves = board.availables
+        move_probs = np.zeros(board.width * board.height)
+        if len(sensible_moves) > 0:
+            acts, probs = self.mcts.get_move_probs(board, temp)
+            move_probs[list(acts)] = probs
+            if self._is_selfplay:
+                move = np.random.choice(acts, p=0.75 * probs + 0.25 * np.random.dirichlet(0.3 * np.ones(len(probs))))
+                self.mcts.update_with_move(move)
+            else:
+                move = np.random.choice(acts, p=probs)
+                self.mcts.update_with_move(-1)
+            if return_prob:
+                return move, move_probs
+            else:
+                return move
+        else:
+            return -1
+
+    def __str__(self):
+        return "MCTS {}".format(self.player)
