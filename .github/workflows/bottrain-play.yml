@@ -1,19 +1,27 @@
 name: BOTTRAIN-Play
 on:
-  schedule:
-    - cron: '0 */2 * * *'
+  workflow_run:
+    workflows: [BOTTRAIN-Train]
+    types: [completed]
   workflow_dispatch:
 env:
   CARO_USER: ${{ secrets.CARO_USER }}
   CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
-  CARO_RUNTIME_HOURS: '1.8'
+  CARO_RUNTIME_HOURS: '2'
   MCTS_PLAYOUT: '200'
 jobs:
   play-gamevh:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pull latest trained model
+        run: |
+          git config user.name "bottrain-bot"
+          git pull origin main
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
