@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO SQUIRREL24 - PROXY ENGINE FOR 15×19 BOARD            ║
+║  BOT CARO SQUIRREL24 - FIXED PROXY ENGINE v2.0                  ║
 ║  Engine: SQUIRREL24 (Gomocup) via Sliding Window Proxy          ║
-║  Tự động tải SQUIRREL24 và proxy dịch bàn cờ 15×19 -> 15×15    ║
+║  FIX: Corrected symbol mapping (CIRCLE/CROSS → BLACK/WHITE)     ║
+║  FIX: Fixed EMPTY initialization (-1 instead of 0)              ║
+║  FIX: Added debug logging for coordinate tracking               ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -14,7 +16,7 @@ from urllib.parse import urljoin
 
 # ======================== LOGGING ========================
 log = logging.getLogger("caro")
-log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG if os.environ.get("CARO_DEBUG") == "1" else logging.INFO)
 if not log.handlers:
     h = logging.StreamHandler(sys.stdout)
     h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
@@ -55,14 +57,21 @@ AG_DOWNLOAD_URL = "https://download.gomocup.com/ai/SQUIRREL24.zip"
 AG_RULE = 8      # Freestyle Caro (Rule 8)
 AG_TIMEOUT = 2000 # 2 seconds
 
+# ======================== CONSTANTS ========================
+EMPTY = -1
+CIRCLE = 0
+CROSS = 1
+
+# Gomocup protocol symbols (ENGINE uses 1=black, 2=white)
+ENGINE_SYMBOL_BLACK = 1
+ENGINE_SYMBOL_WHITE = 2
+
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
-        try:
-            binary_path.chmod(0o755)
+        try: binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    
     log.info(f"[AG] Downloading SQUIRREL {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -73,13 +82,10 @@ def auto_download_alphagomoku() -> Optional[str]:
         })
         with urllib.request.urlopen(req, timeout=120) as resp:
             archive.write_bytes(resp.read())
-        
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
-        
         archive.unlink(missing_ok=True)
-        try:
-            binary_path.chmod(0o755)
+        try: binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
     except Exception as e:
@@ -92,17 +98,15 @@ def detect_ag_binary() -> Optional[str]:
         try: f.chmod(0o755)
         except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-squirrel*"):
-        return str(f)
     return None
 
 # ═══════════════════════════════════════════════════════════════════════
-#  SQUIRREL PROXY ENGINE - SLIDING WINDOW FOR 15×19 BOARD
+#  FIXED SQUIRREL PROXY ENGINE - Corrected Symbol & Coordinate Logic
 # ═══════════════════════════════════════════════════════════════════════
 class SquirrelProxyEngine:
     """
-    Proxy Engine: Nhận bàn cờ 15×19 từ bot, dịch thành 15×15 cho SQUIRREL24.
-    Kỹ thuật: Sliding Window (Cửa sổ trượt) theo vùng đang có quân cờ.
+    Proxy Engine: Dịch bàn cờ 15×19 của game thành 15×15 cho SQUIRREL24.
+    FIX: Correct symbol mapping, EMPTY handling, debug logging.
     """
     VIRTUAL_WIDTH = 15
     VIRTUAL_HEIGHT = 19
@@ -111,15 +115,15 @@ class SquirrelProxyEngine:
     MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_HEIGHT  # = 4
 
     def __init__(self, timeout_turn: int = 2000, rule: int = 8):
-        self.binary = detect_ag_binary()
+        self.binary = None
         self.timeout_turn = timeout_turn
         self.rule = rule
         
-        # Virtual board (thế giới thực 15×19)
-        self.virtual_board = [[0] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
+        # Virtual board (15×19) - KHỞI TẠO VỚI EMPTY (-1), KHÔNG PHẢI 0
+        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
         self.move_history: List[Tuple[int, int, int]] = []
         
-        # Sliding window state
+        # Sliding window
         self.window_y_offset = 0
         self._last_offset = 0
         
@@ -130,33 +134,43 @@ class SquirrelProxyEngine:
         self._initialized = False
         
         # Tracking
-        self.my_side = 1
+        self.my_side = CROSS  # 1 = CROSS (X), 0 = CIRCLE (O)
         self._synced = False
         self._expected_history_len = -1
+        
+        # Debug
+        self.debug = os.environ.get("CARO_DEBUG") == "1"
+
+    def _log_debug(self, msg: str):
+        if self.debug:
+            log.info(f"[PROXY DEBUG] {msg}")
 
     def _send_to_engine(self, cmd: str):
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
-            except Exception: pass
+                if self.debug:
+                    log.debug(f"[SEND -> ENGINE] {cmd}")
+            except Exception as e:
+                log.error(f"Send error: {e}")
 
     def _read_from_engine(self, timeout: float = 10.0) -> str:
         if not self.proc or self.proc.poll() is not None:
             return ""
-        
         deadline = time.monotonic() + timeout
         while True:
             idx = self._buffer.find(b"\n")
             if idx >= 0:
                 line_bytes = self._buffer[:idx].strip()
                 self._buffer = self._buffer[idx + 1:]
-                return line_bytes.decode("utf-8", errors="replace")
-            
+                line = line_bytes.decode("utf-8", errors="replace")
+                if self.debug:
+                    log.debug(f"[RECV <- ENGINE] {line}")
+                return line
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return ""
-            
             try:
                 sel = selectors.DefaultSelector()
                 sel.register(self.proc.stdout, selectors.EVENT_READ)
@@ -172,38 +186,34 @@ class SquirrelProxyEngine:
     def start_engine(self) -> bool:
         if self._initialized:
             return True
-        
         if not self.binary:
+            log.error("[PROXY] Binary not set!")
             return False
-        
         try:
             is_exe = self.binary.lower().endswith('.exe')
-            if is_exe:
-                cmd = ["wine", self.binary]
-            else:
-                cmd = [self.binary]
-            
+            cmd = ["wine", self.binary] if is_exe else [self.binary]
+            log.info(f"[PROXY] Starting engine: {' '.join(cmd)}")
             self.proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                cwd=str(ENGINE_DIR)
+                cwd=os.path.dirname(self.binary) or "."
             )
             self._buffer = b""
             
-            # Gửi START 15 (SQUIRREL24 chỉ hiểu bàn vuông)
             self._send_to_engine("START 15")
             for _ in range(10):
                 line = self._read_from_engine(timeout=2.0)
                 if line.upper() == "OK":
-                    log.info("[PROXY] Engine started (15x15 mode)")
+                    log.info("[PROXY] ✓ Engine started (15x15 mode)")
                     break
+            else:
+                log.warning("[PROXY] ⚠ Engine did not respond OK to START")
             
             self._send_to_engine(f"INFO rule {self.rule}")
             self._send_to_engine(f"INFO timeout_turn {self.timeout_turn}")
             self._send_to_engine("INFO ponder 1")
-            
             time.sleep(0.3)
             self._initialized = True
             return True
@@ -211,12 +221,17 @@ class SquirrelProxyEngine:
             log.error(f"[PROXY] Start error: {e}")
             return False
 
-    def start_game(self, my_symbol: int = 1) -> bool:
+    def start_game(self, my_symbol: int = CROSS) -> bool:
+        """Khởi tạo ván mới. my_symbol: CROSS (1) hoặc CIRCLE (0)"""
         self._synced = False
-        self.virtual_board = [[0] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
+        # KHỞI TẠO VỚI EMPTY, KHÔNG PHẢI 0
+        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
         self.move_history.clear()
         self.window_y_offset = 0
         self._last_offset = 0
+        self.my_side = my_symbol
+        
+        log.info(f"[PROXY] New game - I am {'X (CROSS)' if my_symbol == CROSS else 'O (CIRCLE)'}")
         
         if not self._initialized:
             return self.start_engine()
@@ -225,7 +240,7 @@ class SquirrelProxyEngine:
         for _ in range(5):
             line = self._read_from_engine(timeout=2.0)
             if line.upper() == "OK":
-                log.info("[PROXY] RESTART OK")
+                log.info("[PROXY] ✓ RESTART OK")
                 break
         return True
 
@@ -250,7 +265,26 @@ class SquirrelProxyEngine:
             return 0
         last_y = self.move_history[-1][1]
         desired_offset = last_y - (self.ENGINE_HEIGHT // 2)
-        return max(0, min(self.MAX_Y_OFFSET, desired_offset))
+        offset = max(0, min(self.MAX_Y_OFFSET, desired_offset))
+        self._log_debug(f"Window offset: {offset} (last_y={last_y})")
+        return offset
+
+    def _game_symbol_to_engine(self, game_sym: int) -> int:
+        """
+        Chuyển game symbol → engine symbol.
+        Engine luôn coi "người hỏi" là BLACK (1), đối thủ là WHITE (2).
+        
+        Nếu tôi cầm CROSS:
+          - CROSS (của tôi) → BLACK (1)
+          - CIRCLE (đối thủ) → WHITE (2)
+        Nếu tôi cầm CIRCLE:
+          - CIRCLE (của tôi) → BLACK (1)
+          - CROSS (đối thủ) → WHITE (2)
+        """
+        if self.my_side == CROSS:
+            return ENGINE_SYMBOL_BLACK if game_sym == CROSS else ENGINE_SYMBOL_WHITE
+        else:
+            return ENGINE_SYMBOL_BLACK if game_sym == CIRCLE else ENGINE_SYMBOL_WHITE
 
     def _virtual_to_engine(self, vx: int, vy: int) -> Optional[Tuple[int, int]]:
         if vy < self.window_y_offset or vy >= self.window_y_offset + self.ENGINE_HEIGHT:
@@ -261,30 +295,63 @@ class SquirrelProxyEngine:
         return (ex, ey + self.window_y_offset)
 
     def _send_full_board(self):
+        """Gửi toàn bộ bàn cờ trong cửa sổ cho engine"""
         self._send_to_engine("BOARD")
-        count = 0
+        
+        count_black = 0
+        count_white = 0
+        stones_info = []
+        
         for vx in range(self.VIRTUAL_WIDTH):
             for vy_window in range(self.ENGINE_HEIGHT):
                 vy_virtual = vy_window + self.window_y_offset
-                symbol = self.virtual_board[vx][vy_virtual]
-                if symbol != 0:
-                    self._send_to_engine(f"{vx},{vy_window},{symbol}")
-                    count += 1
+                game_symbol = self.virtual_board[vx][vy_virtual]
+                
+                if game_symbol != EMPTY:
+                    engine_symbol = self._game_symbol_to_engine(game_symbol)
+                    self._send_to_engine(f"{vx},{vy_window},{engine_symbol}")
+                    
+                    if engine_symbol == ENGINE_SYMBOL_BLACK:
+                        count_black += 1
+                    else:
+                        count_white += 1
+                    
+                    sym_char = "X" if game_symbol == CROSS else "O"
+                    stones_info.append(f"({vx},{vy_virtual}){sym_char}->({vx},{vy_window})e{engine_symbol}")
+                    count_black + count_white
+        
         self._send_to_engine("DONE")
-        log.info(f"[PROXY] BOARD sent: {count} stones (offset={self.window_y_offset})")
+        
+        log.info(f"[PROXY] BOARD sent: {count_black} black + {count_white} white stones (offset={self.window_y_offset})")
+        if self.debug:
+            for info in stones_info[:15]:
+                self._log_debug(f"  {info}")
+            if len(stones_info) > 15:
+                self._log_debug(f"  ... and {len(stones_info) - 15} more")
 
     def _send_last_turn(self) -> bool:
         if not self.move_history:
             return False
-        last_x, last_y, _ = self.move_history[-1]
+        last_x, last_y, last_sym = self.move_history[-1]
         engine_coord = self._virtual_to_engine(last_x, last_y)
         if engine_coord:
             ex, ey = engine_coord
             self._send_to_engine(f"TURN {ex},{ey}")
+            self._log_debug(f"TURN: virtual({last_x},{last_y}) -> engine({ex},{ey})")
             return True
         return False
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+        """
+        Lấy nước đi từ engine.
+        
+        Args:
+            board_history: [(x, y, symbol), ...] với symbol = CROSS (1) hoặc CIRCLE (0)
+            my_side: CROSS (1) hoặc CIRCLE (0)
+        
+        Returns:
+            Tuple (x, y) trong tọa độ virtual 15×19
+        """
         with self.lock:
             if not self._initialized:
                 if not self.start_engine():
@@ -292,20 +359,27 @@ class SquirrelProxyEngine:
             
             self.my_side = my_side
             
-            # Cập nhật virtual board
-            self.virtual_board = [[0] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
+            # ═══ BƯỚC 1: Cập nhật Virtual Board ═══
+            # KHỞI TẠO VỚI EMPTY, KHÔNG PHẢI 0
+            self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
             self.move_history = list(board_history)
+            
+            self._log_debug(f"Board history: {len(board_history)} moves")
             
             for (x, y, sym) in board_history:
                 if 0 <= x < self.VIRTUAL_WIDTH and 0 <= y < self.VIRTUAL_HEIGHT:
                     self.virtual_board[x][y] = sym
+                    sym_char = "X" if sym == CROSS else "O"
+                    self._log_debug(f"  Placed {sym_char} at ({x},{y})")
+                else:
+                    log.warning(f"⚠ Move ({x},{y},{sym}) out of bounds!")
             
-            # Tính window offset mới
+            # ═══ BƯỚC 2: Tính Window Offset ═══
             new_offset = self._calculate_window_offset()
             offset_changed = (new_offset != self._last_offset)
             self.window_y_offset = new_offset
             
-            # Gửi BOARD hoặc TURN
+            # ═══ BƯỚC 3: Gửi BOARD hoặc TURN ═══
             can_use_turn = (
                 self._synced
                 and not offset_changed
@@ -323,17 +397,20 @@ class SquirrelProxyEngine:
             
             self._last_offset = new_offset
             
-            # Gửi INFO
+            # ═══ BƯỚC 4: Gửi INFO ═══
             self._send_to_engine(f"INFO timeout_turn {self.timeout_turn}")
             self._send_to_engine(f"INFO time_left {self.timeout_turn * 20}")
             
-            # Đọc phản hồi
+            # ═══ BƯỚC 5: Đọc phản hồi ═══
             for _ in range(300):
                 line = self._read_from_engine(timeout=0.1)
                 if not line:
                     continue
+                
                 if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
+                    log.info(f"[ENGINE] {line}")
                     continue
+                
                 if "," in line:
                     parts = line.split(",")
                     if len(parts) == 2:
@@ -343,21 +420,29 @@ class SquirrelProxyEngine:
                             vx, vy = self._engine_to_virtual(ex, ey)
                             
                             if (0 <= vx < self.VIRTUAL_WIDTH 
-                                and 0 <= vy < self.VIRTUAL_HEIGHT 
-                                and self.virtual_board[vx][vy] == 0):
-                                log.info(f"[PROXY] Move: engine({ex},{ey}) -> virtual({vx},{vy})")
-                                self._synced = True
-                                self._expected_history_len = len(board_history) + 1
-                                return (vx, vy)
+                                and 0 <= vy < self.VIRTUAL_HEIGHT):
+                                current_sym = self.virtual_board[vx][vy]
+                                if current_sym == EMPTY:
+                                    log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
+                                    self._synced = True
+                                    self._expected_history_len = len(board_history) + 1
+                                    return (vx, vy)
+                                else:
+                                    sym_char = "X" if current_sym == CROSS else "O"
+                                    log.warning(f"[PROXY] ⚠ Cell ({vx},{vy}) already occupied by {sym_char}!")
                             else:
-                                log.warning(f"[PROXY] Invalid move from engine: ({vx},{vy})")
-                                self._synced = False
+                                log.warning(f"[PROXY] ⚠ Move ({vx},{vy}) out of virtual board!")
+                            
+                            self._synced = False
                         except ValueError:
                             continue
             
-            log.error("[PROXY] No valid move received")
+            log.error("[PROXY] ✗ No valid move received")
             self._synced = False
             return None
+
+    def __del__(self):
+        self.stop()
 
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
@@ -377,9 +462,6 @@ IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
 BOT_MATCH_DURATION = '0'
 BOT_TURN_DURATION = '60'
-EMPTY = -1
-CIRCLE = 0
-CROSS = 1
 
 CMD_MAP = {
     300: "PONG", 301: "PING", 302: "LOGIN", 303: "ALERT", 304: "RIBBON_MESSAGE",
@@ -547,7 +629,6 @@ class CaroBot:
         self.bet_amts = []; self._resolved_bet_id = None
         self._bet_amts_loaded = False; self._joining_table = False
         
-        # Sử dụng SquirrelProxyEngine thay vì AlphaGomokuEngine
         self.ag = None; self.ag_available = False
         self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
         self._moving = False; self._last_move_xy = None
@@ -570,13 +651,12 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            # Khởi tạo SquirrelProxyEngine (thay vì AlphaGomokuEngine)
             self.ag = SquirrelProxyEngine(timeout_turn=AG_TIMEOUT, rule=AG_RULE)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] SQUIRREL {AG_VERSION} OK! Rule={AG_RULE} (Proxy 15x19 -> 15x15)")
+                log.info(f"[AG] SQUIRREL {AG_VERSION} OK! Rule={AG_RULE}")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
@@ -673,7 +753,7 @@ class CaroBot:
             
             if self.ag_available:
                 try:
-                    # Proxy tự động dịch board_history (15x19) sang 15x15 cho engine
+                    log.info(f"[BOT] Requesting move from engine... (history={len(history)} moves, my_side={'X' if self.my_symbol == CROSS else 'O'})")
                     move = await asyncio.get_event_loop().run_in_executor(
                         None, 
                         lambda: self.ag.get_move(history, self.my_symbol)
@@ -682,9 +762,10 @@ class CaroBot:
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
                         and self.board.get(*move) == EMPTY):
                         x, y = move; self.ag_moves += 1
+                        log.info(f"[BOT] ✓ Engine move: ({x},{y})")
                     else:
                         self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối")
+                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
                         if history:
                             lx, ly = history[-1][0], history[-1][1]
                         else:
@@ -711,7 +792,7 @@ class CaroBot:
                 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG/PROXY]")
+            log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s [AG]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
@@ -1254,7 +1335,8 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*60}")
-        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE FOR 15×19 BOARD")
+        log.info("BOT CARO SQUIRREL24 - FIXED PROXY ENGINE v2.0")
+        log.info("FIX: Symbol mapping, EMPTY init, coordinate tracking")
         log.info(f"{'='*60}")
         
         retry_count = 0
@@ -1318,4 +1400,171 @@ async def _run_bot():
     except Exception as e: log.error(f"[BOT] Error: {e}", exc_info=True)
 
 if __name__ == "__main__": main()
-elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
+elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()CIRCLE = 0
+CROSS = 1
+
+# Gomocup protocol symbols (ENGINE uses 1=black, 2=white)
+ENGINE_SYMBOL_BLACK = 1
+ENGINE_SYMBOL_WHITE = 2
+
+def auto_download_alphagomoku() -> Optional[str]:
+    binary_path = ENGINE_DIR / AG_BINARY
+    if binary_path.exists():
+        try: binary_path.chmod(0o755)
+        except Exception: pass
+        return str(binary_path)
+    log.info(f"[AG] Downloading SQUIRREL {AG_VERSION}...")
+    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        import zipfile
+        archive = Path("/tmp/squirrel24.zip")
+        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            archive.write_bytes(resp.read())
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(str(ENGINE_DIR))
+        archive.unlink(missing_ok=True)
+        try: binary_path.chmod(0o755)
+        except Exception: pass
+        return str(binary_path)
+    except Exception as e:
+        log.error(f"[AG] Download failed: {e}")
+        return None
+
+def detect_ag_binary() -> Optional[str]:
+    if not ENGINE_DIR.exists(): return None
+    for f in ENGINE_DIR.glob("pbrain-squirrel.exe"):
+        try: f.chmod(0o755)
+        except Exception: pass
+        return str(f)
+    return None
+
+# ═══════════════════════════════════════════════════════════════════════
+#  FIXED SQUIRREL PROXY ENGINE - Corrected Symbol & Coordinate Logic
+# ═══════════════════════════════════════════════════════════════════════
+class SquirrelProxyEngine:
+    """
+    Proxy Engine: Dịch bàn cờ 15×19 của game thành 15×15 cho SQUIRREL24.
+    FIX: Correct symbol mapping, EMPTY handling, debug logging.
+    """
+    VIRTUAL_WIDTH = 15
+    VIRTUAL_HEIGHT = 19
+    ENGINE_WIDTH = 15
+    ENGINE_HEIGHT = 15
+    MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_HEIGHT  # = 4
+
+    def __init__(self, timeout_turn: int = 2000, rule: int = 8):
+        self.binary = None
+        self.timeout_turn = timeout_turn
+        self.rule = rule
+        
+        # Virtual board (15×19) - KHỞI TẠO VỚI EMPTY (-1), KHÔNG PHẢI 0
+        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
+        self.move_history: List[Tuple[int, int, int]] = []
+        
+        # Sliding window
+        self.window_y_offset = 0
+        self._last_offset = 0
+        
+        # Engine process
+        self.proc: Optional[subprocess.Popen] = None
+        self.lock = threading.Lock()
+        self._buffer = b""
+        self._initialized = False
+        
+        # Tracking
+        self.my_side = CROSS  # 1 = CROSS (X), 0 = CIRCLE (O)
+        self._synced = False
+        self._expected_history_len = -1
+        
+        # Debug
+        self.debug = os.environ.get("CARO_DEBUG") == "1"
+
+    def _log_debug(self, msg: str):
+        if self.debug:
+            log.info(f"[PROXY DEBUG] {msg}")
+
+    def _send_to_engine(self, cmd: str):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write((cmd + "\n").encode("utf-8"))
+                self.proc.stdin.flush()
+                if self.debug:
+                    log.debug(f"[SEND -> ENGINE] {cmd}")
+            except Exception as e:
+                log.error(f"Send error: {e}")
+
+    def _read_from_engine(self, timeout: float = 10.0) -> str:
+        if not self.proc or self.proc.poll() is not None:
+            return ""
+        deadline = time.monotonic() + timeout
+        while True:
+            idx = self._buffer.find(b"\n")
+            if idx >= 0:
+                line_bytes = self._buffer[:idx].strip()
+                self._buffer = self._buffer[idx + 1:]
+                line = line_bytes.decode("utf-8", errors="replace")
+                if self.debug:
+                    log.debug(f"[RECV <- ENGINE] {line}")
+                return line
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            try:
+                sel = selectors.DefaultSelector()
+                sel.register(self.proc.stdout, selectors.EVENT_READ)
+                ready = sel.select(timeout=min(remaining, 0.5))
+                sel.close()
+                if ready:
+                    chunk = os.read(self.proc.stdout.fileno(), 4096)
+                    if not chunk: return ""
+                    self._buffer += chunk
+            except Exception:
+                return ""
+
+    def start_engine(self) -> bool:
+        if self._initialized:
+            return True
+        if not self.binary:
+            log.error("[PROXY] Binary not set!")
+            return False
+        try:
+            is_exe = self.binary.lower().endswith('.exe')
+            cmd = ["wine", self.binary] if is_exe else [self.binary]
+            log.info(f"[PROXY] Starting engine: {' '.join(cmd)}")
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=os.path.dirname(self.binary) or "."
+            )
+            self._buffer = b""
+            
+            self._send_to_engine("START 15")
+            for _ in range(10):
+                line = self._read_from_engine(timeout=2.0)
+                if line.upper() == "OK":
+                    log.info("[PROXY] ✓ Engine started (15x15 mode)")
+                    break
+            else:
+                log.warning("[PROXY] ⚠ Engine did not respond OK to START")
+            
+            self._send_to_engine(f"INFO rule {self.rule}")
+            self._send_to_engine(f"INFO timeout_turn {self.timeout_turn}")
+            self._send_to_engine("INFO ponder 1")
+            time.sleep(0.3)
+            self._initialized = True
+            return True
+        except Exception as e:
+            log.error(f"[PROXY] Start error: {e}")
+            return False
+
+    def start_game(self, my_symbol: int = CROSS) -> bool:
+        """Khởi tạo ván mới. my_symbol: CROSS (1) hoặc CIRCLE (0)"""
+        self._synced = False
+        # KHỞI TẠO VỚI EMPTY, KHÔNG PHẢI 0
+        self.virtual_board = [[EMPTY] * self.VIRTUAL_HEIGHT for _ in range(self.VIRTUAL_WIDTH)]
+        self.move_history.clear()
