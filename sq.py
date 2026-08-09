@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO SQUIRREL24 - PROXY ENGINE v3.1 (SQUI FIXED)           ║
-║  Engine: SQUIRREL24 (Gomocup) via Sliding Window Proxy FIXED    ║
-║  FIX: _calculate_offset tối ưu (max visible stones)             ║
-║  FIX: BEGIN mapping về tâm 15x19 (7,9) thay vì 7,7              ║
-║  FIX: RESTART gửi lại INFO, cwd=str(ENGINE_DIR) cho DLL         ║
-║  FIX: detect đa pattern, giữ FULL BOARD, fallback chuẩn         ║
+║  BOT CARO SQUIRREL24 - PROXY ENGINE v4.0 (ADVANCED DYNAMIC VIEW)║
+║  Engine: SQUIRREL24 (Gomocup) via Sliding Window Proxy          ║
+║  - DYNAMIC WINDOW: Tập trung khu vực đang giao chiến (Recency)   ║
+║  - TIMEOUT: Nâng lên 0.5s per poll, xử lý trễ mượt mà          ║
+║  - FALLBACK: Heuristic lọc nước đi gần khu vực nóng             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -56,7 +55,7 @@ AG_BINARY = "pbrain-katagomo_caro-15.exe"
 AG_VERSION = "2024"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
 AG_RULE = 8
-AG_TIMEOUT = 2000
+AG_TIMEOUT = 2500
 
 # ======================== CONSTANTS ========================
 EMPTY = -1
@@ -91,14 +90,12 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Hỗ trợ nhiều pattern như bot2 (phòng zip giải nén khác tên/thư mục con)
     for pattern in ["pbrain-katagomo_caro-15.exe", "pbrain-katagomo_caro-15*"]:
         for f in ENGINE_DIR.glob(pattern):
             if f.is_file():
                 try: f.chmod(0o755)
                 except Exception: pass
                 return str(f)
-        # tìm trong thư mục con (SQUIRREL zip đôi khi có subfolder)
         for f in ENGINE_DIR.rglob(pattern):
             if f.is_file():
                 try: f.chmod(0o755)
@@ -107,21 +104,21 @@ def detect_ag_binary() -> Optional[str]:
     return None
 
 # ═══════════════════════════════════════════════════════════════════════
-#  SQUIRREL PROXY ENGINE v3.0 - ALWAYS FULL BOARD, NO TURN
+#  SQUIRREL PROXY ENGINE v4.0 - DYNAMIC SLIDING WINDOW & IMPROVED IO
 # ═══════════════════════════════════════════════════════════════════════
 class SquirrelProxyEngine:
     """
-    Proxy Engine v3.0:
-    - LUÔN gửi FULL BOARD (không dùng TURN) để tránh mất đồng bộ
-    - Gửi BEGIN khi bàn trống (bot đi trước)
-    - Symbol mapping: my_stones=1, opponent_stones=2
+    Proxy Engine v4.0:
+    - Thuật toán Cửa sổ Động (Dynamic Window): Tập trung vào khu vực có nước đi mới
+    - Timeout được nâng lên 0.5s cho mỗi lần đọc, chống hụt packet
+    - Tự động lọc Heuristic khi nước đi nằm ngoài tầm nhìn 15x15
     """
     VIRTUAL_WIDTH = 15
     VIRTUAL_HEIGHT = 19
     ENGINE_SIZE = 15
     MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_SIZE  # = 4
 
-    def __init__(self, timeout_turn: int = 2000, rule: int = 8):
+    def __init__(self, timeout_turn: int = 2500, rule: int = 8):
         self.binary = None
         self.timeout_turn = timeout_turn
         self.rule = rule
@@ -147,7 +144,8 @@ class SquirrelProxyEngine:
             except Exception as e:
                 log.error(f"Send error: {e}")
 
-    def _read_line(self, timeout: float = 10.0) -> str:
+    def _read_line(self, timeout: float = 0.5) -> str:
+        """Nâng timeout mặc định lên 0.5s để đọc ổn định hơn"""
         if not self.proc or self.proc.poll() is not None:
             return ""
         deadline = time.monotonic() + timeout
@@ -185,7 +183,6 @@ class SquirrelProxyEngine:
             is_exe = self.binary.lower().endswith('.exe')
             cmd = ["wine", self.binary] if is_exe else [self.binary]
             log.info(f"[PROXY] Starting: {' '.join(cmd)}")
-            # FIX: cwd phải là ENGINE_DIR để wine tìm thấy libgfortran/libstdc++ DLLs
             cwd_dir = str(ENGINE_DIR) if ENGINE_DIR.exists() else (os.path.dirname(self.binary) or ".")
             self.proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -194,10 +191,9 @@ class SquirrelProxyEngine:
             )
             self._buffer = b""
             
-            # Khởi động engine với bàn 15x15
             self._send("START 15")
             for _ in range(10):
-                line = self._read_line(timeout=2.0)
+                line = self._read_line(timeout=0.5)
                 if line.upper() == "OK":
                     log.info("[PROXY] ✓ Engine START OK")
                     break
@@ -215,7 +211,6 @@ class SquirrelProxyEngine:
             return False
 
     def start_game(self, my_symbol: int = CROSS) -> bool:
-        """Reset engine cho ván mới – FIX: gửi lại INFO sau RESTART"""
         self.my_side = my_symbol
         side_str = "X (CROSS)" if my_symbol == CROSS else "O (CIRCLE)"
         log.info(f"[PROXY] New game - I am {side_str}")
@@ -225,13 +220,12 @@ class SquirrelProxyEngine:
         
         self._send("RESTART")
         for _ in range(5):
-            line = self._read_line(timeout=2.0)
+            line = self._read_line(timeout=0.5)
             if line.upper() == "OK":
                 log.info("[PROXY] ✓ RESTART OK")
                 break
         else:
             log.warning("[PROXY] ⚠ RESTART no OK")
-        # FIX: gửi lại INFO như bot2 (rule/timeout/ponder) – Squirrel cần lại sau RESTART
         self._send(f"INFO rule {self.rule}")
         self._send(f"INFO timeout_turn {self.timeout_turn}")
         self._send("INFO ponder 1")
@@ -255,156 +249,122 @@ class SquirrelProxyEngine:
             self._initialized = False
 
     def _calculate_offset(self, history: list) -> int:
-        """FIX: Tính offset tối ưu – chọn cửa sổ chứa NHIỀU quân nhất, ưu tiên gần last_y"""
+        """
+        NÂNG CẤP THUẬT TOÁN OFFSET DYNAMIC:
+        Tập trung vào khu vực gầy đây ĐANG ĐÁNH (Recency Weighting).
+        Các vùng đã đánh kín từ lâu sẽ bị giảm giá trị.
+        """
         if not history:
-            return 0
+            return 2  # Offset mặc định để căn giữa (7, 9)
+
         last_y = history[-1][1]
         best_offset = 0
-        best_count = -1
-        best_dist = float('inf')
+        best_score = -1.0
+        total_moves = len(history)
+
         for off in range(self.MAX_Y_OFFSET + 1):
-            cnt = sum(1 for _, y, _ in history if off <= y < off + self.ENGINE_SIZE)
-            dist = abs((off + self.ENGINE_SIZE // 2) - last_y)
-            if cnt > best_count or (cnt == best_count and dist < best_dist):
-                best_count = cnt
-                best_dist = dist
+            score = 0.0
+            for idx, (_, y, _) in enumerate(history):
+                if off <= y < off + self.ENGINE_SIZE:
+                    # Trọng số nước đi gần nhất: Nước càng mới thì điểm càng cao
+                    recency_weight = 1.0 + ((idx + 1) / total_moves) * 3.0
+                    score += recency_weight
+            
+            # Thưởng lớn nếu chứa nước vừa đi gần đây nhất
+            if off <= last_y < off + self.ENGINE_SIZE:
+                score += 5.0
+                
+            # Phạt khoảng cách từ trung tâm khung nhìn tới last_y
+            center_y = off + self.ENGINE_SIZE // 2
+            score -= abs(center_y - last_y) * 0.2
+
+            if score > best_score:
+                best_score = score
                 best_offset = off
-        # Fallback nếu spread quá lớn, vẫn ưu tiên chứa last_y
-        # Đảm bảo không mất quá 4 hàng: nếu best_count < len(history) thì log warning
-        if best_count < len(history):
-            log.warning(f"[PROXY] ⚠ Window {best_offset}..{best_offset+15} chỉ chứa {best_count}/{len(history)} quân – 1 số quân ngoài window sẽ bị ẩn (giới hạn engine 15x15)")
+
         return best_offset
 
-    def _calculate_offset_simple(self, history: list) -> int:
-        """Giữ hàm cũ để tham chiếu (last_y -7)"""
-        if not history:
-            return 0
-        last_y = history[-1][1]
-        desired = last_y - (self.ENGINE_SIZE // 2)
-        return max(0, min(self.MAX_Y_OFFSET, desired))
+    def _read_engine_move(self, timeout_total: float = 2.5) -> Optional[Tuple[int, int]]:
+        """Đọc phản hồi từ engine bằng Regex nhanh và chính xác hơn"""
+        deadline = time.monotonic() + timeout_total
+        while time.monotonic() < deadline:
+            line = self._read_line(timeout=0.5)
+            if not line:
+                continue
+            if line.startswith(("MESSAGE", "ERROR", "DEBUG", "UNKNOWN")):
+                log.info(f"[ENGINE] {line}")
+                continue
+            match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+        return None
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
-        """
-        Lấy nước đi từ engine.
-        
-        board_history: [(x, y, symbol), ...] với symbol = CIRCLE(0) hoặc CROSS(1)
-        my_side: CIRCLE(0) hoặc CROSS(1) - quân của bot
-        
-        Engine protocol:
-          1 = quân của engine (my stones)
-          2 = quân của đối thủ (opponent stones)
-        """
         with self.lock:
             if not self._initialized:
                 if not self.start_engine():
                     return None
             
             self.my_side = my_side
-            
-            # ═══ TÍNH WINDOW OFFSET ═══
             offset_y = self._calculate_offset(board_history)
-            self._log(f"Window offset_y={offset_y}, history_len={len(board_history)}")
+            self._log(f"Dynamic Window offset_y={offset_y}, history_len={len(board_history)}")
             
-            # ═══ GỬI INFO ═══
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left {self.timeout_turn * 20}")
             
-            # ═══ TRƯỜNG HỢP 1: BÀN TRỐNG → BOT ĐI TRƯỚC ═══
-            # FIX: BEGIN luôn dùng offset=2 để tâm 15x15 (7,7) → tâm 15x19 (7,9)
+            # ═══ 1. BÀN TRỐNG: GỬI BEGIN ═══
             if len(board_history) == 0:
                 self._log("Empty board -> sending BEGIN (offset 2 → tâm 7,9)")
                 self._send("BEGIN")
+                move = self._read_engine_move(timeout_total=2.5)
+                if move:
+                    ex, ey = move
+                    vx, vy = ex, ey + 2
+                    if not (0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT):
+                        vx, vy = 7, 9
+                    log.info(f"[PROXY] ✓ BEGIN move: engine({ex},{ey}) -> virtual({vx},{vy})")
+                    return (vx, vy)
                 
-                for _ in range(300):
-                    line = self._read_line(timeout=0.5)
-                    if not line: continue
-                    if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
-                        log.info(f"[ENGINE] {line}")
-                        continue
-                    if "," in line:
-                        parts = line.split(",")
-                        if len(parts) == 2:
-                            try:
-                                ex, ey = int(parts[0].strip()), int(parts[1].strip())
-                                # FIX: BEGIN engine (7,7) phải map về virtual (7,9) → offset 2
-                                # Nếu engine trả khác 7,7 thì vẫn cộng 2 để giữ tâm 15x19
-                                begin_offset = 2
-                                vx, vy = ex, ey + begin_offset
-                                # fallback nếu ngoài biên (hiếm) thì trả về tâm thật
-                                if not (0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT):
-                                    vx, vy = 7, 9
-                                log.info(f"[PROXY] ✓ BEGIN move: engine({ex},{ey}) -> virtual({vx},{vy}) [offset {begin_offset}]")
-                                return (vx, vy)
-                            except ValueError:
-                                continue
-                # Fallback nếu BEGIN timeout: đánh tâm 15x19
                 log.warning("[PROXY] BEGIN timeout → fallback (7,9)")
                 return (7, 9)
             
-            # ═══ TRƯỜNG HỢP 2: GỬI FULL BOARD ═══
-            # LUÔN gửi FULL BOARD để engine có đầy đủ thông tin
+            # ═══ 2. GỬI BOARD ═══
             self._send("BOARD")
-            
             my_count = 0
             opp_count = 0
             
             for (x, y, sym) in board_history:
-                # Kiểm tra tọa độ nằm trong cửa sổ 15x15
                 if not (0 <= x < self.VIRTUAL_WIDTH):
                     continue
                 if not (offset_y <= y < offset_y + self.ENGINE_SIZE):
                     continue
                 
-                # Chuyển tọa độ virtual -> engine
                 ex = x
                 ey = y - offset_y
-                
-                # Chuyển symbol:
-                # sym == my_side → engine symbol 1 (quân của engine)
-                # sym != my_side → engine symbol 2 (quân đối thủ)
-                if sym == my_side:
-                    engine_sym = 1
-                    my_count += 1
-                else:
-                    engine_sym = 2
-                    opp_count += 1
+                engine_sym = 1 if sym == my_side else 2
+                if engine_sym == 1: my_count += 1
+                else: opp_count += 1
                 
                 self._send(f"{ex},{ey},{engine_sym}")
             
             self._send("DONE")
+            log.info(f"[PROXY] BOARD sent: {my_count} my (1) + {opp_count} opp (2), offset_y={offset_y}")
             
-            log.info(f"[PROXY] BOARD sent: {my_count} my stones (sym=1) + {opp_count} opponent stones (sym=2), offset_y={offset_y}")
-            
-            if my_count == 0 and opp_count == 0:
-                log.warning("[PROXY] ⚠ No stones in window! All moves outside 15x15 view.")
-            
-            # ═══ ĐỌC PHẢN HỒI ═══
-            for _ in range(300):
-                line = self._read_line(timeout=0.5)
-                if not line: continue
-                if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
-                    log.info(f"[ENGINE] {line}")
-                    continue
-                if "," in line:
-                    parts = line.split(",")
-                    if len(parts) == 2:
-                        try:
-                            ex, ey = int(parts[0].strip()), int(parts[1].strip())
-                            # Chuyển engine -> virtual
-                            vx, vy = ex, ey + offset_y
-                            
-                            if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
-                                # Kiểm tra ô trống
-                                is_occupied = any(hx == vx and hy == vy for hx, hy, _ in board_history)
-                                if not is_occupied:
-                                    log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
-                                    return (vx, vy)
-                                else:
-                                    log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, engine returned invalid move")
-                            else:
-                                log.warning(f"[PROXY] ⚠ ({vx},{vy}) out of bounds")
-                        except ValueError:
-                            continue
+            # ═══ 3. ĐỌC PHẢN HỒI NƯỚC ĐỊNH ĐÁNH ═══
+            move = self._read_engine_move(timeout_total=3.0)
+            if move:
+                ex, ey = move
+                vx, vy = ex, ey + offset_y
+                
+                if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
+                    is_occupied = any(hx == vx and hy == vy for hx, hy, _ in board_history)
+                    if not is_occupied:
+                        log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
+                        return (vx, vy)
+                    else:
+                        log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, invalid engine move")
+                else:
+                    log.warning(f"[PROXY] ⚠ ({vx},{vy}) out of bounds")
             
             log.error("[PROXY] ✗ No valid move from engine")
             return None
@@ -574,13 +534,18 @@ class Board:
         return (0, 0)
 
     def get_empty_near(self, x0: int, y0: int) -> tuple:
-        for r in range(10):
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    x, y = x0 + dx, y0 + dy
-                    if 0 <= x < self.width and 0 <= y < self.height:
-                        if self.grid[y][x] == EMPTY:
-                            return (x, y)
+        """Nâng cấp Heuristic: Lọc candidate trống gần nước đi gần nhất"""
+        candidates = set()
+        for hx, hy, _ in reversed(self.history[-5:]):
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    nx, ny = hx + dx, hy + dy
+                    if 0 <= nx < self.width and 0 <= ny < self.height:
+                        if self.grid[ny][nx] == EMPTY:
+                            candidates.add((nx, ny))
+        
+        if candidates:
+            return min(candidates, key=lambda pos: abs(pos[0] - x0) + abs(pos[1] - y0))
         return self.get_empty_near_center()
 
 # ======================== BOT ========================
@@ -732,10 +697,7 @@ class CaroBot:
                     else:
                         self.ag_errors += 1
                         log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
-                        else:
-                            lx, ly = 7, 9
+                        lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
                         self.ag.start_game(my_symbol=self.my_symbol)
@@ -743,17 +705,11 @@ class CaroBot:
                     self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
                     except Exception: pass
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
+                    lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
-                if history:
-                    lx, ly = history[-1][0], history[-1][1]
-                else:
-                    lx, ly = 7, 9
+                lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                 x, y = self.board.get_empty_near(lx, ly)
                 
             elapsed = time.time() - start
@@ -798,7 +754,7 @@ class CaroBot:
             if r.remaining() > 0: self.lock_key = r.read_ascii()
             await self.send(self.make_enter(self.place_path))
         else:
-            log.error(f"LOGIN failed")
+            log.error("LOGIN failed")
 
     async def handle_enter(self, r: BinaryReader):
         status = r.i8()
@@ -932,7 +888,7 @@ class CaroBot:
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
-                self.pending_move = True; await asyncio.sleep(1.5); await self.do_move()
+                self.pending_move = True; await asyncio.sleep(1.2); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
         pos = r.i16(); symbol = r.i8()
@@ -1205,7 +1161,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*60}")
-        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE v3.0 (FINAL FIX)")
+        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE v4.0 (ADVANCED DYNAMIC VIEW)")
         log.info(f"{'='*60}")
         
         retry_count = 0
