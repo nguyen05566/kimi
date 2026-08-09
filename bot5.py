@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO DUAL ENGINE - FULL NAME + AVATAR v5.0                     ║
-║  Primary: AlphaGomoku(MK) v5.9.3 | Fallback: Embryo v1.2.0                    ║
+║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
+║  Engine: Embryo Caro6 v1.2.0 (Linux Native)                    ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
 ║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
@@ -46,98 +46,66 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== DUAL ENGINE CONFIG ========================
+# ======================== ALPHA GOMOKU CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-
-# --- Primary: AlphaGomoku(MK) v5.9.3 (Rank #3 Gomocup 2026, bàn <=15x15) ---
-AG_PRIMARY_BINARY = "pbrain-AlphaGomoku"
-AG_PRIMARY_VERSION = "5.9.3"
-AG_PRIMARY_DOWNLOAD_URL = "https://github.com/MaciejKozarzewski/AlphaGomoku/releases/download/v5.9.3/AlphaGomoku_linux.zip"
-AG_PRIMARY_MAX_BOARD = 15
-
-# --- Fallback: Embryo Caro6 v1.2.0 (bàn 15x19) ---
-AG_FALLBACK_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
-AG_FALLBACK_VERSION = "1.2.0"
-AG_FALLBACK_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
-
-AG_RULE = 8  # Freestyle Caro
+AG_BINARY = "pbrain-AlphaGomoku"
+AG_VERSION = "5.9.3"
+AG_DOWNLOAD_URL = "https://github.com/MaciejKozarzewski/AlphaGomoku/releases/download/v5.9.3/AlphaGomoku_linux.zip"
+AG_RULE = 8  # Caro rule (AlphaGomoku supports rule 8 natively)
 AG_TIMEOUT = 2000  # 2 giây
 
-def auto_download_engine(binary_name: str, download_url: str, is_zip: bool = False) -> Optional[str]:
-    """Tải và giải nén engine."""
-    binary_path = ENGINE_DIR / binary_name
+def auto_download_alphagomoku() -> Optional[str]:
+    binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
         try:
             binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    
-    log.info(f"[ENGINE] Downloading {binary_name}...")
+    log.info(f"[AG] Downloading AlphaGomoku {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        tmp = Path("/tmp/engine_dl")
-        req = urllib.request.Request(download_url, headers={
+        import zipfile
+        archive = Path("/tmp/ag.zip")
+        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
         with urllib.request.urlopen(req, timeout=120) as resp:
-            tmp.write_bytes(resp.read())
-        
-        if is_zip:
-            import zipfile
-            with zipfile.ZipFile(tmp, "r") as zf:
-                for member in zf.namelist():
-                    if "cuda" in member.lower() or "opencl" in member.lower():
-                        continue  # Bỏ qua file nặng GPU
-                    target = ENGINE_DIR / member
-                    if member.endswith('/'):
-                        target.mkdir(parents=True, exist_ok=True)
-                    else:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(zf.read(member))
-        else:
-            import bz2
-            with bz2.BZ2File(tmp, "rb") as f_in, open(binary_path, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-        
-        tmp.unlink(missing_ok=True)
-        if binary_path.exists():
+            archive.write_bytes(resp.read())
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(ENGINE_DIR)
+        archive.unlink(missing_ok=True)
+        try:
             binary_path.chmod(0o755)
-            return str(binary_path)
+        except Exception: pass
+        return str(binary_path)
     except Exception as e:
-        log.error(f"[ENGINE] Download {binary_name} failed: {e}")
-    return None
+        log.error(f"[AG] Download failed: {e}")
+        return None
 
-def detect_primary_binary() -> Optional[str]:
-    """Tìm AlphaGomoku binary."""
+def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    for f in ENGINE_DIR.glob("pbrain-AlphaGomoku"):
+    for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
         if "cuda" not in f.name and "opencl" not in f.name:
-            f.chmod(0o755)
+            try:
+                f.chmod(0o755)
+            except Exception: pass
             return str(f)
+    for f in ENGINE_DIR.glob("pbrain-AlphaGomoku"):
+        try:
+            f.chmod(0o755)
+        except Exception: pass
+        return str(f)
     return None
 
-def detect_fallback_binary() -> Optional[str]:
-    """Tìm Embryo binary."""
-    if not ENGINE_DIR.exists(): return None
-    for f in ENGINE_DIR.glob("pbrain-embryo-1.2*"):
-        if f.suffix == '' or '.exe' not in f.name:
-            f.chmod(0o755)
-            return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo*"):
-        if f.suffix == '' or '.exe' not in f.name:
-            f.chmod(0o755)
-            return str(f)
-    return None
-
-# ======================== ENGINE WRAPPER ========================
-class DualEngineWrapper:
-    """Wrapper hỗ trợ AlphaGomoku (bàn <=15) và Embryo (bàn 15x19)."""
+# ======================== ALPHAGOMOKU ENGINE WRAPPER ========================
+class AlphaGomokuEngine:
     def __init__(self, timeout_turn=2000, board_size=15, rule=9):
+        self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
         self.rule = rule
@@ -146,15 +114,6 @@ class DualEngineWrapper:
         self._buffer = b""
         self.my_side = 1
         self._initialized = False
-        self.engine_name = ""
-        
-        # Tự chọn engine theo board size
-        if board_size <= AG_PRIMARY_MAX_BOARD:
-            self.binary = detect_primary_binary()
-            self.engine_name = "AlphaGomoku"
-        if not self.binary:
-            self.binary = detect_fallback_binary()
-            self.engine_name = "Embryo"
 
     def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
@@ -187,16 +146,13 @@ class DualEngineWrapper:
 
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
-        is_ag = (self.engine_name == "AlphaGomoku")
-        
         if self.proc and self.proc.poll() is None:
             self._send("RESTART")
             for _ in range(5):
                 if self._read_line(timeout=0.5).upper() == "OK": break
-            if not is_ag:
-                self._send(f"RECTSTART {self.board_size},19")
-                for _ in range(5):
-                    if self._read_line(timeout=0.5).upper() == "OK": break
+            self._send("RECTSTART 15,19")
+            for _ in range(5):
+                if self._read_line(timeout=0.5).upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left 100000")
@@ -214,27 +170,19 @@ class DualEngineWrapper:
             )
             self._buffer = b""
             self.my_side = my_symbol
-            
-            if is_ag:
-                # AlphaGomoku: giao thức chuẩn START
-                self._send(f"START {self.board_size}")
-            else:
-                # Embryo: RECTSTART cho bàn chữ nhật
-                self._send(f"RECTSTART {self.board_size},19")
+            self._send("RECTSTART 15,19")
             for _ in range(10):
                 line = self._read_line(timeout=1.0)
                 if line.upper() == "OK": break
-            
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left 100000")
             self._send("INFO ponder 1")
             time.sleep(0.2)
             self._initialized = True
-            log.info(f"[ENGINE] {self.engine_name} started (board={self.board_size})")
             return True
         except Exception as e:
-            log.error(f"[ENGINE] Start error: {e}")
+            log.error(f"[AG] Start error: {e}")
             self._initialized = False
             return False
 
@@ -504,42 +452,26 @@ class CaroBot:
 
     def init_ag(self):
         if self.ag is not None: return self.ag_available
-        
-        board_w = self.board.width
-        use_primary = (board_w <= AG_PRIMARY_MAX_BOARD)
-        
-        if use_primary:
-            binary = detect_primary_binary()
-            if not binary:
-                binary = auto_download_engine(AG_PRIMARY_BINARY, AG_PRIMARY_DOWNLOAD_URL, is_zip=True)
-            engine_name = "AlphaGomoku"
-            engine_ver = AG_PRIMARY_VERSION
-        else:
-            binary = detect_fallback_binary()
-            if not binary:
-                binary = auto_download_engine(AG_FALLBACK_BINARY, AG_FALLBACK_DOWNLOAD_URL, is_zip=False)
-            engine_name = "Embryo"
-            engine_ver = AG_FALLBACK_VERSION
-        
+        binary = detect_ag_binary()
         if not binary:
-            log.warning("[ENGINE] No binary found!")
+            binary = auto_download_alphagomoku()
+        if not binary:
+            log.warning("[AG] No binary found!")
             self.ag_available = False
             return False
-        
         try:
-            self.ag = DualEngineWrapper(timeout_turn=AG_TIMEOUT, board_size=board_w, rule=AG_RULE)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
             self.ag.binary = binary
-            self.ag.engine_name = engine_name
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[ENGINE] {engine_name} v{engine_ver} OK! Board={board_w} Rule={AG_RULE}")
+                log.info(f"[AG] Embryo v{AG_VERSION} OK! Rule={AG_RULE}")
             else:
                 self.ag_available = False
-                log.warning(f"[ENGINE] {engine_name} start failed!")
+                log.warning("[AG] Start failed!")
             return self.ag_available
         except Exception as e:
-            log.error(f"[ENGINE] Init error: {e}")
+            log.error(f"[AG] Init error: {e}")
             self.ag_available = False
             return False
 
@@ -1271,10 +1203,9 @@ class CaroBot:
             if self.ag: self.ag.stop(); self.ag = None
 
 def main():
-    # Pre-download both engines
-    p = detect_primary_binary() or auto_download_engine(AG_PRIMARY_BINARY, AG_PRIMARY_DOWNLOAD_URL, is_zip=True)
-    f = detect_fallback_binary() or auto_download_engine(AG_FALLBACK_BINARY, AG_FALLBACK_DOWNLOAD_URL, is_zip=False)
-    log.info(f"[PREP] Primary: {'OK' if p else 'FAIL'} | Fallback: {'OK' if f else 'FAIL'}")
+    bin_path = auto_download_alphagomoku()
+    if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
+    else: print("[SETUP] No AlphaGomoku - bot plays center only")
     
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
