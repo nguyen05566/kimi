@@ -53,10 +53,10 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo-1.2.0-6f650fab-c6"
-AG_VERSION = "1.2.0"
-AG_DOWNLOAD_URL = "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
-AG_RULE = 8  # Freestyle Caro
+AG_BINARY = "pbrain-embryo25_c5.exe"
+AG_VERSION = "2025"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO25.zip"
+AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
 AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
@@ -69,15 +69,15 @@ def auto_download_alphagomoku() -> Optional[str]:
     log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        archive = Path("/tmp/embryo.bz2")
+        import zipfile
+        archive = Path("/tmp/embryo25.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             archive.write_bytes(resp.read())
-        import bz2
-        with bz2.BZ2File(archive, "rb") as f_in, open(binary_path, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
         try:
             binary_path.chmod(0o755)
@@ -89,24 +89,15 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    for f in ENGINE_DIR.glob("pbrain-embryo-1.2*"):
-        if f.suffix == '' or '.exe' not in f.name:
-            try:
-                f.chmod(0o755)
-            except Exception: pass
-            return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo*"):
-        if f.suffix == '' or '.exe' not in f.name:
-            try:
-                f.chmod(0o755)
-            except Exception: pass
-            return str(f)
-    for f in ENGINE_DIR.glob("pbrain-AlphaGomoku*"):
-        if "cuda" not in f.name and "opencl" not in f.name:
-            try:
-                f.chmod(0o755)
-            except Exception: pass
-            return str(f)
+    # Embryo 2025: Windows exe chạy qua wine
+    for f in ENGINE_DIR.glob("pbrain-embryo25_c5.exe"):
+        try: f.chmod(0o644)
+        except Exception: pass
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain-embryo25_c5*"):
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain-embryo25*.exe"):
+        return str(f)
     return None
 
 # ======================== ENGINE WRAPPER ========================
@@ -162,7 +153,6 @@ class AlphaGomokuEngine:
                 if self._read_line(timeout=0.5).upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
-            self._send(f"INFO time_left 100000")
             self._send("INFO ponder 1")
             self.my_side = my_symbol
             self._initialized = True
@@ -171,8 +161,14 @@ class AlphaGomokuEngine:
         self.stop()
         if not self.binary: return False
         try:
+            # Embryo 2025 là Windows exe → chạy qua Wine
+            is_exe = self.binary.lower().endswith('.exe')
+            if is_exe:
+                cmd = ["wine", self.binary]
+            else:
+                cmd = [self.binary]
             self.proc = subprocess.Popen(
-                [self.binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
             )
             self._buffer = b""
@@ -183,7 +179,6 @@ class AlphaGomokuEngine:
                 if line.upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
-            self._send(f"INFO time_left 100000")
             self._send("INFO ponder 1")
             time.sleep(0.2)
             self._initialized = True
