@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO SQUIRREL24 - PROXY ENGINE v4.0 (ADVANCED DYNAMIC VIEW)║
-║  Engine: SQUIRREL24 (Gomocup) via Sliding Window Proxy          ║
-║  - DYNAMIC WINDOW: Tập trung khu vực đang giao chiến (Recency)   ║
-║  - TIMEOUT: Nâng lên 0.5s per poll, xử lý trễ mượt mà          ║
-║  - FALLBACK: Heuristic lọc nước đi gần khu vực nóng             ║
+║  BOT CARO SQUIRREL24 - PROXY ENGINE v5.0 (STABLE & ANTI-NOISE)  ║
+║  Engine: SQUIRREL24 (Gomocup) via Dynamic Sliding Window         ║
+║  - ANTI-NOISE: Lọc sạch tin nhắn Engine & GameVH, chống nhiễu    ║
+║  - RECONNECT SAFE: Khóa sync khi đối thủ ra/vào liên tục         ║
+║  - DYNAMIC WINDOW: Bám sát khu vực nóng, bỏ qua ô đã đánh kín    ║
+║  - TIMEOUT: Nâng lên 0.5s per poll, đọc I/O cực mượt             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -104,15 +105,9 @@ def detect_ag_binary() -> Optional[str]:
     return None
 
 # ═══════════════════════════════════════════════════════════════════════
-#  SQUIRREL PROXY ENGINE v4.0 - DYNAMIC SLIDING WINDOW & IMPROVED IO
+#  SQUIRREL PROXY ENGINE v5.0 - DYNAMIC VIEW & ANTI-NOISE FILTERING
 # ═══════════════════════════════════════════════════════════════════════
 class SquirrelProxyEngine:
-    """
-    Proxy Engine v4.0:
-    - Thuật toán Cửa sổ Động (Dynamic Window): Tập trung vào khu vực có nước đi mới
-    - Timeout được nâng lên 0.5s cho mỗi lần đọc, chống hụt packet
-    - Tự động lọc Heuristic khi nước đi nằm ngoài tầm nhìn 15x15
-    """
     VIRTUAL_WIDTH = 15
     VIRTUAL_HEIGHT = 19
     ENGINE_SIZE = 15
@@ -145,7 +140,7 @@ class SquirrelProxyEngine:
                 log.error(f"Send error: {e}")
 
     def _read_line(self, timeout: float = 0.5) -> str:
-        """Nâng timeout mặc định lên 0.5s để đọc ổn định hơn"""
+        """Đọc dòng với Timeout nâng lên 0.5s, lọc sạch khoảng trắng thừa"""
         if not self.proc or self.proc.poll() is not None:
             return ""
         deadline = time.monotonic() + timeout
@@ -154,8 +149,8 @@ class SquirrelProxyEngine:
             if idx >= 0:
                 line_bytes = self._buffer[:idx].strip()
                 self._buffer = self._buffer[idx + 1:]
-                line = line_bytes.decode("utf-8", errors="replace")
-                if self.debug:
+                line = line_bytes.decode("utf-8", errors="replace").strip()
+                if self.debug and line:
                     log.debug(f"[RECV] {line}")
                 return line
             remaining = deadline - time.monotonic()
@@ -250,12 +245,12 @@ class SquirrelProxyEngine:
 
     def _calculate_offset(self, history: list) -> int:
         """
-        NÂNG CẤP THUẬT TOÁN OFFSET DYNAMIC:
-        Tập trung vào khu vực gầy đây ĐANG ĐÁNH (Recency Weighting).
-        Các vùng đã đánh kín từ lâu sẽ bị giảm giá trị.
+        NÂNG CẤP SLIDING WINDOW:
+        Gán trọng số giảm dần cho các nước đi cũ.
+        Khu vực đã đánh kín không còn nước mới sẽ tự động bị loại bỏ khỏi tầm nhìn.
         """
         if not history:
-            return 2  # Offset mặc định để căn giữa (7, 9)
+            return 2  # Offset trung tâm mặc định
 
         last_y = history[-1][1]
         best_offset = 0
@@ -266,15 +261,15 @@ class SquirrelProxyEngine:
             score = 0.0
             for idx, (_, y, _) in enumerate(history):
                 if off <= y < off + self.ENGINE_SIZE:
-                    # Trọng số nước đi gần nhất: Nước càng mới thì điểm càng cao
-                    recency_weight = 1.0 + ((idx + 1) / total_moves) * 3.0
+                    # Trọng số nước đi gần nhất tăng theo hàm lũy thừa nhẹ
+                    recency_weight = 1.0 + ((idx + 1) / total_moves) * 3.5
                     score += recency_weight
             
-            # Thưởng lớn nếu chứa nước vừa đi gần đây nhất
+            # Thưởng điểm cao nếu chứa điểm giao tranh mới nhất
             if off <= last_y < off + self.ENGINE_SIZE:
                 score += 5.0
                 
-            # Phạt khoảng cách từ trung tâm khung nhìn tới last_y
+            # Phạt độ lệch tâm
             center_y = off + self.ENGINE_SIZE // 2
             score -= abs(center_y - last_y) * 0.2
 
@@ -285,15 +280,17 @@ class SquirrelProxyEngine:
         return best_offset
 
     def _read_engine_move(self, timeout_total: float = 2.5) -> Optional[Tuple[int, int]]:
-        """Đọc phản hồi từ engine bằng Regex nhanh và chính xác hơn"""
+        """Lọc tin nhắn thừa và bóc tách tọa độ X,Y chính xác"""
         deadline = time.monotonic() + timeout_total
         while time.monotonic() < deadline:
             line = self._read_line(timeout=0.5)
             if not line:
                 continue
-            if line.startswith(("MESSAGE", "ERROR", "DEBUG", "UNKNOWN")):
-                log.info(f"[ENGINE] {line}")
+            # Lọc bỏ tin nhắn rác/chẩn đoán
+            if line.upper().startswith(("MESSAGE", "ERROR", "DEBUG", "UNKNOWN", "OK")):
+                log.info(f"[ENGINE-LOG] {line}")
                 continue
+            # Match chính xác dạng "7,8" hoặc "7, 8"
             match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
             if match:
                 return int(match.group(1)), int(match.group(2))
@@ -312,9 +309,9 @@ class SquirrelProxyEngine:
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send(f"INFO time_left {self.timeout_turn * 20}")
             
-            # ═══ 1. BÀN TRỐNG: GỬI BEGIN ═══
+            # 1. BÀN TRỐNG
             if len(board_history) == 0:
-                self._log("Empty board -> sending BEGIN (offset 2 → tâm 7,9)")
+                self._log("Empty board -> sending BEGIN")
                 self._send("BEGIN")
                 move = self._read_engine_move(timeout_total=2.5)
                 if move:
@@ -324,11 +321,9 @@ class SquirrelProxyEngine:
                         vx, vy = 7, 9
                     log.info(f"[PROXY] ✓ BEGIN move: engine({ex},{ey}) -> virtual({vx},{vy})")
                     return (vx, vy)
-                
-                log.warning("[PROXY] BEGIN timeout → fallback (7,9)")
                 return (7, 9)
             
-            # ═══ 2. GỬI BOARD ═══
+            # 2. GỬI BÀN CỜ VỚI OFFSET CHÍNH XÁC
             self._send("BOARD")
             my_count = 0
             opp_count = 0
@@ -348,9 +343,9 @@ class SquirrelProxyEngine:
                 self._send(f"{ex},{ey},{engine_sym}")
             
             self._send("DONE")
-            log.info(f"[PROXY] BOARD sent: {my_count} my (1) + {opp_count} opp (2), offset_y={offset_y}")
+            log.info(f"[PROXY] BOARD sent: {my_count} my + {opp_count} opp, offset_y={offset_y}")
             
-            # ═══ 3. ĐỌC PHẢN HỒI NƯỚC ĐỊNH ĐÁNH ═══
+            # 3. ĐỌC VÀ CHUYỂN ĐỔI TỌA ĐỘ
             move = self._read_engine_move(timeout_total=3.0)
             if move:
                 ex, ey = move
@@ -362,7 +357,7 @@ class SquirrelProxyEngine:
                         log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
                         return (vx, vy)
                     else:
-                        log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, invalid engine move")
+                        log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, invalid move")
                 else:
                     log.warning(f"[PROXY] ⚠ ({vx},{vy}) out of bounds")
             
@@ -507,17 +502,27 @@ class Board:
     def pos_to_xy(self, pos: int) -> tuple: return pos % self.width, pos // self.width
 
     def load_rle(self, data: List[int]):
-        self.grid = [[EMPTY] * self.width for _ in range(self.height)]
-        self.history.clear(); self.placed.clear()
+        """Bảo tồn chuỗi thời gian nếu số lượng quân cờ không đổi khi sync lại RLE"""
+        new_grid = [[EMPTY] * self.width for _ in range(self.height)]
+        new_placed = set()
         pos = 0
         for value in data:
             symbol = value - 256 if value > 127 else value
             if symbol >= 0:
                 y, x = pos // self.width, pos % self.width
                 if 0 <= x < self.width and 0 <= y < self.height:
-                    self.grid[y][x] = symbol; self.placed.add((x, y))
+                    new_grid[y][x] = symbol; new_placed.add((x, y))
                 pos += 1
             else: pos += -symbol
+        
+        # Nếu số quân cờ bằng số history cũ, giữ lại history cũ để bảo tồn thứ tự thời gian
+        if len(new_placed) == len(self.placed):
+            self.grid = new_grid
+            self.placed = new_placed
+            return
+
+        self.grid = new_grid; self.placed = new_placed
+        self.history.clear()
         for y in range(self.height):
             for x in range(self.width):
                 s = self.grid[y][x]
@@ -534,7 +539,6 @@ class Board:
         return (0, 0)
 
     def get_empty_near(self, x0: int, y0: int) -> tuple:
-        """Nâng cấp Heuristic: Lọc candidate trống gần nước đi gần nhất"""
         candidates = set()
         for hx, hy, _ in reversed(self.history[-5:]):
             for dx in range(-2, 3):
@@ -565,6 +569,7 @@ class CaroBot:
         self.ag = None; self.ag_available = False
         self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
         self._moving = False; self._last_move_xy = None
+        self.state_lock = asyncio.Lock()  # Khóa chống xung đột khi đối thủ ra/vào
         
         self.table_id = None
         self.player_slot_by_id = {}
@@ -672,54 +677,55 @@ class CaroBot:
             await self.send(self.make_create_rule())
 
     async def do_move(self):
-        if not self.is_playing or not self.running or self.slot < 0: return
-        if self._moving:
-            log.warning("[BOT] do_move đang chạy -> bỏ qua")
-            return
-        self._moving = True
-        self.pending_move = False
-        self._last_move_xy = None
-        try:
-            start = time.time()
-            x, y = -1, -1
-            history = list(self.board.history)
-            
-            if self.ag_available:
-                try:
-                    move = await asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        lambda: self.ag.get_move(history, self.my_symbol)
-                    )
-                    
-                    if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                        and self.board.get(*move) == EMPTY):
-                        x, y = move; self.ag_moves += 1
-                    else:
-                        self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
+        async with self.state_lock:
+            if not self.is_playing or not self.running or self.slot < 0: return
+            if self._moving:
+                log.warning("[BOT] do_move đang chạy -> bỏ qua")
+                return
+            self._moving = True
+            self.pending_move = False
+            self._last_move_xy = None
+            try:
+                start = time.time()
+                x, y = -1, -1
+                history = list(self.board.history)
+                
+                if self.ag_available:
+                    try:
+                        move = await asyncio.get_event_loop().run_in_executor(
+                            None, 
+                            lambda: self.ag.get_move(history, self.my_symbol)
+                        )
+                        
+                        if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
+                            and self.board.get(*move) == EMPTY):
+                            x, y = move; self.ag_moves += 1
+                        else:
+                            self.ag_errors += 1
+                            log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
+                            lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
+                            x, y = self.board.get_empty_near(lx, ly)
+                            self.ag_fallback_count += 1
+                            self.ag.start_game(my_symbol=self.my_symbol)
+                    except Exception as e:
+                        self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
+                        try: self.ag.stop(); self.ag = None; self.ag_available = False
+                        except Exception: pass
                         lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
-                        self.ag.start_game(my_symbol=self.my_symbol)
-                except Exception as e:
-                    self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
-                    try: self.ag.stop(); self.ag = None; self.ag_available = False
-                    except Exception: pass
+                else:
                     lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                     x, y = self.board.get_empty_near(lx, ly)
-                    self.ag_fallback_count += 1
-            else:
-                lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
-                x, y = self.board.get_empty_near(lx, ly)
-                
-            elapsed = time.time() - start
-            pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s")
-            await self.send(self.make_play(pos))
-            self._last_move_xy = (x, y)
-            self.board.put(x, y, self.my_symbol)
-        finally:
-            self._moving = False
+                    
+                elapsed = time.time() - start
+                pos = self.board.xy_to_pos(x, y)
+                log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s")
+                await self.send(self.make_play(pos))
+                self._last_move_xy = (x, y)
+                self.board.put(x, y, self.my_symbol)
+            finally:
+                self._moving = False
 
     async def handle(self, raw: bytes):
         r = BinaryReader(raw)
@@ -802,86 +808,88 @@ class CaroBot:
             self._joining_table = False
 
     async def handle_table(self, r: BinaryReader):
-        try:
-            first_byte = r.i8()
-            if first_byte != 0:
-                if "not in table" in r.read_utf().lower():
+        async with self.state_lock:
+            try:
+                first_byte = r.i8()
+                if first_byte != 0:
+                    if "not in table" in r.read_utf().lower():
+                        self.in_table = False; self.table_id = None
+                        await self.create_new_table()
+                    return
+                
+                seat_count = r.u8()
+                for _ in range(seat_count):
+                    r.u8(); r.read_ascii(); r.u8(); child_count = r.u8()
+                    for _ in range(child_count): r.u8(); r.read_ascii(); r.read_utf(); r.u8(); r.u8()
+                
+                r.u8(); self.slot = r.i8(); is_playing = r.u8() == 1
+                player_count = r.u8(); self.players = {}
+                self.player_slot_by_id = {}
+                
+                for _ in range(player_count):
+                    sid = r.i8(); pid = r.i64(); name = r.read_utf()
+                    r.u16(); r.read_ascii(); r.i8(); r.i64(); r.i64(); r.i64(); r.u8(); r.u8()
+                    self.players[sid] = {'name': name}
+                    self.player_slot_by_id[pid] = sid
+                
+                current_player = r.i8(); r.i16(); r.i16(); r.u8()
+                self.in_table = True
+                
+                move_count = r.u8()
+                for _ in range(move_count): r.i8(); r.i32()
+                
+                width = r.u8(); height = r.u8(); self.board.resize(width, height)
+                r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
+                
+                r.u8(); r.u8(); n = r.u8()
+                for _ in range(n): r.read_ascii(); r.read_utf()
+                
+                has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
+                
+                self.is_playing = is_playing
+                log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
+                
+                if is_playing and current_player == self.slot:
+                    if not self._moving and not self.pending_move:
+                        self.pending_move = True; asyncio.create_task(self.do_move())
+                elif not is_playing and self.slot >= 0:
+                    if has_opponent:
+                        if not self.ready:
+                            log.info("[BOT] Phát hiện đối thủ. Bấm Sẵn sàng!")
+                            self.ready = True; await self.send(self.make_ready())
+                    else:
+                        if self.ready:
+                            log.info("[BOT] Không có đối thủ. Hủy Sẵn sàng.")
+                        self.ready = False
+                elif not is_playing and self.slot < 0:
                     self.in_table = False; self.table_id = None
-                    await self.create_new_table()
-                return
+                    await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
+                
+                self._rejoining = False
+            except Exception as e: log.error(f"Table error: {e}")
+
+    async def handle_start(self, r: BinaryReader):
+        async with self.state_lock:
+            self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
+            self._moving = False; self._last_move_xy = None
+            self.opponent_gone_at = None
             
-            seat_count = r.u8()
-            for _ in range(seat_count):
-                r.u8(); r.read_ascii(); r.u8(); child_count = r.u8()
-                for _ in range(child_count): r.u8(); r.read_ascii(); r.read_utf(); r.u8(); r.u8()
-            
-            r.u8(); self.slot = r.i8(); is_playing = r.u8() == 1
-            player_count = r.u8(); self.players = {}
-            self.player_slot_by_id = {}
-            
-            for _ in range(player_count):
-                sid = r.i8(); pid = r.i64(); name = r.read_utf()
-                r.u16(); r.read_ascii(); r.i8(); r.i64(); r.i64(); r.i64(); r.u8(); r.u8()
-                self.players[sid] = {'name': name}
-                self.player_slot_by_id[pid] = sid
-            
-            current_player = r.i8(); r.i16(); r.i16(); r.u8()
-            self.in_table = True
-            
-            move_count = r.u8()
-            for _ in range(move_count): r.i8(); r.i32()
+            player_count = r.u8()
+            for i in range(player_count):
+                r.i8(); r.i32()
             
             width = r.u8(); height = r.u8(); self.board.resize(width, height)
             r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
             
-            r.u8(); r.u8(); n = r.u8()
-            for _ in range(n): r.read_ascii(); r.read_utf()
+            log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
             
-            has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
+            if self.ag is None:
+                self.init_ag()
+            else:
+                self.ag.start_game(my_symbol=self.my_symbol)
             
-            self.is_playing = is_playing
-            log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
-            
-            if is_playing and current_player == self.slot:
-                if not self._moving and not self.pending_move:
-                    self.pending_move = True; await self.do_move()
-            elif not is_playing and self.slot >= 0:
-                if has_opponent:
-                    if not self.ready:
-                        log.info("[BOT] Phát hiện đối thủ. Bấm Sẵn sàng!")
-                        self.ready = True; await self.send(self.make_ready())
-                else:
-                    if self.ready:
-                        log.info("[BOT] Không có đối thủ. Hủy Sẵn sàng.")
-                    self.ready = False
-            elif not is_playing and self.slot < 0:
-                self.in_table = False; self.table_id = None
-                await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
-            
-            self._rejoining = False
-        except Exception as e: log.error(f"Table error: {e}")
-
-    async def handle_start(self, r: BinaryReader):
-        self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
-        self._moving = False; self._last_move_xy = None
-        self.opponent_gone_at = None
-        
-        player_count = r.u8()
-        for i in range(player_count):
-            r.i8(); r.i32()
-        
-        width = r.u8(); height = r.u8(); self.board.resize(width, height)
-        r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-        
-        log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
-        
-        if self.ag is None:
-            self.init_ag()
-        else:
-            self.ag.start_game(my_symbol=self.my_symbol)
-        
-        if self.slot < 0:
-            await asyncio.sleep(0.5); await self.send(self.make_get_table())
+            if self.slot < 0:
+                await asyncio.sleep(0.5); await self.send(self.make_get_table())
 
     async def handle_turn(self, r: BinaryReader):
         sid = r.i8(); r.i16(); r.i16()
@@ -891,18 +899,19 @@ class CaroBot:
                 self.pending_move = True; await asyncio.sleep(1.2); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
-        pos = r.i16(); symbol = r.i8()
-        x, y = self.board.pos_to_xy(pos)
-        current = self.board.get(x, y)
-        if current == symbol:
-            if symbol == self.my_symbol and self._last_move_xy is not None:
-                self._last_move_xy = None
-        elif current != EMPTY and current != symbol:
-            self.my_symbol = symbol
-            self.opponent_symbol = CROSS if symbol == CIRCLE else CIRCLE
-            self.board.undo(x, y); self.board.put(x, y, symbol)
-        else:
-            self.board.put(x, y, symbol)
+        async with self.state_lock:
+            pos = r.i16(); symbol = r.i8()
+            x, y = self.board.pos_to_xy(pos)
+            current = self.board.get(x, y)
+            if current == symbol:
+                if symbol == self.my_symbol and self._last_move_xy is not None:
+                    self._last_move_xy = None
+            elif current != EMPTY and current != symbol:
+                self.my_symbol = symbol
+                self.opponent_symbol = CROSS if symbol == CIRCLE else CIRCLE
+                self.board.undo(x, y); self.board.put(x, y, symbol)
+            else:
+                self.board.put(x, y, symbol)
 
     async def handle_play(self, r: BinaryReader):
         status = r.i8()
@@ -915,27 +924,28 @@ class CaroBot:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
 
     async def handle_gameover(self, r: BinaryReader):
-        self.is_playing = False; self.pending_move = False
-        self.opponent_gone_at = None
-        player_count = r.u8(); my_result = None
-        for _ in range(player_count):
-            sid = r.i8(); result = r.i8(); r.i64()
-            if sid == self.slot: my_result = result
-        
-        if my_result in (1, 11): self.wins += 1; log.info(">>> WIN! <<<")
-        elif my_result in (2, 4, 12): self.losses += 1; log.info(">>> LOSE! <<<")
-        else: self.draws += 1; log.info(">>> DRAW! <<<")
-        
-        r.read_utf()
-        self.save_stats()
-        
-        if self._table_lost_at is not None:
-            self._table_lost_at = None
-            await asyncio.sleep(1.5); await self.create_new_table()
-            return
-        
-        log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
-        asyncio.create_task(self._delay_ready(5.0))
+        async with self.state_lock:
+            self.is_playing = False; self.pending_move = False
+            self.opponent_gone_at = None
+            player_count = r.u8(); my_result = None
+            for _ in range(player_count):
+                sid = r.i8(); result = r.i8(); r.i64()
+                if sid == self.slot: my_result = result
+            
+            if my_result in (1, 11): self.wins += 1; log.info(">>> WIN! <<<")
+            elif my_result in (2, 4, 12): self.losses += 1; log.info(">>> LOSE! <<<")
+            else: self.draws += 1; log.info(">>> DRAW! <<<")
+            
+            r.read_utf()
+            self.save_stats()
+            
+            if self._table_lost_at is not None:
+                self._table_lost_at = None
+                await asyncio.sleep(1.5); await self.create_new_table()
+                return
+            
+            log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
+            asyncio.create_task(self._delay_ready(5.0))
 
     async def handle_kick(self, r: BinaryReader):
         r.i8(); r.read_utf()
@@ -1161,7 +1171,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*60}")
-        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE v4.0 (ADVANCED DYNAMIC VIEW)")
+        log.info("BOT CARO SQUIRREL24 - PROXY ENGINE v5.0 (STABLE & ANTI-NOISE)")
         log.info(f"{'='*60}")
         
         retry_count = 0
