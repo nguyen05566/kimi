@@ -48,6 +48,9 @@ class BinaryReader:
  def i32(self)->int:
   if self.pos+4>len(self.data):return 0
   v=struct.unpack_from('>i',self.data,self.pos)[0];self.pos+=4;return v
+ def i64(self)->int:
+  if self.pos+8>len(self.data):return 0
+  v=struct.unpack_from('>q',self.data,self.pos)[0];self.pos+=8;return v
  def remaining(self)->int:return len(self.data)-self.pos
  def read_ascii(self)->str:
   if self.pos>=len(self.data):return""
@@ -109,7 +112,6 @@ class CaroBotTrain:
   self.mcts_player=MCTSPlayer(self.net.policy_value_fn,c_puct=MCTS_CPUCT,n_playout=MCTS_PLAYOUT,is_selfplay=0)
  def init_board_for_game(self):self.board.init_board();self.mcts_player.reset_player()
  def bot_to_board_move(self,x,y):return y*self.board.width+x
- def pos_to_xy(self,pos:int)->tuple:return pos%self.board.width,pos//self.board.width
  def get_ai_move(self)->Optional[Tuple[int,int]]:
   try:
    if len(self.board.availables)<=1:return None
@@ -184,11 +186,29 @@ class CaroBotTrain:
    elif cmd=="CREATE_RULE":
     if r.i8()==0:tid=r.read_ascii();self.table_id=tid;log.info(f"[RULE] Table {tid}");await asyncio.sleep(0.5);await self.send(self.make_get_table())
    elif cmd=="GET_TABLE_DATA_EX":
-    if not self.in_table:self.in_table=True;await self.send(self.make_ready())
-   elif cmd=="PLAYER_ENTERED":r.i32();nick=r.read_utf();s=r.i16();log.info(f"[+] {nick} slot={s}")
+    fb=r.i8()
+    if fb==0:
+     sc=r.u8()
+     for _ in range(sc):r.u8();r.read_ascii();r.u8();r.u8()
+     for _ in range(sc):r.u8();r.read_ascii();r.u8();r.u8()
+     r.u8();self.slot=r.i8();r.u8()
+     pc=r.u8()
+     for _ in range(pc):r.i8();r.i64();r.read_utf();r.u16();r.read_ascii();r.i8();r.i64();r.i64();r.i64();r.u8();r.u8()
+     r.i8();r.i16();r.i16();r.u8()
+     mc=r.u8()
+     for _ in range(mc):r.i8();r.i32()
+     bw=r.u8();bh=r.u8()
+     r.i16();r.read_bytes()
+     self.in_table=True
+     self.my_symbol=CIRCLE if self.slot==0 else CROSS
+     log.info(f"[TABLE] Slot={self.slot} Symbol={'X' if self.my_symbol==CROSS else 'O'}")
+     if not self.in_table:await self.send(self.make_ready())
+    else:
+     log.warning("[TABLE] not in table")
+   elif cmd=="PLAYER_ENTERED":
+    pid=r.i32();nick=r.read_utf();s=r.i16();log.info(f"[+] {nick} slot={s}")
    elif cmd=="PLAYER_EXITED":pid=r.i32();log.info(f"[-] {pid} left")
    elif cmd=="START_MATCH":
-    # Bot2 format: player_count(u8), skip, width(u8), height(u8), skip, board RLE
     pc=r.u8()
     for _ in range(pc):r.i8();r.i32()
     bw=r.u8();bh=r.u8()
@@ -201,19 +221,18 @@ class CaroBotTrain:
      fp=0
      for v in bd:
       sym=v-256 if v>127 else v
-      if sym>=0:
-       y,x=fp//bw,fp%bw
-       if 0<=x<bw and 0<=y<bh:
-        m=self.bot_to_board_move(x,y)
-        if m in self.board.availables:self.board.do_move(m)
-       fp+=1
-      else:fp+=-sym
+      if sym>=0:y,x=fp//bw,fp%bw
+      if 0<=x<bw and 0<=y<bh:
+       m=self.bot_to_board_move(x,y)
+       if m in self.board.availables:self.board.do_move(m)
+      fp+=1
+     else:fp+=-sym
     self.is_playing=True;self.start_time=time.time()
     log.info(f"[MATCH] {len(self.board.states)} existing stones")
    elif cmd=="SET_TURN":
     sid=r.i8();r.i16();r.i16()
     self.is_playing=True
-    log.info(f"[TURN] slot={sid} my_slot={self.slot}")
+    log.info(f"[TURN] slot={sid} my={self.slot}")
     if sid==self.slot and self.is_playing and not self._moving:
      await asyncio.sleep(0.3)
      await self.do_ai_move()
@@ -221,7 +240,7 @@ class CaroBotTrain:
     pos=r.i16();sym=r.i8()
     x,y=pos%self.board.width,pos//self.board.width
     if sym!=self.my_symbol:
-     self.apply_opponent_move(x,y);log.info(f"[MOVE] Opp ({x},{y}) sym={sym}")
+     self.apply_opponent_move(x,y);log.info(f"[MOVE] Opp ({x},{y})")
     else:
      self.apply_my_move(x,y);self._moving=False;log.info(f"[MOVE] Me ({x},{y})")
    elif cmd=="GAMEOVER":
