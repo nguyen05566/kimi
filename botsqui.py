@@ -1400,7 +1400,7 @@ async def _run_bot():
     except Exception as e: log.error(f"[BOT] Error: {e}", exc_info=True)
 
 if __name__ == "__main__": main()
-elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()CIRCLE = 0
+elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
 CROSS = 1
 
 # Gomocup protocol symbols (ENGINE uses 1=black, 2=white)
