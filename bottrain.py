@@ -135,7 +135,6 @@ class CaroBotTrain:
         if m in self.board.availables: self.board.do_move(m)
 
     async def http_login(self)->bool:
-        """Login via HTML form like bot2: POST /login.jsp, parse token from JS"""
         try:
             session = requests.Session()
             ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36"
@@ -230,7 +229,7 @@ class CaroBotTrain:
         self.start_time=time.time()
         while self._running:
             try:
-                async with websockets.connect(WS_URL, extra_headers={"Cookie": self.cookie, "User-Agent": "Mozilla/5.0"}) as ws:
+                async with websockets.connect(WS_URL, extra_headers=[("Cookie", self.cookie), ("User-Agent", "Mozilla/5.0")]) as ws:
                     self.ws=ws;await self.send(self.make_login())
                     while self._running:
                         try:
