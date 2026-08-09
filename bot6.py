@@ -578,23 +578,45 @@ class CaroBot:
         else:
             await self.send(self.make_create_rule())
 
-    def _is_legal_caro(self, x: int, y: int) -> bool:
-        """Kiểm tra nước đi có bị chặn 2 đầu không (Rule 8 - Caro)."""
-        dirs = [(1,0), (0,1), (1,1), (1,-1)]
+    def _is_legal_caro(self, x: int, y: int, my_side: int = None) -> bool:
+        """Rule 8: nước đi tạo 4+ quân liên tiếp bị chặn 2 đầu -> illegal.
+        Giả lập đặt quân tại (x,y), kiểm tra xem có dãy 4+ nào bị chặn 2 đầu không."""
+        if my_side is None:
+            my_side = self.my_symbol
         b = self.board
+        dirs = [(1,0), (0,1), (1,1), (1,-1)]
         for dx, dy in dirs:
-            count = 1; blocked = 0
-            for sign in [-1, 1]:
-                for step in range(1, 6):
+            # Giả lập đặt quân, đếm dãy liên tiếp cùng màu
+            count = 1  # tính cả quân tại (x,y)
+            left_blocked = False
+            right_blocked = False
+            # Đếm về 2 phía
+            for sign, blocked_flag in [(-1, 'left'), (1, 'right')]:
+                for step in range(1, 10):
                     nx, ny = x + sign*dx*step, y + sign*dy*step
                     if 0 <= nx < b.width and 0 <= ny < b.height:
-                        if b.get(nx, ny) != 0:
+                        cell = b.get(nx, ny)
+                        if cell == my_side:
                             count += 1
-                        else: break
+                        elif cell == 0:
+                            break  # ô trống -> không bị chặn đầu này
+                        else:
+                            # Quân đối thủ hoặc biên -> bị chặn
+                            if blocked_flag == 'left':
+                                left_blocked = True
+                            else:
+                                right_blocked = True
+                            break
                     else:
-                        blocked += 1; break
-            if count > 3 and blocked >= 2:
-                return False  # Rule 8: dãy 4+ quân bị chặn 2 đầu
+                        # Chạm biên bàn -> bị chặn
+                        if blocked_flag == 'left':
+                            left_blocked = True
+                        else:
+                            right_blocked = True
+                        break
+            # Kiểm tra: 4+ quân + bị chặn 2 đầu -> illegal
+            if count > 3 and left_blocked and right_blocked:
+                return False
         return True
 
     async def do_move(self):
@@ -655,9 +677,10 @@ class CaroBot:
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             # Rule 8 check: không đi vào giữa khi bị chặn 2 đầu
-            if not self._is_legal_caro(x, y):
+            if not self._is_legal_caro(x, y, self.my_symbol):
+                log.warning(f"[RAPFI] Rule8 blocked {x},{y}, finding alternative...")
                 nx2, ny2 = self.board.get_empty_near(x, y)
-                if self.board.get(nx2, ny2) == EMPTY and self._is_legal_caro(nx2, ny2):
+                if self.board.get(nx2, ny2) == EMPTY and self._is_legal_caro(nx2, ny2, self.my_symbol):
                     x, y = nx2, ny2
                     log.warning(f"[RAPFI] Rule8 correction: {x},{y}")
             self.board.put(x, y, self.my_symbol)
