@@ -1,3 +1,4 @@
+
 name: nguyen6
 
 on:
@@ -15,38 +16,40 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Wine64 stable
+      - name: Install WineHQ stable (fix wine64 not found)
         run: |
           sudo dpkg --add-architecture i386
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -qNP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends wine64 xvfb
-          wine64 --version
-          # tạo prefix để lần đầu không lag
-          xvfb-run -a wine64 wineboot --init || true
-          echo "WINE=wine64" >> $GITHUB_ENV
+          sudo apt-get install -y --install-recommends winehq-stable xvfb
+          echo "=== wine bins ==="
+          which wine
+          ls -l /usr/bin/wine*
+          wine --version
+          wine64 --version || true
+          xvfb-run -a wine wineboot --init || true
 
       - name: Install deps
         run: pip install websockets requests
 
-      - name: Check engine permission
+      - name: Fix permission (0o644 -> 0o755)
         run: |
-          ls -lh alphagomoku-engine/ || echo "chưa có engine"
-          chmod 755 alphagomoku-engine/pbrain-embryo26* || true
-          ls -l alphagomoku-engine/
+          rm -rf alphagomoku-engine
+          mkdir -p alphagomoku-engine
+          ls -la
+          chmod -R 755 . || true
 
       - name: Run bot
         env:
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
+          WINEDEBUG: -all
         run: |
-          # BẮT BUỘC dùng xvfb-run để wine có display ảo
-          while true; do
-            xvfb-run -a python3 nguyen6.py || echo "exit $?"
-            sleep 10
-          done
+          xvfb-run -a python3 nguyen6_final.py
