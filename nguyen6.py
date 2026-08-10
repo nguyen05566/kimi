@@ -9,7 +9,7 @@
 ║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
-import subprocess, select, sys, os, importlib, urllib.request, json, time, struct
+import subprocess, sys, os, importlib, urllib.request, json, time, struct
 import re, logging, asyncio, random, threading, shutil, selectors, html as html_lib
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
@@ -112,28 +112,16 @@ class AlphaGomokuEngine:
         self._buffer = b""
         self.my_side = 1
         self._initialized = False
-        self._poll_cache = None  # cache trạng thái process
-
-    def _proc_alive(self) -> bool:
-        """Kiểm tra process còn sống, có cache để tránh gọi poll() liên tục."""
-        if not self.proc:
-            return False
-        if self._poll_cache is not None:
-            return self._poll_cache
-        self._poll_cache = self.proc.poll() is None
-        return self._poll_cache
 
     def _send(self, cmd: str):
-        if self._proc_alive():
+        if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
-            except Exception:
-                self._poll_cache = False
+            except Exception: pass
 
     def _read_line(self, timeout=10.0) -> str:
-        if not self._proc_alive():
-            return ""
+        if not self.proc or self.proc.poll() is not None: return ""
         deadline = time.monotonic() + timeout
         while True:
             idx = self._buffer.find(b"\n")
@@ -142,34 +130,27 @@ class AlphaGomokuEngine:
                 self._buffer = self._buffer[idx + 1:]
                 return line_bytes.decode("utf-8", errors="replace")
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return ""
+            if remaining <= 0: return ""
             try:
-                # Dùng select.select đơn giản, không tạo object mới mỗi lần
-                ready, _, _ = select.select([self.proc.stdout.fileno()], [], [], min(remaining, 2.0))
+                sel = selectors.DefaultSelector()
+                sel.register(self.proc.stdout, selectors.EVENT_READ)
+                ready = sel.select(timeout=min(remaining, 2.0))
+                sel.close()
                 if ready:
-                    # Dùng read() trên BufferedReader
-                    chunk = self.proc.stdout.read(4096)
-                    if not chunk:
-                        self._poll_cache = False
-                        return ""
+                    chunk = os.read(self.proc.stdout.fileno(), 4096)
+                    if not chunk: return ""
                     self._buffer += chunk
-            except Exception:
-                self._poll_cache = False
-                return ""
+            except Exception: return ""
 
     def start_game(self, my_symbol=1) -> bool:
         self._synced = False
-        self._poll_cache = None
         if self.proc and self.proc.poll() is None:
             self._send("RESTART")
             for _ in range(5):
-                if self._read_line(timeout=0.5).upper() == "OK":
-                    break
+                if self._read_line(timeout=0.5).upper() == "OK": break
             self._send("RECTSTART 15,19")
             for _ in range(5):
-                if self._read_line(timeout=0.5).upper() == "OK":
-                    break
+                if self._read_line(timeout=0.5).upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send("INFO ponder 1")
@@ -178,8 +159,7 @@ class AlphaGomokuEngine:
             return True
 
         self.stop()
-        if not self.binary:
-            return False
+        if not self.binary: return False
         try:
             # Embryo 2025 là Windows exe → chạy qua Wine
             is_exe = self.binary.lower().endswith('.exe')
@@ -189,18 +169,14 @@ class AlphaGomokuEngine:
                 cmd = [self.binary]
             self.proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr vào stdout để đọc lỗi engine
-                cwd=str(ENGINE_DIR),
-
+                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
             )
             self._buffer = b""
-            self._poll_cache = None
             self.my_side = my_symbol
             self._send("RECTSTART 15,19")
             for _ in range(10):
                 line = self._read_line(timeout=1.0)
-                if line.upper() == "OK":
-                    break
+                if line.upper() == "OK": break
             self._send(f"INFO rule {self.rule}")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send("INFO ponder 1")
@@ -210,12 +186,11 @@ class AlphaGomokuEngine:
         except Exception as e:
             log.error(f"[AG] Start error: {e}")
             self._initialized = False
-            self._poll_cache = False
             return False
 
     def restart_game(self) -> bool:
         with self.lock:
-            if not self._initialized or not self._proc_alive():
+            if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return False
             self._send("RESTART")
             for _ in range(5):
@@ -223,21 +198,19 @@ class AlphaGomokuEngine:
                 if line.upper() == "OK":
                     log.info("[AG] RESTART successful")
                     return True
-            log.warning("[AG] RESTART did not return OK, engine may be dead")
-            self._poll_cache = False
-            return False
+            log.warning("[AG] RESTART did not return OK, assuming reset")
+            return True
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
-                if not self._initialized or not self._proc_alive():
-                    return None
-
+                if not self._initialized or not self.proc or self.proc.poll() is not None: return None
+                
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
-
-                can_use_turn = getattr(self, '_synced', False) and                     len(board_history) == getattr(self, '_expected_history_len', -1) + 1
-
+                
+                can_use_turn = getattr(self, '_synced', False) and len(board_history) == getattr(self, '_expected_history_len', -1) + 1
+                
                 if can_use_turn:
                     last_x, last_y, _ = board_history[-1]
                     self._send(f"TURN {last_x},{last_y}")
@@ -247,12 +220,10 @@ class AlphaGomokuEngine:
                         c = 1 if sym == self.my_side else 2
                         self._send(f"{x},{y},{c}")
                     self._send("DONE")
-
-                # Giảm timeout từ 300 xuống 30 vòng lặp (tối đa ~30 giây)
-                for _ in range(30):
+                
+                for _ in range(300):
                     line = self._read_line(timeout=1)
-                    if not line:
-                        continue
+                    if not line: continue
                     if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                         continue
                     if "," in line:
@@ -265,26 +236,21 @@ class AlphaGomokuEngine:
             except Exception as e:
                 log.warning(f"[AG] get_move error: {e}")
                 self._synced = False
-                self._poll_cache = False
                 return None
-
+                
     def stop(self):
         if self.proc:
-            try:
-                self._send("END")
-            except Exception:
-                pass
+            try: self._send("END")
+            except Exception: pass
             try:
                 self.proc.terminate()
                 self.proc.wait(3)
             except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
+                try: self.proc.kill()
+                except Exception: pass
             self.proc = None
             self._initialized = False
-            self._poll_cache = None
+
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
@@ -572,9 +538,6 @@ class CaroBot:
 
     def make_pong(self) -> bytes:
         w = BinaryWriter(); w.write_command("PONG"); return w.build()
-
-    def make_ping(self) -> bytes:
-        w = BinaryWriter(); w.write_command("PING"); return w.build()
 
     def make_ready(self) -> bytes:
         if self.is_playing: return b''
@@ -914,7 +877,6 @@ class CaroBot:
             await self.send(self.make_get_table())
 
     async def watchdog(self):
-        last_ping = time.time()
         while self.running:
             try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
@@ -924,11 +886,6 @@ class CaroBot:
                 self.save_stats(); self.stop(); return
             
             if not self.ws or self.ws.close_code is not None: continue
-            
-            # Gửi PING chủ động mỗi 25 giây để giữ kết nối alive
-            if time.time() - last_ping > 25:
-                await self.send(self.make_ping())
-                last_ping = time.time()
             
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
@@ -1252,10 +1209,6 @@ class CaroBot:
             
             self.save_stats()
             if self.ag: self.ag.stop(); self.ag = None
-
-            # Delay 10 giây trước khi reconnect để tránh rate-limit
-            log.info("[BOT] Mất kết nối, chờ 10s trước khi thử lại...")
-            await asyncio.sleep(10)
 
 def main():
     bin_path = auto_download_alphagomoku()
