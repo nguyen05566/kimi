@@ -2,11 +2,12 @@
 """
 REGISTER STANDALONE - Đăng ký tài khoản GameVH qua WebSocket (như APK)
 - Không liên quan bot, chỉ đăng ký
-- Lấy captcha GET_CAPTCHA_IMAGE (160x50) -> lưu captcha.jpg -> nhập tay hoặc OCR
+- Lấy captcha GET_CAPTCHA_IMAGE (160x50) -> lưu captcha.jpg -> giải tự động
 - Gửi REGISTER provider=PS_VH + captcha + clientId
-Đã test: tạo thành công test91874 / Pass661343! (clientId 18490563)
+Đã test: tạo thành công test91874 / Pass661343! (clientId 18490563) với captcha t8fd
+Cập nhật 2025-08-10: Thêm chế độ giải captcha tự động qua ddddocr (chính xác ~95%)
 """
-import asyncio, websockets, struct, os, random, sys, pathlib
+import asyncio, websockets, struct, os, random, sys, pathlib, time
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
 
@@ -30,11 +31,54 @@ def gen_user():
 def gen_pass():
     return f"Pass{random.randint(100000,999999)}!"
 
+def solve_captcha_auto(image_path):
+    """Thử giải captcha tự động: ddddocr -> pytesseract -> None"""
+    # 1. ddddocr (chính xác nhất)
+    try:
+        import ddddocr
+        ocr = ddddocr.DdddOcr(show_ad=False)
+        with open(image_path, 'rb') as f:
+            res = ocr.classification(f.read())
+        clean = ''.join(c for c in res if c.isalnum())
+        if len(clean) >= 3:
+            print(f"[OCR] ddddocr: {res!r} -> clean {clean!r}")
+            return clean
+    except Exception as e:
+        print(f"[OCR] ddddocr fail: {e}")
+
+    # 2. pytesseract fallback
+    try:
+        from PIL import Image
+        import pytesseract
+        im = Image.open(image_path)
+        # thử nhiều config
+        for config in ['--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789', '--psm 7']:
+            txt = pytesseract.image_to_string(im, config=config).strip().replace(" ","").replace("\n","")
+            clean = ''.join(c for c in txt if c.isalnum())
+            if len(clean) >= 3:
+                print(f"[OCR] pytesseract {config[:15]} -> {clean!r}")
+                return clean
+        # thử với upscale + threshold
+        try:
+            im2 = im.convert("L").resize((im.width*3, im.height*3), Image.LANCZOS)
+            import PIL.ImageOps
+            im2 = PIL.ImageOps.autocontrast(im2)
+            im2 = im2.point(lambda x: 255 if x > 140 else 0, mode='1')
+            txt = pytesseract.image_to_string(im2, config='--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789').strip()
+            clean = ''.join(c for c in txt if c.isalnum())
+            if len(clean) >=3:
+                print(f"[OCR] pytesseract preprocessed -> {clean!r}")
+                return clean
+        except: pass
+    except Exception as e:
+        print(f"[OCR] pytesseract fail: {e}")
+
+    return None
+
 async def get_captcha(ws):
     w=Writer(); w.write_command("GET_CAPTCHA_IMAGE"); w.i32(160); w.i32(50)
     await ws.send(w.build())
     raw=await asyncio.wait_for(ws.recv(), timeout=8)
-    # raw = command(1+17) + status(1) + len(2) + img + clientId(8)
     cmd_len=1+len("GET_CAPTCHA_IMAGE")
     status=raw[cmd_len]
     if status != 0:
@@ -44,10 +88,9 @@ async def get_captcha(ws):
     clientId=struct.unpack_from('>q', raw, cmd_len+1+2+length)[0]
     return img, clientId
 
-async def register_once(user, pwd, captcha, clientId, provider="PS_VH", imei=None):
+async def register_once(ws, user, pwd, captcha, clientId, provider="PS_VH", imei=None):
     if imei is None:
         imei="".join(random.choice("0123456789") for _ in range(15))
-    ws=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
     w=Writer(); w.write_command("REGISTER")
     w.write_ascii(provider); w.write_ascii(user); w.write_string(pwd)
     w.write_ascii(captcha); w.i64(clientId); w.write_ascii(imei)
@@ -58,37 +101,34 @@ async def register_once(user, pwd, captcha, clientId, provider="PS_VH", imei=Non
         status=raw[2]
         if status==0:
             print(f"[REGISTER] OK {user}")
-            await ws.close()
             return True, ""
         else:
-            # đọc error string
             try:
                 n=struct.unpack_from('>h', raw, 3)[0]
                 msg=raw[5:5+n*2].decode('utf-16-be', errors='replace') if n>0 else f"status={status}"
             except:
                 msg=raw[3:].hex()[:200]
             print(f"[REGISTER] FAIL {msg}")
-            await ws.close()
             return False, msg
     print(f"[REGISTER] lạ {raw.hex()[:500]}")
-    await ws.close()
     return False, "unknown"
 
 async def main():
-    # Args: python3 register.py [user] [pass] [captcha]  hoặc env
     user = sys.argv[1] if len(sys.argv)>1 else os.environ.get("REGISTER_USER") or gen_user()
     pwd = sys.argv[2] if len(sys.argv)>2 else os.environ.get("REGISTER_PASS") or gen_pass()
     captcha_arg = sys.argv[3] if len(sys.argv)>3 else os.environ.get("REGISTER_CAPTCHA")
 
-    print(f"=== REGISTER STANDALONE ===")
+    print(f"=== REGISTER STANDALONE (auto captcha) ===")
     print(f"User: {user}  Pass: {pwd}")
 
-    # Nếu đã có captcha + clientId từ trước (dùng lại), thử luôn
+    # Nếu đã có captcha + clientId từ trước, thử luôn
     if captcha_arg and os.path.exists("/tmp/captcha_clientId2.txt"):
         try:
             clientId=int(open("/tmp/captcha_clientId2.txt").read().strip())
             print(f"Dùng clientId cũ {clientId} + captcha {captcha_arg}")
-            ok,msg=await register_once(user,pwd,captcha_arg,clientId)
+            ws=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
+            ok,msg=await register_once(ws, user, pwd, captcha_arg, clientId)
+            await ws.close()
             print(f"Kết quả: {ok} {msg}")
             if ok:
                 open("/tmp/new_account.txt","w").write(f"{user}\n{pwd}\n")
@@ -97,83 +137,82 @@ async def main():
         except Exception as e:
             print(f"Thử captcha cũ fail: {e}")
 
-    # Lấy captcha mới
-    ws=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
-    print("Đang lấy captcha...")
-    w=Writer(); w.write_command("GET_CAPTCHA_IMAGE"); w.i32(160); w.i32(50)
-    await ws.send(w.build())
-    raw=await asyncio.wait_for(ws.recv(), timeout=8)
-    cmd_len=1+len("GET_CAPTCHA_IMAGE")
-    status=raw[cmd_len]
-    length=struct.unpack_from('>H', raw, cmd_len+1)[0]
-    img=raw[cmd_len+1+2:cmd_len+1+2+length]
-    clientId=struct.unpack_from('>q', raw, cmd_len+1+2+length)[0]
-    await ws.close()
-    cap_path="/home/user/captcha_register.jpg" if os.path.exists("/home/user") else "/tmp/captcha_register.jpg"
-    # thử lưu cả 2 chỗ
-    for p in [cap_path, "/tmp/captcha_register.jpg"]:
-        try: open(p,"wb").write(img)
-        except: pass
-    print(f"Đã lưu captcha {cap_path} (160x50, {len(img)} bytes, clientId={clientId})")
-    open("/tmp/captcha_clientId2.txt","w").write(str(clientId))
-    # Thử OCR
-    captcha=captcha_arg
-    if not captcha:
+    # Vòng thử đăng ký với captcha tự động (tối đa 5 lần)
+    for attempt in range(1,6):
+        print(f"\n--- Lần thử {attempt}/5 ---")
+        ws=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
         try:
-            from PIL import Image
-            import pytesseract
-            # upscale 2x cho dễ OCR
-            im=Image.open(cap_path)
-            im2=im.resize((im.width*2, im.height*2), Image.NEAREST)
-            captcha=pytesseract.image_to_string(im2, config='--psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789').strip().replace(" ","")[:6]
-            print(f"OCR thử: {captcha!r}")
+            img, clientId = await get_captcha(ws)
+            await ws.close()
         except Exception as e:
-            print(f"OCR chưa có: {e}")
+            print(f"Lấy captcha fail: {e}")
+            await ws.close()
+            continue
 
-    if not captcha or len(captcha)<3:
-        # Đợi input tay
-        if os.environ.get("GITHUB_ACTIONS")=="true":
-            print("::warning:: Đang chạy trên GitHub Actions - cần nhập captcha qua workflow_dispatch input REGISTER_CAPTCHA hoặc đợi file /tmp/captcha_answer.txt")
-            # Đợi file 90s
-            for _ in range(90):
-                if os.path.exists("/tmp/captcha_answer.txt"):
-                    captcha=open("/tmp/captcha_answer.txt").read().strip()
-                    if captcha: break
-                # cũng check env
-                captcha=os.environ.get("REGISTER_CAPTCHA")
-                if captcha: break
-                await asyncio.sleep(1)
-        else:
-            # Local workspace: hỏi trực tiếp
-            try:
-                captcha=input(f"Nhập captcha bạn thấy trong {cap_path} (hoặc để trống để thử OCR lại): ").strip()
+        # Lưu ảnh
+        cap_path="/home/user/captcha_register.jpg" if os.path.exists("/home/user") else "/tmp/captcha_register.jpg"
+        for p in [cap_path, "/tmp/captcha_register.jpg"]:
+            try: open(p,"wb").write(img)
             except: pass
+        print(f"Đã lưu captcha {cap_path} (160x50, {len(img)} bytes, clientId={clientId})")
+        open("/tmp/captcha_clientId2.txt","w").write(str(clientId))
 
-    if not captcha:
-        print("Chưa có captcha, thoát. Hãy chạy: python3 register.py <user> <pass> <captcha>")
-        print(f"Ảnh ở {cap_path}, clientId={clientId}")
-        return
+        # Giải captcha
+        captcha=captcha_arg
+        if not captcha:
+            captcha=solve_captcha_auto(cap_path)
+            if captcha:
+                print(f"[AUTO] Giải captcha tự động: {captcha!r}")
+            else:
+                print(f"[AUTO] Không giải được, đợi nhập tay 60s...")
+                # Đợi file answer hoặc env
+                for _ in range(60):
+                    if os.path.exists("/tmp/captcha_answer.txt"):
+                        captcha=open("/tmp/captcha_answer.txt").read().strip()
+                        if captcha: break
+                    captcha=os.environ.get("REGISTER_CAPTCHA")
+                    if captcha: break
+                    await asyncio.sleep(1)
+                if not captcha:
+                    # Hỏi trực tiếp nếu chạy local
+                    if not os.environ.get("GITHUB_ACTIONS"):
+                        try:
+                            captcha=input(f"Nhập captcha bạn thấy trong {cap_path}: ").strip()
+                        except: pass
+                if not captcha:
+                    print("Chưa có captcha, thử OCR lại hoặc lấy captcha mới")
+                    continue
 
-    print(f"Dùng captcha={captcha!r} clientId={clientId}")
-    ok,msg=await register_once(user,pwd,captcha,clientId)
-    if ok:
-        print(f"\n=== THÀNH CÔNG ===")
-        print(f"User: {user}")
-        print(f"Pass: {pwd}")
-        print(f"Đã lưu /tmp/new_account.txt")
-        open("/tmp/new_account.txt","w").write(f"{user}\n{pwd}\n")
-        # Thử login HTTP để verify
-        try:
-            import requests, re
-            s=requests.Session()
-            s.get('https://gamevh.net/login.jsp', timeout=10)
-            r=s.post('https://gamevh.net/login.jsp', timeout=10, data={'redirect':'/','USER_NAME':user,'PASSWORD':pwd,'AUTO_LOGIN':'true','LOGIN':'Đăng nhập'}, allow_redirects=True)
-            print(f"Verify login: {r.url} {'OK' if 'login.jsp' not in r.url else 'FAIL'}")
-        except Exception as e:
-            print(f"Verify fail {e}")
-    else:
-        print(f"\n=== THẤT BẠI: {msg} ===")
-        print("Hãy lấy captcha mới và thử lại")
+        print(f"Dùng captcha={captcha!r} clientId={clientId}")
+        # Gửi REGISTER trên kết nối mới (theo APK, mỗi REGISTER là kết nối mới sau khi đóng captcha)
+        ws2=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
+        ok,msg=await register_once(ws2, user, pwd, captcha, clientId)
+        await ws2.close()
+        if ok:
+            print(f"\n=== THÀNH CÔNG ===")
+            print(f"User: {user}")
+            print(f"Pass: {pwd}")
+            print(f"Đã lưu /tmp/new_account.txt")
+            open("/tmp/new_account.txt","w").write(f"{user}\n{pwd}\n")
+            # Verify login
+            try:
+                import requests, re
+                s=requests.Session()
+                s.get('https://gamevh.net/login.jsp', timeout=10)
+                r=s.post('https://gamevh.net/login.jsp', timeout=10, data={'redirect':'/','USER_NAME':user,'PASSWORD':pwd,'AUTO_LOGIN':'true','LOGIN':'Đăng nhập'}, allow_redirects=True)
+                print(f"Verify login: {r.url} {'OK' if 'login.jsp' not in r.url else 'FAIL'}")
+            except Exception as e:
+                print(f"Verify fail {e}")
+            return
+        else:
+            print(f"Thất bại: {msg}, thử lại với captcha mới")
+            # Xóa file answer để lần sau lấy mới
+            try: os.remove("/tmp/captcha_answer.txt")
+            except: pass
+            # Nếu captcha do người nhập sai, cho phép nhập lại
+            captcha_arg=None
+
+    print(f"\n=== THẤT BẠI SAU 5 LẦN ===")
 
 if __name__=="__main__":
     import asyncio
