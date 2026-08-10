@@ -222,7 +222,7 @@ class AlphaGomokuEngine:
                     self._send("DONE")
                 
                 for _ in range(300):
-                    line = self._read_line(timeout=0.1)
+                    line = self._read_line(timeout=1)
                     if not line: continue
                     if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                         continue
