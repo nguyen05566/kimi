@@ -5,56 +5,48 @@ on:
     inputs:
       runtime_hours:
         description: 'Runtime (hours)'
-        required: false
         default: '5.9'
-        type: string
   schedule:
     - cron: '0 */6 * * *'
-
-concurrency:
-  group: ${{ github.workflow }}-gamevh-account
-  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Wine (for Embryo 2025 Windows exe)
+      - name: Install Wine64 stable
         run: |
           sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wine wine32 wine64 xvfb 2>/dev/null || echo "Wine partial install, continuing..."
-          wine --version || echo "Wine not found but continuing"
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends wine64 xvfb
+          wine64 --version
+          # tạo prefix để lần đầu không lag
+          xvfb-run -a wine64 wineboot --init || true
+          echo "WINE=wine64" >> $GITHUB_ENV
 
-      - name: Install Python dependencies
-        run: pip install websockets requests --break-system-packages
+      - name: Install deps
+        run: pip install websockets requests
 
-      - name: Run Caro Bot (loop until timeout)
-        env:
-          CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
+      - name: Check engine permission
         run: |
-          echo "Starting nguyen6.py loop - will auto-restart on exit until job timeout (6h)"
+          ls -lh alphagomoku-engine/ || echo "chưa có engine"
+          chmod 755 alphagomoku-engine/pbrain-embryo26* || true
+          ls -l alphagomoku-engine/
+
+      - name: Run bot
+        env:
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
+          CARO_USER: ${{ secrets.CARO_USER }}
+          CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
+        run: |
+          # BẮT BUỘC dùng xvfb-run để wine có display ảo
           while true; do
-            echo "=== $(date) Starting nguyen6.py ==="
-            python3 nguyen6.py || echo "nguyen6.py exited with code $?"
-            echo "=== $(date) nguyen6.py finished, restarting in 10s ==="
+            xvfb-run -a python3 nguyen6.py || echo "exit $?"
             sleep 10
           done
-      - name: Auto-restart workflow (khi hết phiên tự chạy tiếp)
-        if: always()
-        run: |
-          echo "Job finished at $(date), triggering next run..."
-          sleep 5
-          gh workflow run "$(basename ${{ github.workflow }})" --ref ${{ github.ref_name }} || echo "gh run failed, will rely on cron"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
