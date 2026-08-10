@@ -259,14 +259,7 @@ GAME_URL = "https://gamevh.net/play/caro/0"
 CARO_USER_DIRECT = "nguyen3"
 CARO_PASSWD_DIRECT = "nhat123456"
 # Ưu tiên Secrets nếu có, fallback về hardcode
-USER = os.environ.get("CARO_USER1") or os.environ.get("CARO_USER") or CARO_USER_DIRECT
-PASSWD = os.environ.get("CARO_PASSWD1") or os.environ.get("CARO_PASSWD") or CARO_PASSWD_DIRECT
-# Nếu muốn chỉ dùng hardcode:
-# USER = "nguyen3"
-# PASSWD = "nhat123456"
-if not USER or not PASSWD:
-    print("[BOT] Thiếu CARO_USER / CARO_PASSWD - kiểm tra hardcode trong nguyen1.py")
-    sys.exit(1)
+
 VERSION = "5.0.2"
 GAME_ID = "caro"
 RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
