@@ -256,7 +256,7 @@ WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 # === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
 # STARDUST dùng tài khoản riêng
-CARO_USER_DIRECT = "stardust1"
+CARO_USER_DIRECT = "nguyen6"
 CARO_PASSWD_DIRECT = "nhat123456"
 # Ưu tiên Secrets nếu có, fallback về hardcode
 USER = os.environ.get("CARO_USER1") or os.environ.get("CARO_USER") or CARO_USER_DIRECT
