@@ -44,11 +44,11 @@ jobs:
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
         run: |
-          echo "Starting bot2.py loop - will auto-restart on exit until job timeout (6h)"
+          echo "Starting nguyen2.py loop - will auto-restart on exit until job timeout (6h)"
           while true; do
-            echo "=== $(date) Starting bot2.py ==="
-            python3 bot2.py || echo "bot2.py exited with code $?"
-            echo "=== $(date) bot2.py finished, restarting in 10s ==="
+            echo "=== $(date) Starting nguyen2.py ==="
+            python3 nguyen2.py || echo "nguyen2.py exited with code $?"
+            echo "=== $(date) nguyen2.py finished, restarting in 10s ==="
             sleep 10
           done
       - name: Auto-restart workflow (khi hết phiên tự chạy tiếp)
