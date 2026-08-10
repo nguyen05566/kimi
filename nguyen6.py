@@ -102,7 +102,7 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=2000, board_size=15, rule=8):
+    def __init__(self, timeout_turn=2000, board_size=15, rule=9):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
@@ -117,32 +117,35 @@ class AlphaGomokuEngine:
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 try:
-                    self.proc.stdin.write((cmd + "
-").encode("utf-8"))
+                    self.proc.stdin.write((cmd + "\n").encode("utf-8"))
                     self.proc.stdin.flush()
-                except Exception: pass
+                except Exception:
+                    pass
 
     def _read_line(self, timeout=10.0) -> str:
         with self.lock:
-            if not self.proc or self.proc.poll() is not None: return ""
+            if not self.proc or self.proc.poll() is None:
+                return ""
             deadline = time.monotonic() + timeout
             while True:
-                idx = self._buffer.find(b"
-")
+                idx = self._buffer.find(b"\n")
                 if idx >= 0:
                     line_bytes = self._buffer[:idx].strip()
                     self._buffer = self._buffer[idx + 1:]
                     return line_bytes.decode("utf-8", errors="replace")
                 remaining = deadline - time.monotonic()
-                if remaining <= 0: return ""
+                if remaining <= 0:
+                    return ""
                 try:
                     import select
                     rlist, _, _ = select.select([self.proc.stdout], [], [], min(remaining, 0.5))
                     if rlist:
                         chunk = os.read(self.proc.stdout.fileno(), 4096)
-                        if not chunk: return ""
+                        if not chunk:
+                            return ""
                         self._buffer += chunk
-                except Exception: return ""
+                except Exception:
+                    return ""
 
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
@@ -151,42 +154,45 @@ class AlphaGomokuEngine:
             if self.proc and self.proc.poll() is None:
                 self._send("RESTART")
                 for _ in range(5):
-                    if self._read_line(timeout=0.5).upper() == "OK": break
+                    if self._read_line(timeout=0.5).upper() == "OK":
+                        break
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
-                self._send(f"RECTSTART 15,19")
+                self._send("RECTSTART 15,19")
                 for _ in range(5):
-                    if self._read_line(timeout=0.5).upper() == "OK": break
+                    if self._read_line(timeout=0.5).upper() == "OK":
+                        break
                 self.my_side = my_symbol
                 self._initialized = True
                 return True
-
-        self.stop()
-        if not self.binary: return False
-        try:
-            is_exe = self.binary.lower().endswith('.exe')
-            cmd = ["wine", self.binary] if is_exe else [self.binary]
-            self.proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR),
-                bufsize=0
-            )
-            self._buffer = b""
-            self.my_side = my_symbol
-            self._send(f"INFO rule {self.rule}")
-            self._send(f"INFO timeout_turn {self.timeout_turn}")
-            self._send("INFO ponder 1")
-            self._send("RECTSTART 15,19")
-            for _ in range(10):
-                line = self._read_line(timeout=1.0)
-                if line.upper() == "OK": break
-            self._initialized = True
-            return True
-        except Exception as e:
-            log.error(f"[AG] Start error: {e}")
-            self._initialized = False
-            return False
+            self.stop()
+            if not self.binary:
+                return False
+            try:
+                is_exe = self.binary.lower().endswith('.exe')
+                cmd = ["wine", self.binary] if is_exe else [self.binary]
+                self.proc = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR),
+                    bufsize=0
+                )
+                self._buffer = b""
+                self.my_side = my_symbol
+                self._send(f"INFO rule {self.rule}")
+                self._send(f"INFO timeout_turn {self.timeout_turn}")
+                self._send("INFO ponder 1")
+                self._send("RECTSTART 15,19")
+                for _ in range(10):
+                    line = self._read_line(timeout=1.0)
+                    if line.upper() == "OK":
+                        break
+                self._initialized = True
+                return True
+            except Exception as e:
+                log.error(f"[AG] Start error: {e}")
+                self._initialized = False
+                return False
 
     def restart_game(self) -> bool:
         with self.lock:
@@ -206,7 +212,8 @@ class AlphaGomokuEngine:
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
-                if not self._initialized or not self.proc or self.proc.poll() is not None: return None
+                if not self._initialized or not self.proc or self.proc.poll() is not None:
+                    return None
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
                 can_use_turn = getattr(self, '_synced', False) and len(board_history) == getattr(self, '_expected_history_len', -1) + 1
@@ -221,7 +228,8 @@ class AlphaGomokuEngine:
                     self._send("DONE")
                 for _ in range(300):
                     line = self._read_line(timeout=1)
-                    if not line: continue
+                    if not line:
+                        continue
                     if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                         continue
                     if "," in line:
@@ -235,18 +243,22 @@ class AlphaGomokuEngine:
                 log.warning(f"[AG] get_move error: {e}")
                 self._synced = False
                 return None
-                
+
     def stop(self):
         with self.lock:
             if self.proc:
-                try: self._send("END")
-                except: pass
+                try:
+                    self._send("END")
+                except Exception:
+                    pass
                 try:
                     self.proc.terminate()
                     self.proc.wait(2)
-                except:
-                    try: self.proc.kill()
-                    except: pass
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
                 self.proc = None
             self._initialized = False
             self._buffer = b""
