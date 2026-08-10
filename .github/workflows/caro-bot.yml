@@ -38,4 +38,4 @@ jobs:
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
-        run: python3 sq.py
+        run: python3 bot2.py
