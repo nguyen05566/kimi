@@ -146,10 +146,10 @@ class AlphaGomokuEngine:
                 return ""
             try:
                 # Dùng select.select đơn giản, không tạo object mới mỗi lần
-                ready, _, _ = select.select([self.proc.stdout], [], [], min(remaining, 2.0))
+                ready, _, _ = select.select([self.proc.stdout.fileno()], [], [], min(remaining, 2.0))
                 if ready:
-                    # Dùng read1() thay vì os.read() để tránh xung đột với Python buffer
-                    chunk = self.proc.stdout.read1(4096)
+                    # Dùng read() trên BufferedReader
+                    chunk = self.proc.stdout.read(4096)
                     if not chunk:
                         self._poll_cache = False
                         return ""
@@ -191,7 +191,7 @@ class AlphaGomokuEngine:
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Merge stderr vào stdout để đọc lỗi engine
                 cwd=str(ENGINE_DIR),
-                bufsize=0  # Unbuffered I/O để tránh xung đột buffer
+
             )
             self._buffer = b""
             self._poll_cache = None
