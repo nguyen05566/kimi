@@ -53,11 +53,12 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo26_c5.exe"
-AG_VERSION = "2026"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
+AG_BINARY = "pbrain-katagomo_caro-15.exe"
+AG_VERSION = "26"
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
+AG_RULE = 8  # Caro rule (Piskvork protocol)
 AG_TIMEOUT = 2000  # 2 giây
+AG_BOARD_SIZE = 15  # Katagomo chỉ hỗ trợ bàn vuông cố định
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
@@ -66,11 +67,11 @@ def auto_download_alphagomoku() -> Optional[str]:
             binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
+    log.info(f"[AG] Downloading Katagomo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/embryo26.zip")
+        archive = Path("/tmp/katagomo26.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -79,26 +80,241 @@ def auto_download_alphagomoku() -> Optional[str]:
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
-        try:
-            binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
+        for f in ENGINE_DIR.glob("*.exe"):
+            try: f.chmod(0o755)
+            except Exception: pass
+        if binary_path.exists():
+            return str(binary_path)
+        for f in ENGINE_DIR.glob("pbrain-katagomo*.exe"):
+            return str(f)
+        return None
     except Exception as e:
         log.error(f"[AG] Download failed: {e}")
         return None
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Embryo 2025: Windows exe chạy qua wine
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
-        try: f.chmod(0o644)
+    # Katagomo 26: ưu tiên caro-15 vì gamevh.net chơi luật Caro
+    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15.exe"):
+        try: f.chmod(0o755)
         except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
+    for f in ENGINE_DIR.glob("pbrain-katagomo_*-15.exe"):
+        try: f.chmod(0o755)
+        except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
+    for f in ENGINE_DIR.glob("pbrain-katagomo*.exe"):
+        try: f.chmod(0o755)
+        except Exception: pass
         return str(f)
     return None
+
+
+
+# ======================== COORDINATE SHIFTER (15×19 -> 15×15) ========================
+class CoordinateShifter:
+    """
+    Dịch chuyển viewport 15×15 trên bàn 15×19 để engine Katagomo hiểu được.
+    real: 15×19, engine: 15×15, offset_y ∈ [0, 4].
+    """
+    def __init__(self, real_w=15, real_h=19, engine_size=15):
+        self.real_w = real_w
+        self.real_h = real_h
+        self.engine_size = engine_size
+        self.max_offset = real_h - engine_size  # 4
+        self.offset_y = 0
+        self._last_history_len = 0
+
+    def to_engine(self, x: int, y: int) -> Optional[Tuple[int, int]]:
+        ey = y - self.offset_y
+        if 0 <= x < self.engine_size and 0 <= ey < self.engine_size:
+            return (x, ey)
+        return None
+
+    def from_engine(self, x: int, y: int) -> Tuple[int, int]:
+        return (x, y + self.offset_y)
+
+    def filter_history(self, history: list) -> list:
+        """Lọc và dịch các nước nằm trong viewport hiện tại."""
+        result = []
+        for x, y, sym in history:
+            eng = self.to_engine(x, y)
+            if eng:
+                result.append((eng[0], eng[1], sym))
+        return result
+
+    def compute_offset(self, history: list, my_side: int, opp_side: int) -> int:
+        """
+        Chọn offset_y tối ưu.
+        - Ưu tiên viewport chứa nước gần đây nhất.
+        - Nếu có nước thắng/chặn ngoài viewport -> buộc đổi.
+        - Nếu bounding box ≤ 15 -> căn giữa.
+        - Ngược lại -> chọn viewport chứa nhiều quân nhất (ưu tiên quân gần đây).
+        """
+        if not history:
+            return 2  # Mặc định căn giữa 19 hàng: offset=2 (hàng 2..16)
+
+        occupied_y = [y for _, y, _ in history]
+        min_y, max_y = min(occupied_y), max(occupied_y)
+
+        # Nếu tất cả nằm trong 15 hàng liên tiếp -> căn giữa vùng đó
+        if max_y - min_y < self.engine_size:
+            # Căn giữa sao cho min_y càng gần đầu viewport càng tốt
+            ideal = max(0, min(min_y, self.max_offset))
+            # Điều chỉnh để max_y nằm trong viewport
+            while ideal > 0 and max_y - ideal >= self.engine_size:
+                ideal -= 1
+            while ideal < self.max_offset and min_y - ideal < 0:
+                ideal += 1
+            return ideal
+
+        # Ván đã lan rộng >15 hàng -> chọn viewport tối ưu
+        best_k = self.offset_y
+        best_score = -1
+
+        for k in range(self.max_offset + 1):
+            score = 0
+            for i, (x, y, sym) in enumerate(history):
+                ey = y - k
+                if 0 <= ey < self.engine_size:
+                    # Quân gần đây có trọng số cao hơn
+                    weight = (i + 1) ** 2
+                    score += weight
+            if score > best_score:
+                best_score = score
+                best_k = k
+
+        # Kiểm tra xem nước gần nhất có nằm trong viewport không
+        last_y = history[-1][1]
+        if not (self.offset_y <= last_y < self.offset_y + self.engine_size):
+            # Nước gần nhất nằm ngoài viewport hiện tại -> buộc đổi
+            for k in range(self.max_offset + 1):
+                if k <= last_y < k + self.engine_size:
+                    return k
+            # Không tìm được (không thể xảy ra vì max_offset=4 và last_y≤18)
+            return best_k
+
+        return best_k
+
+    def needs_rebuild(self, history: list) -> bool:
+        """Kiểm tra xem viewport hiện tại có chứa nước gần nhất không."""
+        if not history:
+            return False
+        last_x, last_y, _ = history[-1]
+        eng = self.to_engine(last_x, last_y)
+        return eng is None
+
+# ======================== LOCAL FALLBACK ENGINE (15×19) ========================
+class LocalCaroEngine:
+    """Engine đơn giản bằng Python để xử lý bàn 15×19 khi Katagomo (15×15) không đủ."""
+
+    DIRECTIONS = [(1, 0), (0, 1), (1, 1), (1, -1)]
+
+    def __init__(self, width=15, height=19):
+        self.width = width
+        self.height = height
+
+    def _in_bounds(self, x, y):
+        return 0 <= x < self.width and 0 <= y < self.height
+
+    def _count_line(self, grid, x, y, dx, dy, symbol):
+        """Đếm số quân liên tiếp từ (x,y) theo hướng (dx,dy), bao gồm (x,y)."""
+        count = 0
+        cx, cy = x, y
+        while self._in_bounds(cx, cy) and grid[cy][cx] == symbol:
+            count += 1
+            cx += dx
+            cy += dy
+        # Kiểm tra ô trống ở cuối
+        open_end = self._in_bounds(cx, cy) and grid[cy][cx] == EMPTY
+        return count, open_end
+
+    def find_winning_move(self, grid, symbol):
+        """Tìm nước đi thắng ngay (tạo 5 liên tiếp)."""
+        for y in range(self.height):
+            for x in range(self.width):
+                if grid[y][x] != EMPTY:
+                    continue
+                for dx, dy in self.DIRECTIONS:
+                    # Đếm 2 phía
+                    c1, _ = self._count_line(grid, x + dx, y + dy, dx, dy, symbol)
+                    c2, _ = self._count_line(grid, x - dx, y - dy, -dx, -dy, symbol)
+                    if c1 + c2 + 1 >= 5:
+                        return (x, y)
+        return None
+
+    def find_blocking_move(self, grid, my_symbol, opp_symbol):
+        """Tìm nước chặn đối thủ thắng (đối thủ có 4 mở hoặc 4 chặn 1 đầu)."""
+        best = None
+        best_score = 0
+        for y in range(self.height):
+            for x in range(self.width):
+                if grid[y][x] != EMPTY:
+                    continue
+                score = 0
+                for dx, dy in self.DIRECTIONS:
+                    c1, open1 = self._count_line(grid, x + dx, y + dy, dx, dy, opp_symbol)
+                    c2, open2 = self._count_line(grid, x - dx, y - dy, -dx, -dy, opp_symbol)
+                    total = c1 + c2
+                    # Đối thủ có 4 mở 2 đầu -> chặn ngay (ưu tiên cao nhất)
+                    if total >= 4 and open1 and open2:
+                        return (x, y)  # chặn ngay lập tức
+                    # Đối thủ có 4 chặt 1 đầu -> cũng cần chặn
+                    if total >= 4 and (open1 or open2):
+                        score += 1000
+                    # Đối thủ có 3 mở 2 đầu -> điểm cao
+                    if total == 3 and open1 and open2:
+                        score += 100
+                    elif total == 3 and (open1 or open2):
+                        score += 10
+                    # Tạo 4 cho mình
+                    mc1, mopen1 = self._count_line(grid, x + dx, y + dy, dx, dy, my_symbol)
+                    mc2, mopen2 = self._count_line(grid, x - dx, y - dy, -dx, -dy, my_symbol)
+                    mtotal = mc1 + mc2
+                    if mtotal >= 4 and (mopen1 or mopen2):
+                        score += 500
+                    if mtotal == 3 and mopen1 and mopen2:
+                        score += 50
+                if score > best_score:
+                    best_score = score
+                    best = (x, y)
+        return best
+
+    def get_move(self, board_history: list, my_side: int, board_width: int, board_height: int) -> Optional[Tuple[int, int]]:
+        """Trả về nước đi tốt nhất từ engine local."""
+        self.width = board_width
+        self.height = board_height
+        grid = [[EMPTY] * board_width for _ in range(board_height)]
+        for x, y, sym in board_history:
+            if 0 <= x < board_width and 0 <= y < board_height:
+                grid[y][x] = sym
+
+        opp = CROSS if my_side == CIRCLE else CIRCLE
+
+        # 1. Thắng ngay
+        win = self.find_winning_move(grid, my_side)
+        if win:
+            log.info(f"[Local] Win-in-1: {win}")
+            return win
+
+        # 2. Chặn thua
+        block = self.find_blocking_move(grid, my_side, opp)
+        if block:
+            log.info(f"[Local] Block: {block}")
+            return block
+
+        # 3. Đánh gần nước cuối cùng hoặc center
+        if board_history:
+            lx, ly = board_history[-1][0], board_history[-1][1]
+            # Tìm ô trống gần nhất
+            for r in range(1, max(board_width, board_height)):
+                for dx in range(-r, r + 1):
+                    for dy in range(-r, r + 1):
+                        tx, ty = lx + dx, ly + dy
+                        if self._in_bounds(tx, ty) and grid[ty][tx] == EMPTY:
+                            return (tx, ty)
+        # 4. Center
+        return (board_width // 2, board_height // 2)
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
@@ -112,6 +328,8 @@ class AlphaGomokuEngine:
         self._buffer = b""
         self.my_side = 1
         self._initialized = False
+        self._katagomo_warned = False
+        self.shifter = None
 
     def _send(self, cmd: str):
         with self.lock:
@@ -159,7 +377,8 @@ class AlphaGomokuEngine:
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
-                self._send("RECTSTART 15,19")
+                # Katagomo không hỗ trợ RECTSTART, dùng START với board_size
+                self._send(f"START {self.board_size}")
                 for _ in range(5):
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
@@ -172,17 +391,19 @@ class AlphaGomokuEngine:
             try:
                 is_exe = self.binary.lower().endswith('.exe')
                 cmd = ["wine", self.binary] if is_exe else [self.binary]
+                env = os.environ.copy()
+                env["WINEDEBUG"] = "-all"
                 self.proc = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR),
-                    bufsize=0
+                    env=env, bufsize=0
                 )
                 self._buffer = b""
                 self.my_side = my_symbol
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
-                self._send("RECTSTART 15,19")
+                self._send(f"START {self.board_size}")
                 for _ in range(10):
                     line = self._read_line(timeout=1.0)
                     if line.upper() == "OK":
@@ -207,25 +428,51 @@ class AlphaGomokuEngine:
                     self._send(f"INFO rule {self.rule}")
                     self._send(f"INFO timeout_turn {self.timeout_turn}")
                     return True
+            # Nếu RESTART fail, thử START lại
+            self._send(f"START {self.board_size}")
+            for _ in range(5):
+                line = self._read_line(timeout=2.0)
+                if line.upper() == "OK":
+                    return True
             return True
 
-    def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+    def get_move(self, board_history: list, my_side: int, board_width=15, board_height=19,
+                 shifter: Optional['CoordinateShifter'] = None) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
+                self.shifter = shifter
+                if board_height > self.board_size and not self._katagomo_warned:
+                    log.info(f"[AG] Katagomo viewport={self.board_size}x{self.board_size} on server {board_width}x{board_height}. "
+                             f"Using coordinate shifter (offset_y={shifter.offset_y if shifter else 0}).")
+                    self._katagomo_warned = True
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
-                can_use_turn = getattr(self, '_synced', False) and len(board_history) == getattr(self, '_expected_history_len', -1) + 1
-                if can_use_turn:
-                    last_x, last_y, _ = board_history[-1]
+
+                if shifter:
+                    filtered_history = shifter.filter_history(board_history)
+                    # Nếu viewport đổi (nước gần nhất nằm ngoài viewport cũ) -> phải gửi BOARD
+                    needs_board = (not getattr(self, '_synced', False)
+                                   or len(filtered_history) != getattr(self, '_expected_history_len', -1) + 1
+                                   or shifter.needs_rebuild(board_history))
+                else:
+                    filtered_history = [(x, y, sym) for (x, y, sym) in board_history
+                                        if 0 <= x < self.board_size and 0 <= y < self.board_size]
+                    needs_board = (not getattr(self, '_synced', False)
+                                   or len(filtered_history) != getattr(self, '_expected_history_len', -1) + 1
+                                   or len(board_history) != len(filtered_history))
+
+                if not needs_board and filtered_history:
+                    last_x, last_y, _ = filtered_history[-1]
                     self._send(f"TURN {last_x},{last_y}")
                 else:
                     self._send("BOARD")
-                    for (x, y, sym) in board_history:
+                    for (x, y, sym) in filtered_history:
                         c = 1 if sym == self.my_side else 2
                         self._send(f"{x},{y},{c}")
                     self._send("DONE")
+
                 for _ in range(300):
                     line = self._read_line(timeout=1)
                     if not line:
@@ -236,8 +483,15 @@ class AlphaGomokuEngine:
                         parts = line.split(",")
                         if len(parts) == 2:
                             self._synced = True
-                            self._expected_history_len = len(board_history) + 1
-                            return int(parts[0].strip()), int(parts[1].strip())
+                            self._expected_history_len = len(filtered_history) + 1
+                            mx, my = int(parts[0].strip()), int(parts[1].strip())
+                            # Dịch ngược từ engine về bàn thực
+                            if shifter:
+                                mx, my = shifter.from_engine(mx, my)
+                            # Clamp vào biên bàn thực
+                            mx = max(0, min(mx, board_width - 1))
+                            my = max(0, min(my, board_height - 1))
+                            return mx, my
                 return None
             except Exception as e:
                 log.warning(f"[AG] get_move error: {e}")
@@ -459,6 +713,8 @@ class CaroBot:
         self.ag = None; self.ag_available = False
         self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
         self._moving = False; self._last_move_xy = None
+        self.local_engine = LocalCaroEngine(width=15, height=19)
+        self.shifter = None
         
         self.table_id = None
         self.player_slot_by_id = {}
@@ -480,12 +736,12 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=AG_BOARD_SIZE, rule=AG_RULE)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] Embryo v{AG_VERSION} OK! Rule={AG_RULE}")
+                log.info(f"[AG] Katagomo v{AG_VERSION} OK! Rule={AG_RULE}, Board={AG_BOARD_SIZE}x{AG_BOARD_SIZE}")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
@@ -578,55 +834,148 @@ class CaroBot:
         try:
             start = time.time()
             x, y = -1, -1
-            
+            source = "unknown"
+            history = list(self.board.history)
+            bw, bh = self.board.width, self.board.height
+            opp = CROSS if self.my_symbol == CIRCLE else CIRCLE
+
+            # === TẦNG 1: Local Win/Block (toàn bàn 15×19) ===
+            local_move = self.local_engine.get_move(history, self.my_symbol, bw, bh)
+
+            # Kiểm tra xem local_move có phải win-in-1 hoặc block không
+            local_is_critical = False
+            if local_move:
+                tx, ty = local_move
+                # Kiểm tra nếu đánh local_move sẽ thắng
+                test_grid = [row[:] for row in self.board.grid]
+                if 0 <= tx < bw and 0 <= ty < bh and test_grid[ty][tx] == EMPTY:
+                    test_grid[ty][tx] = self.my_symbol
+                    # Đếm 4 hướng
+                    for dx, dy in [(1,0),(0,1),(1,1),(1,-1)]:
+                        c = 1
+                        for s in [1, -1]:
+                            cx, cy = tx + dx*s, ty + dy*s
+                            while 0 <= cx < bw and 0 <= cy < bh and test_grid[cy][cx] == self.my_symbol:
+                                c += 1
+                                cx += dx*s
+                                cy += dy*s
+                        if c >= 5:
+                            local_is_critical = True
+                            break
+                    if not local_is_critical:
+                        # Kiểm tra block: đối thủ có 4 mở hoặc 4 chặn 1 đầu không
+                        for dx, dy in [(1,0),(0,1),(1,1),(1,-1)]:
+                            c = 0
+                            open_ends = 0
+                            for s in [1, -1]:
+                                cx, cy = tx + dx*s, ty + dy*s
+                                while 0 <= cx < bw and 0 <= cy < bh and self.board.grid[cy][cx] == opp:
+                                    c += 1
+                                    cx += dx*s
+                                    cy += dy*s
+                                if 0 <= cx < bw and 0 <= cy < bh and self.board.grid[cy][cx] == EMPTY:
+                                    open_ends += 1
+                            if c >= 4 and open_ends >= 1:
+                                local_is_critical = True
+                                break
+
+            # === TẦNG 2: Katagomo với Coordinate Shifter ===
+            katagomo_usable = False
             if self.ag_available:
+                # Tạo shifter nếu chưa có
+                if self.shifter is None:
+                    self.shifter = CoordinateShifter(real_w=bw, real_h=bh, engine_size=AG_BOARD_SIZE)
+                # Tính offset tối ưu
+                new_offset = self.shifter.compute_offset(history, self.my_symbol, opp)
+                if new_offset != self.shifter.offset_y:
+                    log.info(f"[Shifter] Viewport offset_y: {self.shifter.offset_y} -> {new_offset}")
+                    self.shifter.offset_y = new_offset
+                    # Offset đổi -> engine cần rebuild (BOARD thay vì TURN)
+                    if self.ag:
+                        self.ag._synced = False
+
+                # Kiểm tra xem viewport có chứa nước gần nhất không
+                if not self.shifter.needs_rebuild(history):
+                    katagomo_usable = True
+                else:
+                    # Thử đổi offset để chứa nước gần nhất
+                    last_x, last_y, _ = history[-1]
+                    for k in range(self.shifter.max_offset + 1):
+                        if k <= last_y < k + AG_BOARD_SIZE:
+                            self.shifter.offset_y = k
+                            katagomo_usable = True
+                            log.info(f"[Shifter] Emergency shift to offset_y={k} to cover last move ({last_x},{last_y})")
+                            if self.ag:
+                                self.ag._synced = False
+                            break
+
+                # Nếu ván đã lan rộng quá 15 hàng (bounding box > 15) -> Katagomo không đủ
+                if history:
+                    ys = [y for _, y, _ in history]
+                    if max(ys) - min(ys) >= AG_BOARD_SIZE:
+                        katagomo_usable = False
+                        log.info("[Shifter] Board span >= 15 rows -> disabling Katagomo, using local engine")
+
+            # Gọi Katagomo nếu usable
+            if katagomo_usable:
                 try:
-                    history = list(self.board.history)
-                    
                     move = await asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        lambda: self.ag.get_move(history, self.my_symbol)
+                        None,
+                        lambda: self.ag.get_move(history, self.my_symbol, bw, bh, self.shifter)
                     )
-                    
-                    if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
+                    if (move and 0 <= move[0] < bw and 0 <= move[1] < bh
                         and self.board.get(*move) == EMPTY):
-                        x, y = move; self.ag_moves += 1
+                        x, y = move
+                        source = f"katagomo(oy={self.shifter.offset_y})"
+                        self.ag_moves += 1
                     else:
                         self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
-                        else:
-                            lx, ly = 7, 9
-                        x, y = self.board.get_empty_near(lx, ly)
+                        log.warning(f"[AG] Invalid move: {move}, fallback local")
+                        x, y = local_move if local_move else self.board.get_empty_near_center()
+                        source = "local_fallback"
                         self.ag_fallback_count += 1
-                        self.ag.start_game(my_symbol=self.my_symbol)
+                        try:
+                            self.ag.start_game(my_symbol=self.my_symbol)
+                            self.shifter = None
+                        except Exception:
+                            pass
                 except Exception as e:
-                    self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
-                    try: self.ag.stop(); self.ag = None; self.ag_available = False
-                    except Exception: pass
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
-                    x, y = self.board.get_empty_near(lx, ly)
+                    self.ag_errors += 1
+                    log.warning(f"[AG] Error: {e}")
+                    try:
+                        self.ag.stop()
+                        self.ag = None
+                        self.ag_available = False
+                    except Exception:
+                        pass
+                    x, y = local_move if local_move else self.board.get_empty_near_center()
+                    source = "local_fallback"
                     self.ag_fallback_count += 1
             else:
-                history = self.board.history
-                if history:
-                    lx, ly = history[-1][0], history[-1][1]
-                else:
-                    lx, ly = 7, 9
-                x, y = self.board.get_empty_near(lx, ly)
-                
+                # Katagomo không usable -> dùng local hoàn toàn
+                x, y = local_move if local_move else self.board.get_empty_near_center()
+                source = "local"
+
+            # Nếu local tìm được critical (win/block) mà Katagomo trả về nước khác -> ưu tiên local
+            if local_is_critical and local_move and (x, y) != local_move:
+                log.info(f"[Pipeline] Local found critical {local_move}, overriding Katagomo {x,y}")
+                x, y = local_move
+                source = "local_override"
+
+            # Final safety check
+            if not (0 <= x < bw and 0 <= y < bh) or self.board.get(x, y) != EMPTY:
+                x, y = self.board.get_empty_near_center()
+                source = "center_fallback"
+
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG]")
+            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [{source}]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
         finally:
             self._moving = False
+
 
     async def handle(self, raw: bytes):
         r = BinaryReader(raw)
@@ -787,6 +1136,7 @@ class CaroBot:
             self.init_ag()
         else:
             self.ag.start_game(my_symbol=self.my_symbol)
+        self.shifter = None
         
         if self.slot < 0:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
@@ -1224,8 +1574,8 @@ class CaroBot:
 
 def main():
     bin_path = auto_download_alphagomoku()
-    if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No AlphaGomoku - bot plays center only")
+    if bin_path: print(f"[SETUP] Katagomo ready: {os.path.basename(bin_path)}")
+    else: print("[SETUP] No Katagomo - using local engine only")
     
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
