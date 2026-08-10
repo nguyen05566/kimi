@@ -377,7 +377,7 @@ if "--test-coords" in sys.argv:
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
-CARO_USER_DIRECT = "sq"
+CARO_USER_DIRECT = "nguyen6"
 CARO_PASSWD_DIRECT = "nhat123456"
 USER = os.environ.get("CARO_USER") or CARO_USER_DIRECT
 PASSWD = os.environ.get("CARO_PASSWD") or CARO_PASSWD_DIRECT
