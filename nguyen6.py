@@ -573,6 +573,9 @@ class CaroBot:
     def make_pong(self) -> bytes:
         w = BinaryWriter(); w.write_command("PONG"); return w.build()
 
+    def make_ping(self) -> bytes:
+        w = BinaryWriter(); w.write_command("PING"); return w.build()
+
     def make_ready(self) -> bytes:
         if self.is_playing: return b''
         w = BinaryWriter(); w.write_command("SET_READY"); return w.build()
@@ -911,6 +914,7 @@ class CaroBot:
             await self.send(self.make_get_table())
 
     async def watchdog(self):
+        last_ping = time.time()
         while self.running:
             try: await asyncio.sleep(10)
             except asyncio.CancelledError: return
@@ -920,6 +924,11 @@ class CaroBot:
                 self.save_stats(); self.stop(); return
             
             if not self.ws or self.ws.close_code is not None: continue
+            
+            # Gửi PING chủ động mỗi 25 giây để giữ kết nối alive
+            if time.time() - last_ping > 25:
+                await self.send(self.make_ping())
+                last_ping = time.time()
             
             try:
                 if (self.opponent_gone_at is not None and self.is_playing
@@ -1243,6 +1252,10 @@ class CaroBot:
             
             self.save_stats()
             if self.ag: self.ag.stop(); self.ag = None
+
+            # Delay 10 giây trước khi reconnect để tránh rate-limit
+            log.info("[BOT] Mất kết nối, chờ 10s trước khi thử lại...")
+            await asyncio.sleep(10)
 
 def main():
     bin_path = auto_download_alphagomoku()
