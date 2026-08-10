@@ -35,7 +35,5 @@ jobs:
 
       - name: Run Caro Bot
         env:
-          CARO_USER: ${{ secrets.CARO_USER1 }}
-          CARO_PASSWD: ${{ secrets.CARO_PASSWD1 }}
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
         run: python3 nguyen1.py
