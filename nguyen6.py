@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-BOT CARO EMBRYO - FULL NAME + AVATAR v4.1 FINAL
-FIX: chmod 0o644 -> 0o755
-FIX: lỗi đọc trộn BufferedReader + os.read
-FIX: chạy exe bằng wine robust, tìm wine/wine64 tự động
+╔══════════════════════════════════════════════════════════════════╗
+║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
+║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                    ║
+║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
+║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
+║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
+║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
+╚══════════════════════════════════════════════════════════════════╝
 """
-
-import subprocess, sys, os, importlib, urllib.request, json, time, struct, shutil
-import re, logging, asyncio, random, threading, selectors, select, html as html_lib
+import subprocess, sys, os, importlib, urllib.request, json, time, struct
+import re, logging, asyncio, random, threading, shutil, selectors, html as html_lib
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 from urllib.parse import urljoin
 
+# ======================== LOGGING ========================
 log = logging.getLogger("caro")
 log.setLevel(logging.INFO)
 if not log.handlers:
@@ -19,6 +23,7 @@ if not log.handlers:
     h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
     log.addHandler(h)
 
+# ======================== SETUP & IMPORTS ========================
 REQUIRED = ["websockets", "requests"]
 for pkg in REQUIRED:
     try:
@@ -26,9 +31,12 @@ for pkg in REQUIRED:
     except ImportError:
         print(f"[SETUP] Installing {pkg}...")
         subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL)
+        importlib.import_module(pkg)
 
 import websockets, requests
 
+# ======================== SAFE IDENTITY CONFIG ========================
+# Đây là TÊN ĐẦY ĐỦ (FULL_NAME), không phải tên đăng nhập.
 ADJECTIVES = ["Pro", "Dark", "Light", "Shadow", "Ghost", "Fire", "Ice", "Thunder",
               "Silent", "Swift", "Crazy", "Lucky", "Mega", "Super", "Ultra", "Hyper",
               "Cyber", "Neo", "Tech", "Alpha", "Beta", "Zero", "Max", "King", "Queen"]
@@ -38,6 +46,7 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
+# ======================== ALPHA GOMOKU CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
@@ -47,76 +56,53 @@ ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 AG_BINARY = "pbrain-embryo26_c5.exe"
 AG_VERSION = "2026"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-AG_RULE = 8
-AG_TIMEOUT = 5000
-
-def find_wine() -> Optional[str]:
-    # Tìm wine ở mọi chỗ có thể trên GitHub Actions
-    candidates = [
-        os.environ.get("WINE"),
-        shutil.which("wine"),
-        shutil.which("wine64"),
-        shutil.which("wine-stable"),
-        "/usr/bin/wine",
-        "/usr/bin/wine64",
-        "/opt/wine-stable/bin/wine",
-        "/opt/wine/bin/wine",
-        "/usr/local/bin/wine",
-    ]
-    for c in candidates:
-        if c and Path(c).exists():
-            return c
-    return None
+AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
+AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
         try:
             binary_path.chmod(0o755)
-        except: pass
+        except Exception: pass
         return str(binary_path)
-    log.info(f"[AG] Downloading Embryo {AG_VERSION} from {AG_DOWNLOAD_URL}...")
+    log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
         archive = Path("/tmp/embryo26.zip")
-        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
         with urllib.request.urlopen(req, timeout=120) as resp:
             archive.write_bytes(resp.read())
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
-        # FIX chmod 755 cho TẤT CẢ file trong engine
-        for p in ENGINE_DIR.rglob("*"):
-            if p.is_file():
-                try:
-                    p.chmod(0o755)
-                except: pass
-        if binary_path.exists():
-            return str(binary_path)
-        # Nếu zip không có đúng tên c5, tìm file exe bất kỳ
-        for f in ENGINE_DIR.glob("*.exe"):
-            return str(f)
-        return None
+        try:
+            binary_path.chmod(0o755)
+        except Exception: pass
+        return str(binary_path)
     except Exception as e:
         log.error(f"[AG] Download failed: {e}")
         return None
 
 def detect_ag_binary() -> Optional[str]:
-    if not ENGINE_DIR.exists():
-        return None
-    # FIX: luôn 0o755, không bao giờ 0o644
-    for pat in ["pbrain-embryo26_c5.exe", "pbrain-embryo26*.exe", "*.exe", "pbrain-embryo*"]:
-        for f in ENGINE_DIR.glob(pat):
-            if f.is_file():
-                try:
-                    f.chmod(0o755)
-                except: pass
-                return str(f)
+    if not ENGINE_DIR.exists(): return None
+    # Embryo 2025: Windows exe chạy qua wine
+    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
+        try: f.chmod(0o644)
+        except Exception: pass
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
+        return str(f)
     return None
 
+# ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=5000, board_size=15, rule=8):
+    def __init__(self, timeout_turn=2000, board_size=15, rule=8):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
@@ -126,107 +112,81 @@ class AlphaGomokuEngine:
         self._buffer = b""
         self.my_side = 1
         self._initialized = False
-        self._synced = False
-        self.wine_bin = find_wine()
 
     def _send(self, cmd: str):
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 try:
-                    self.proc.stdin.write((cmd + "\n").encode())
+                    self.proc.stdin.write((cmd + "
+").encode("utf-8"))
                     self.proc.stdin.flush()
-                except Exception as e:
-                    log.warning(f"[AG] _send {cmd} failed: {e}")
+                except Exception: pass
 
     def _read_line(self, timeout=10.0) -> str:
         with self.lock:
-            if not self.proc or self.proc.poll() is None:
-                return ""
+            if not self.proc or self.proc.poll() is not None: return ""
             deadline = time.monotonic() + timeout
             while True:
-                idx = self._buffer.find(b"\n")
+                idx = self._buffer.find(b"
+")
                 if idx >= 0:
-                    line = self._buffer[:idx].strip()
-                    self._buffer = self._buffer[idx+1:]
-                    return line.decode(errors="replace")
-                rem = deadline - time.monotonic()
-                if rem <= 0:
-                    return ""
+                    line_bytes = self._buffer[:idx].strip()
+                    self._buffer = self._buffer[idx + 1:]
+                    return line_bytes.decode("utf-8", errors="replace")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: return ""
                 try:
-                    r, _, _ = select.select([self.proc.stdout], [], [], min(rem, 0.5))
-                    if r:
+                    import select
+                    rlist, _, _ = select.select([self.proc.stdout], [], [], min(remaining, 0.5))
+                    if rlist:
                         chunk = os.read(self.proc.stdout.fileno(), 4096)
-                        if not chunk:
-                            return ""
+                        if not chunk: return ""
                         self._buffer += chunk
-                except Exception:
-                    return ""
+                except Exception: return ""
 
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
-            self._buffer = b""
             self._synced = False
+            self._buffer = b""
             if self.proc and self.proc.poll() is None:
                 self._send("RESTART")
                 for _ in range(5):
-                    if self._read_line(0.5).upper() == "OK":
-                        break
+                    if self._read_line(timeout=0.5).upper() == "OK": break
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
-                self._send(f"RECTSTART 15,15")
+                self._send(f"RECTSTART 15,19")
                 for _ in range(5):
-                    if self._read_line(0.5).upper() == "OK":
-                        self.my_side = my_symbol
-                        self._initialized = True
-                        return True
-            self.stop()
-            if not self.binary:
-                log.error("[AG] No binary found")
-                return False
-            # Kiểm tra exe + wine
-            is_exe = self.binary.lower().endswith(".exe")
-            if is_exe:
-                self.wine_bin = find_wine()
-                if not self.wine_bin:
-                    log.error("[AG] .exe cần wine nhưng không tìm thấy wine/wine64! Cài winehq-stable")
-                    log.error("[AG] Thử: which wine, ls /usr/bin/wine*")
-                    return False
-                cmd = [self.wine_bin, self.binary]
-                log.info(f"[AG] Starting with {self.wine_bin} {self.binary}")
-            else:
-                cmd = [self.binary]
-                log.info(f"[AG] Starting native {self.binary}")
-
-            try:
-                env = os.environ.copy()
-                env["WINEDEBUG"] = "-all"
-                self.proc = subprocess.Popen(
-                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR),
-                    bufsize=0, start_new_session=True, env=env
-                )
-                self._buffer = b""
+                    if self._read_line(timeout=0.5).upper() == "OK": break
                 self.my_side = my_symbol
-                # Thứ tự đúng protocol
-                self._send(f"INFO rule {self.rule}")
-                self._send(f"INFO timeout_turn {self.timeout_turn}")
-                self._send("INFO ponder 1")
-                self._send(f"RECTSTART 15,15")
-                for _ in range(10):
-                    l = self._read_line(1.0)
-                    log.info(f"[AG-INIT] {l}")
-                    if l.upper() == "OK":
-                        self._initialized = True
-                        log.info(f"[AG] Embryo {AG_VERSION} OK! Rule={self.rule}")
-                        return True
-                log.error("[AG] Không nhận OK sau RECTSTART - exe có thể crash")
-                self.stop()
-                return False
-            except Exception as e:
-                log.error(f"[AG] Start error: {e}")
-                self.stop()
-                return False
+                self._initialized = True
+                return True
+
+        self.stop()
+        if not self.binary: return False
+        try:
+            is_exe = self.binary.lower().endswith('.exe')
+            cmd = ["wine", self.binary] if is_exe else [self.binary]
+            self.proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR),
+                bufsize=0
+            )
+            self._buffer = b""
+            self.my_side = my_symbol
+            self._send(f"INFO rule {self.rule}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO ponder 1")
+            self._send("RECTSTART 15,19")
+            for _ in range(10):
+                line = self._read_line(timeout=1.0)
+                if line.upper() == "OK": break
+            self._initialized = True
+            return True
+        except Exception as e:
+            log.error(f"[AG] Start error: {e}")
+            self._initialized = False
+            return False
 
     def restart_game(self) -> bool:
         with self.lock:
@@ -235,72 +195,58 @@ class AlphaGomokuEngine:
             self._buffer = b""
             self._send("RESTART")
             for _ in range(5):
-                if self._read_line(2.0).upper() == "OK":
+                line = self._read_line(timeout=2.0)
+                if line.upper() == "OK":
+                    log.info("[AG] RESTART successful")
                     self._send(f"INFO rule {self.rule}")
                     self._send(f"INFO timeout_turn {self.timeout_turn}")
-                    self._send("INFO ponder 1")
-                    self._synced = False
                     return True
-            return False
+            return True
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
-            if not self._initialized or not self.proc or self.proc.poll() is not None:
-                log.warning("[AG] get_move called but proc dead")
-                return None
             try:
+                if not self._initialized or not self.proc or self.proc.poll() is not None: return None
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
-                self._send(f"INFO time_left {self.timeout_turn*20}")
-                can_use_turn = self._synced and len(board_history) == getattr(self, '_expected_history_len', -1)+1
+                self._send(f"INFO time_left {self.timeout_turn * 20}")
+                can_use_turn = getattr(self, '_synced', False) and len(board_history) == getattr(self, '_expected_history_len', -1) + 1
                 if can_use_turn:
-                    lx, ly, _ = board_history[-1]
-                    self._send(f"TURN {lx},{ly}")
+                    last_x, last_y, _ = board_history[-1]
+                    self._send(f"TURN {last_x},{last_y}")
                 else:
                     self._send("BOARD")
-                    for x,y,sym in board_history:
+                    for (x, y, sym) in board_history:
                         c = 1 if sym == self.my_side else 2
                         self._send(f"{x},{y},{c}")
                     self._send("DONE")
                 for _ in range(300):
-                    line = self._read_line(1)
-                    if not line:
-                        continue
-                    if line.startswith(("MESSAGE","ERROR","DEBUG")):
-                        log.info(f"[AG] {line}")
+                    line = self._read_line(timeout=1)
+                    if not line: continue
+                    if line.startswith("MESSAGE") or line.startswith("ERROR") or line.startswith("DEBUG"):
                         continue
                     if "," in line:
-                        try:
-                            a,b = line.split(",")[:2]
-                            x,y = int(a.strip()), int(b.strip())
-                            if 0 <= x < 15 and 0 <= y < 15:
-                                self._synced = True
-                                self._expected_history_len = len(board_history)+1
-                                log.info(f"[AG] MOVE {x},{y} raw={line}")
-                                return x,y
-                        except: continue
-                log.warning("[AG] No move from engine")
+                        parts = line.split(",")
+                        if len(parts) == 2:
+                            self._synced = True
+                            self._expected_history_len = len(board_history) + 1
+                            return int(parts[0].strip()), int(parts[1].strip())
                 return None
             except Exception as e:
                 log.warning(f"[AG] get_move error: {e}")
                 self._synced = False
                 return None
-
+                
     def stop(self):
         with self.lock:
             if self.proc:
                 try: self._send("END")
                 except: pass
                 try:
-                    if self.proc.poll() is None:
-                        try: os.killpg(os.getpgid(self.proc.pid), 15)
-                        except: self.proc.terminate()
-                        try: self.proc.wait(2)
-                        except:
-                            try: os.killpg(os.getpgid(self.proc.pid), 9)
-                            except:
-                                try: self.proc.kill()
-                                except: pass
-                except: pass
+                    self.proc.terminate()
+                    self.proc.wait(2)
+                except:
+                    try: self.proc.kill()
+                    except: pass
                 self.proc = None
             self._initialized = False
             self._buffer = b""
