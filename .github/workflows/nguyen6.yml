@@ -52,4 +52,4 @@ jobs:
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
           WINEDEBUG: -all
         run: |
-          xvfb-run -a python3 nguyen6_final.py
+          xvfb-run -a python3 nguyen6.py
