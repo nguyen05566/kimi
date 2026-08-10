@@ -1125,6 +1125,99 @@ class CaroBot:
             log.error(f'[BOT] Login error: {e}', exc_info=True)
             return False
 
+    # ======================== AUTO REGISTER VIA WEBSOCKET (từ APK) ========================
+    async def auto_register(self, new_user: str, new_pass: str) -> bool:
+        """
+        Đăng ký tài khoản mới qua WebSocket như APK:
+        - GET_CAPTCHA_IMAGE (160x50) -> nhận ảnh + clientId
+        - REGISTER (provider=PS_VH, nick, pass, captcha, clientId, imei)
+        Cần giải captcha (hiện lưu ảnh ra /tmp/captcha_register.jpg và đợi file /tmp/captcha_answer.txt)
+        Trả về True nếu đăng ký thành công (server trả status 0)
+        """
+        import struct, random, os, asyncio, websockets
+        provider = "PS_VH"
+        imei = "".join(random.choice("0123456789") for _ in range(15))
+        # Binary helpers
+        def make_writer():
+            class W:
+                def __init__(self): self.parts=[]
+                def i8(self,v): self.parts.append(struct.pack('>b',v))
+                def i32(self,v): self.parts.append(struct.pack('>i',v))
+                def i64(self,v): self.parts.append(struct.pack('>q',v))
+                def write_ascii(self,s):
+                    b=s.encode('ascii'); self.parts.append(struct.pack('>B', len(b))); self.parts.append(b)
+                def write_string(self,s):
+                    b=s.encode('utf-16-be'); self.parts.append(struct.pack('>h', len(b)//2)); self.parts.append(b)
+                def write_command(self,cmd):
+                    b=cmd.encode('ascii'); self.i8(-len(b)); self.parts.append(b)
+                def build(self): return b''.join(self.parts)
+            return W()
+        try:
+            ws = await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
+            # 1. GET_CAPTCHA_IMAGE
+            w = make_writer(); w.write_command("GET_CAPTCHA_IMAGE"); w.i32(160); w.i32(50)
+            await ws.send(w.build())
+            raw = await asyncio.wait_for(ws.recv(), timeout=8)
+            # Parse: status(1) + len(2) + img + clientId(8)
+            cmd_len = 1 + len("GET_CAPTCHA_IMAGE")
+            status = raw[cmd_len]
+            length = struct.unpack_from('>H', raw, cmd_len+1)[0]
+            img = raw[cmd_len+1+2:cmd_len+1+2+length]
+            clientId = struct.unpack_from('>q', raw, cmd_len+1+2+length)[0]
+            # Lưu ảnh để giải
+            cap_path = "/tmp/captcha_register.jpg"
+            open(cap_path, "wb").write(img)
+            log.info(f"[REGISTER] Đã lưu captcha {cap_path} (clientId={clientId}), hãy giải captcha")
+            # Thử OCR tự động nếu có pytesseract, fallback đợi file
+            captcha = None
+            try:
+                from PIL import Image
+                import pytesseract
+                # Thử OCR đơn giản (cần cài tesseract)
+                captcha = pytesseract.image_to_string(Image.open(cap_path)).strip().replace(" ", "")[:6]
+                log.info(f"[REGISTER] OCR thử: {captcha!r}")
+            except: pass
+            if not captcha or len(captcha) < 3:
+                # Đợi file answer 60s (dùng cho workspace test)
+                for _ in range(60):
+                    if os.path.exists("/tmp/captcha_answer.txt"):
+                        captcha = open("/tmp/captcha_answer.txt").read().strip()
+                        if captcha: break
+                    await asyncio.sleep(1)
+                if not captcha:
+                    log.warning("[REGISTER] Timeout đợi captcha")
+                    await ws.close(); return False
+            log.info(f"[REGISTER] Dùng captcha={captcha!r} cho {new_user}")
+            # 2. REGISTER
+            w2 = make_writer(); w2.write_command("REGISTER")
+            w2.write_ascii(provider); w2.write_ascii(new_user); w2.write_string(new_pass)
+            w2.write_ascii(captcha); w2.i64(clientId); w2.write_ascii(imei)
+            await ws.send(w2.build())
+            raw2 = await asyncio.wait_for(ws.recv(), timeout=8)
+            # Parse response status
+            # raw2 = 01 53 (339) + status byte + ...
+            if len(raw2) >= 3 and raw2[0]==0x01 and raw2[1]==0x53:
+                status2 = raw2[2]
+                if status2 == 0:
+                    log.info(f"[REGISTER] Thành công: {new_user}")
+                    await ws.close(); return True
+                else:
+                    # Đọc error string
+                    try:
+                        n = struct.unpack_from('>h', raw2, 3)[0]
+                        if n>0:
+                            msg = raw2[5:5+n*2].decode('utf-16-be', errors='replace')
+                            log.warning(f"[REGISTER] Thất bại: {msg}")
+                        else:
+                            log.warning(f"[REGISTER] Thất bại status={status2}")
+                    except: log.warning(f"[REGISTER] Thất bại status={status2} hex={raw2.hex()[:200]}")
+                    await ws.close(); return False
+            log.warning(f"[REGISTER] Phản hồi lạ: {raw2.hex()[:200]}")
+            await ws.close(); return False
+        except Exception as e:
+            log.error(f"[REGISTER] Lỗi: {e}", exc_info=True)
+            return False
+
     async def connect_ws(self) -> bool:
         try:
             self.ws = await websockets.connect(WS_URL,
@@ -1179,6 +1272,24 @@ class CaroBot:
             # Một lần đăng nhập mỗi chu kỳ để tránh giới hạn/brute-force.
             login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
             if not login_ok:
+                # Thử auto-register nếu bật CARO_AUTO_REGISTER=1 (dùng cho workspace test)
+                if os.environ.get("CARO_AUTO_REGISTER") == "1":
+                    import random, string
+                    new_u = f"auto{random.randint(1000,9999)}"
+                    new_p = f"Pwd{random.randint(100000,999999)}!"
+                    log.info(f"[BOT] Login fail -> thử đăng ký {new_u}")
+                    try:
+                        ok = await self.auto_register(new_u, new_p)
+                        if ok:
+                            # Cập nhật USER/PASSWD để lần sau login đúng
+                            globals()["USER"] = new_u
+                            globals()["PASSWD"] = new_p
+                            # Ghi ra file để lưu
+                            open("/tmp/new_account.txt","w").write(f"{new_u}\n{new_p}\n")
+                            log.info(f"[BOT] Đã tạo acc mới: {new_u} / {new_p} - thử login lại")
+                            continue
+                    except Exception as e:
+                        log.warning(f"[REGISTER] auto fail: {e}")
                 retry_count += 1
                 retry_delay = min(30 * (2 ** (retry_count - 1)), 300)
                 remaining = RUNTIME - (time.time() - self.start_time)
