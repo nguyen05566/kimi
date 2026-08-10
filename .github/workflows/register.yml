@@ -1,0 +1,84 @@
+name: Register GameVH Account
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Tên đăng nhập muốn đăng ký (để trống = tự tạo test + số)'
+        required: false
+        default: ''
+        type: string
+      password:
+        description: 'Mật khẩu (để trống = tự tạo Pass + số!)'
+        required: false
+        default: ''
+        type: string
+      captcha:
+        description: 'Mã captcha (để trống = tự giải bằng ddddocr)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr
+          pip install --upgrade pip
+          pip install websockets requests pillow pytesseract ddddocr --break-system-packages
+
+      - name: Run register.py (auto captcha)
+        env:
+          REGISTER_USER: ${{ inputs.username }}
+          REGISTER_PASS: ${{ inputs.password }}
+          REGISTER_CAPTCHA: ${{ inputs.captcha }}
+        run: |
+          echo "=== Register GameVH ==="
+          echo "User: ${REGISTER_USER:-auto}"
+          python3 register.py
+          echo "=== Done ==="
+          if [ -f /tmp/new_account.txt ]; then
+            echo "New account:"
+            cat /tmp/new_account.txt
+            echo "--- captcha images ---"
+            ls -lh /tmp/captcha*.jpg /home/runner/work/*/captcha*.jpg 2>&1 | head -20
+          fi
+          if [ -f /home/user/captcha_register.jpg ]; then
+            ls -lh /home/user/captcha_register.jpg
+          fi
+
+      - name: Upload captcha image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-and-account
+          path: |
+            /tmp/captcha_register.jpg
+            /tmp/new_account.txt
+            captcha_register.jpg
+            /home/user/captcha_register.jpg
+          if-no-files-found: ignore
+
+      - name: Show result
+        if: always()
+        run: |
+          echo "=== /tmp/new_account.txt ==="
+          cat /tmp/new_account.txt 2>&1 || echo "Chưa tạo được acc (có thể captcha sai, thử lại)"
+          echo "=== /tmp/captcha_register.jpg ==="
+          ls -lh /tmp/captcha_register.jpg 2>&1 | head -5
