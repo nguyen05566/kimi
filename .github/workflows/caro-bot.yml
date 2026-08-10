@@ -9,11 +9,16 @@ on:
         default: '5.9'
         type: string
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: caro-bot-gamevh-account
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,9 +38,24 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot
+      - name: Run Caro Bot (loop until timeout)
         env:
           CARO_USER: ${{ secrets.CARO_USER }}
           CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
-        run: python3 bot2.py
+        run: |
+          echo "Starting bot2.py loop - will auto-restart on exit until job timeout (6h)"
+          while true; do
+            echo "=== $(date) Starting bot2.py ==="
+            python3 bot2.py || echo "bot2.py exited with code $?"
+            echo "=== $(date) bot2.py finished, restarting in 10s ==="
+            sleep 10
+          done
+      - name: Auto-restart workflow (khi hết phiên tự chạy tiếp)
+        if: always()
+        run: |
+          echo "Job finished at $(date), triggering next run..."
+          sleep 5
+          gh workflow run "$(basename ${{ github.workflow }})" --ref ${{ github.ref_name }} || echo "gh run failed, will rely on cron"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
