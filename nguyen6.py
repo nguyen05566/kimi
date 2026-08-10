@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
-║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                    ║
-║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
-║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
-║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
-║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
-╚══════════════════════════════════════════════════════════════════╝
+BOT CARO EMBRYO - FULL NAME + AVATAR v4.1 FINAL
+FIX: chmod 0o644 -> 0o755
+FIX: lỗi đọc trộn BufferedReader + os.read
+FIX: chạy exe bằng wine robust, tìm wine/wine64 tự động
 """
-import subprocess, sys, os, importlib, urllib.request, json, time, struct
-import re, logging, asyncio, random, threading, shutil, selectors, select, html as html_lib
+
+import subprocess, sys, os, importlib, urllib.request, json, time, struct, shutil
+import re, logging, asyncio, random, threading, selectors, select, html as html_lib
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 from urllib.parse import urljoin
 
-# ======================== LOGGING ========================
 log = logging.getLogger("caro")
 log.setLevel(logging.INFO)
 if not log.handlers:
@@ -23,7 +19,6 @@ if not log.handlers:
     h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
     log.addHandler(h)
 
-# ======================== SETUP & IMPORTS ========================
 REQUIRED = ["websockets", "requests"]
 for pkg in REQUIRED:
     try:
@@ -31,12 +26,9 @@ for pkg in REQUIRED:
     except ImportError:
         print(f"[SETUP] Installing {pkg}...")
         subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL)
-        importlib.import_module(pkg)
 
 import websockets, requests
 
-# ======================== SAFE IDENTITY CONFIG ========================
-# Đây là TÊN ĐẦY ĐỦ (FULL_NAME), không phải tên đăng nhập.
 ADJECTIVES = ["Pro", "Dark", "Light", "Shadow", "Ghost", "Fire", "Ice", "Thunder",
               "Silent", "Swift", "Crazy", "Lucky", "Mega", "Super", "Ultra", "Hyper",
               "Cyber", "Neo", "Tech", "Alpha", "Beta", "Zero", "Max", "King", "Queen"]
@@ -46,7 +38,6 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== ALPHA GOMOKU CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
@@ -56,73 +47,98 @@ ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 AG_BINARY = "pbrain-embryo26_c5.exe"
 AG_VERSION = "2026"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
-AG_TIMEOUT = 2000  # 2 giây
+AG_RULE = 8
+AG_TIMEOUT = 5000
 
+def find_wine() -> Optional[str]:
+    # Tìm wine ở mọi chỗ có thể trên GitHub Actions
+    candidates = [
+        os.environ.get("WINE"),
+        shutil.which("wine"),
+        shutil.which("wine64"),
+        shutil.which("wine-stable"),
+        "/usr/bin/wine",
+        "/usr/bin/wine64",
+        "/opt/wine-stable/bin/wine",
+        "/opt/wine/bin/wine",
+        "/usr/local/bin/wine",
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            return c
+    return None
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
         try:
-            binary_path.chmod(0o755)  # FIX 1: luôn 755
-        except Exception: pass
+            binary_path.chmod(0o755)
+        except: pass
         return str(binary_path)
-    log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
+    log.info(f"[AG] Downloading Embryo {AG_VERSION} from {AG_DOWNLOAD_URL}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
         archive = Path("/tmp/embryo26.zip")
-        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-        })
+        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             archive.write_bytes(resp.read())
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
-        for p in ENGINE_DIR.glob("pbrain-embryo*"):
-            try: p.chmod(0o755)
-            except: pass
-        return str(binary_path) if binary_path.exists() else None
+        # FIX chmod 755 cho TẤT CẢ file trong engine
+        for p in ENGINE_DIR.rglob("*"):
+            if p.is_file():
+                try:
+                    p.chmod(0o755)
+                except: pass
+        if binary_path.exists():
+            return str(binary_path)
+        # Nếu zip không có đúng tên c5, tìm file exe bất kỳ
+        for f in ENGINE_DIR.glob("*.exe"):
+            return str(f)
+        return None
     except Exception as e:
         log.error(f"[AG] Download failed: {e}")
         return None
 
 def detect_ag_binary() -> Optional[str]:
-    if not ENGINE_DIR.exists(): return None
-    # FIX 1: Bỏ 0o644, chỉ dùng 0o755
-    for pattern in ["pbrain-embryo26_c5.exe", "pbrain-embryo26_c5*", "pbrain-embryo26*.exe", "pbrain-embryo*"]:
-        for f in ENGINE_DIR.glob(pattern):
+    if not ENGINE_DIR.exists():
+        return None
+    # FIX: luôn 0o755, không bao giờ 0o644
+    for pat in ["pbrain-embryo26_c5.exe", "pbrain-embryo26*.exe", "*.exe", "pbrain-embryo*"]:
+        for f in ENGINE_DIR.glob(pat):
             if f.is_file():
-                try: f.chmod(0o755)
+                try:
+                    f.chmod(0o755)
                 except: pass
                 return str(f)
     return None
 
-# ======================== ENGINE WRAPPER (FIXED v4) ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=2000, board_size=15, rule=8):
+    def __init__(self, timeout_turn=5000, board_size=15, rule=8):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
         self.rule = rule
         self.proc = None
-        self.lock = threading.RLock()  # FIX: RLock tránh deadlock
+        self.lock = threading.RLock()
         self._buffer = b""
         self.my_side = 1
         self._initialized = False
         self._synced = False
+        self.wine_bin = find_wine()
 
     def _send(self, cmd: str):
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 try:
-                    self.proc.stdin.write((cmd + "\n").encode("utf-8"))
+                    self.proc.stdin.write((cmd + "\n").encode())
                     self.proc.stdin.flush()
-                except Exception: pass
+                except Exception as e:
+                    log.warning(f"[AG] _send {cmd} failed: {e}")
 
     def _read_line(self, timeout=10.0) -> str:
-        # FIX 2: Không trộn BufferedReader + os.read, dùng select + os.read với bufsize=0
         with self.lock:
             if not self.proc or self.proc.poll() is None:
                 return ""
@@ -132,13 +148,13 @@ class AlphaGomokuEngine:
                 if idx >= 0:
                     line = self._buffer[:idx].strip()
                     self._buffer = self._buffer[idx+1:]
-                    return line.decode("utf-8", errors="replace")
+                    return line.decode(errors="replace")
                 rem = deadline - time.monotonic()
                 if rem <= 0:
                     return ""
                 try:
-                    rlist, _, _ = select.select([self.proc.stdout], [], [], min(rem, 0.5))
-                    if rlist:
+                    r, _, _ = select.select([self.proc.stdout], [], [], min(rem, 0.5))
+                    if r:
                         chunk = os.read(self.proc.stdout.fileno(), 4096)
                         if not chunk:
                             return ""
@@ -148,18 +164,17 @@ class AlphaGomokuEngine:
 
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
+            self._buffer = b""
             self._synced = False
-            self._buffer = b""  # FIX: clear buffer cũ
             if self.proc and self.proc.poll() is None:
                 self._send("RESTART")
                 for _ in range(5):
                     if self._read_line(0.5).upper() == "OK":
                         break
-                # FIX 3: INFO trước RECTSTART mới đúng protocol
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
-                self._send("RECTSTART 15,19")
+                self._send(f"RECTSTART 15,15")
                 for _ in range(5):
                     if self._read_line(0.5).upper() == "OK":
                         self.my_side = my_symbol
@@ -167,26 +182,45 @@ class AlphaGomokuEngine:
                         return True
             self.stop()
             if not self.binary:
+                log.error("[AG] No binary found")
                 return False
+            # Kiểm tra exe + wine
+            is_exe = self.binary.lower().endswith(".exe")
+            if is_exe:
+                self.wine_bin = find_wine()
+                if not self.wine_bin:
+                    log.error("[AG] .exe cần wine nhưng không tìm thấy wine/wine64! Cài winehq-stable")
+                    log.error("[AG] Thử: which wine, ls /usr/bin/wine*")
+                    return False
+                cmd = [self.wine_bin, self.binary]
+                log.info(f"[AG] Starting with {self.wine_bin} {self.binary}")
+            else:
+                cmd = [self.binary]
+                log.info(f"[AG] Starting native {self.binary}")
+
             try:
-                is_exe = self.binary.lower().endswith('.exe')
-                cmd = ["wine", self.binary] if is_exe else [self.binary]
+                env = os.environ.copy()
+                env["WINEDEBUG"] = "-all"
                 self.proc = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR),
-                    bufsize=0,  # FIX: unbuffered để os.read an toàn
-                    start_new_session=True
+                    bufsize=0, start_new_session=True, env=env
                 )
                 self._buffer = b""
                 self.my_side = my_symbol
+                # Thứ tự đúng protocol
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
-                self._send("RECTSTART 15,19")
+                self._send(f"RECTSTART 15,15")
                 for _ in range(10):
-                    if self._read_line(1.0).upper() == "OK":
+                    l = self._read_line(1.0)
+                    log.info(f"[AG-INIT] {l}")
+                    if l.upper() == "OK":
                         self._initialized = True
+                        log.info(f"[AG] Embryo {AG_VERSION} OK! Rule={self.rule}")
                         return True
+                log.error("[AG] Không nhận OK sau RECTSTART - exe có thể crash")
                 self.stop()
                 return False
             except Exception as e:
@@ -211,7 +245,8 @@ class AlphaGomokuEngine:
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
-            if not self._initialized or not self.proc or self.proc.poll() is None:
+            if not self._initialized or not self.proc or self.proc.poll() is not None:
+                log.warning("[AG] get_move called but proc dead")
                 return None
             try:
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
@@ -228,15 +263,22 @@ class AlphaGomokuEngine:
                     self._send("DONE")
                 for _ in range(300):
                     line = self._read_line(1)
-                    if not line or line.startswith(("MESSAGE","ERROR","DEBUG")):
+                    if not line:
+                        continue
+                    if line.startswith(("MESSAGE","ERROR","DEBUG")):
+                        log.info(f"[AG] {line}")
                         continue
                     if "," in line:
                         try:
                             a,b = line.split(",")[:2]
-                            self._synced = True
-                            self._expected_history_len = len(board_history)+1
-                            return int(a.strip()), int(b.strip())
+                            x,y = int(a.strip()), int(b.strip())
+                            if 0 <= x < 15 and 0 <= y < 15:
+                                self._synced = True
+                                self._expected_history_len = len(board_history)+1
+                                log.info(f"[AG] MOVE {x},{y} raw={line}")
+                                return x,y
                         except: continue
+                log.warning("[AG] No move from engine")
                 return None
             except Exception as e:
                 log.warning(f"[AG] get_move error: {e}")
@@ -255,7 +297,7 @@ class AlphaGomokuEngine:
                         try: self.proc.wait(2)
                         except:
                             try: os.killpg(os.getpgid(self.proc.pid), 9)
-                            except: 
+                            except:
                                 try: self.proc.kill()
                                 except: pass
                 except: pass
@@ -268,7 +310,7 @@ WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 # === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
 # Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mật khẩu
-CARO_USER_DIRECT = "nguyen6"
+CARO_USER_DIRECT = "nguyen3"
 CARO_PASSWD_DIRECT = "nhat123456"
 # Ưu tiên Secrets nếu có, fallback về hardcode
 USER = os.environ.get("CARO_USER1") or os.environ.get("CARO_USER") or CARO_USER_DIRECT
