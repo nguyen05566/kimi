@@ -102,7 +102,7 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=2000, board_size=15, rule=9):
+    def __init__(self, timeout_turn=2000, board_size=15, rule=8):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
@@ -268,7 +268,7 @@ WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 # === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
 # Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mật khẩu
-CARO_USER_DIRECT = "nguyen3"
+CARO_USER_DIRECT = "nguyen6"
 CARO_PASSWD_DIRECT = "nhat123456"
 # Ưu tiên Secrets nếu có, fallback về hardcode
 USER = os.environ.get("CARO_USER1") or os.environ.get("CARO_USER") or CARO_USER_DIRECT
