@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO KATAGOMO - FULL NAME + AVATAR v4.2                     ║
+║  BOT CARO KATAGOMO - FULL NAME + AVATAR v4.3                     ║
 ║  Engine: pbrain-katagomo_caro-15.exe (chỉ 15x15)                 ║
-║  Bàn thật 15x19 → khung trượt 15x15 theo khu vực đang đánh       ║
-║  Map tọa độ gửi/nhận; dịch khung trước khi fallback              ║
-║  START 15 (không dùng RECTSTART)                                 ║
+║  Pipeline: đọc bàn → xác định region → RESTART → BOARD map       ║
+║  Không gửi tọa độ tuyệt đối / nước ngoài khung lên engine        ║
+║  START 15; dịch origin + RESTART trước khi fallback              ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -230,10 +230,16 @@ class KataGomoEngine:
     """
     Wrapper cho pbrain-katagomo_caro-15.exe (chỉ 15x15).
 
-    Bàn thật của server: 15 (width) x 19 (height).
-    Engine chỉ nhận START 15 → bot duy trì một khung 15x15 trượt
-    (origin ox, oy) bao phủ khu vực đang đánh, map tọa độ gửi/nhận.
-    Không fallback ngay khi nước ngoài khung — thử dịch khung trước.
+    Quy trình BẮT BUỘC mỗi nước (không gửi tọa độ tuyệt đối lên engine):
+      1. Đọc toàn bộ board_history (bàn thật 15x19)
+      2. Phân tích → chọn khung 15x15 (origin)
+      3. Nếu khung đổi so với lần trước → RESTART engine (xoá state cũ)
+      4. Map quân trong khung → gửi BOARD (tọa độ 0..14)
+      5. Nhận nước engine → map ngược ra bàn thật
+      6. Nếu lỗi → dịch khung + RESTART + BOARD lại (không fallback liền)
+
+    Lý do: gửi nước ngoài khung / tọa độ tuyệt đối → engine hiểu sai
+    (coi như bàn trống / tọa độ invalid) → state hỏng → fallback.
     """
     ENGINE_SIZE = 15
 
@@ -253,9 +259,11 @@ class KataGomoEngine:
         self._is_pbrain = True
         # Khung 15x15 trên bàn thật: [ox, ox+15) x [oy, oy+15)
         self._origin_x = 0
-        self._origin_y = 2          # giữa theo chiều cao 19 (0..18) → 2..16
-        self._region_dirty = True   # cần tính lại origin
-        self._last_window_stones = 0
+        self._origin_y = 2
+        # Origin đã commit vào engine (sau BOARD gần nhất)
+        self._committed_ox = None
+        self._committed_oy = None
+        self._engine_has_board = False  # True sau khi BOARD thành công
 
     # ---------- I/O ----------
     def _init_selector(self):
@@ -317,103 +325,134 @@ class KataGomoEngine:
         while self._read_line(timeout=0.02):
             pass
 
-    # ---------- Region / window mapping ----------
+    # ---------- Region analysis (KHÔNG đụng engine) ----------
     def _compute_origin(self, board_history: list) -> Tuple[int, int]:
         """
-        Chọn origin (ox, oy) sao cho khung 15x15 bao hết (hoặc tối đa)
-        các quân đang có, ưu tiên căn giữa theo bounding-box.
-        board_width=15 → ox luôn 0.
-        board_height=19 → oy ∈ [0, 4].
+        Chỉ đọc history → chọn origin. Không gửi gì cho engine.
+        width=15 → ox=0; height=19 → oy ∈ [0,4].
         """
         es = self.ENGINE_SIZE
-        max_oy = max(0, self.board_height - es)  # 19-15=4
-        max_ox = max(0, self.board_width - es)   # 15-15=0
+        max_oy = max(0, self.board_height - es)
+        max_ox = max(0, self.board_width - es)
 
         if not board_history:
-            # Bàn trống: căn giữa theo chiều cao
             return 0, max_oy // 2
 
         xs = [x for x, y, s in board_history]
         ys = [y for x, y, s in board_history]
-        min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
-
-        # Căn giữa bounding box
-        cx = (min_x + max_x) / 2.0
         cy = (min_y + max_y) / 2.0
-        ox = int(round(cx - es / 2.0))
         oy = int(round(cy - es / 2.0))
-
-        ox = max(0, min(ox, max_ox))
         oy = max(0, min(oy, max_oy))
 
-        # Nếu bbox rộng hơn 15 theo 1 chiều → ưu tiên bao nước gần nhất
-        # (chiều width luôn = 15 nên chỉ quan tâm height)
+        # Bbox cao hơn 15 → bám nửa nước gần nhất (mặt trận)
         if max_y - min_y + 1 > es:
-            # Lấy tâm theo các quân gần đây (nửa lịch sử cuối)
-            recent = board_history[-(len(board_history) // 2 + 1):]
+            recent = board_history[-(max(3, len(board_history) // 2)):]
             rys = [y for x, y, s in recent]
             cy = sum(rys) / len(rys)
             oy = int(round(cy - es / 2.0))
             oy = max(0, min(oy, max_oy))
 
-        return ox, oy
+        # Ưu tiên bao nước cuối cùng
+        last_x, last_y = board_history[-1][0], board_history[-1][1]
+        if not (0 <= last_y - oy < es):
+            oy = max(0, min(last_y - es // 2, max_oy))
 
-    def _update_region(self, board_history: list, force: bool = False) -> bool:
+        return 0, oy  # ox luôn 0
+
+    def _count_outside(self, board_history: list, ox: int, oy: int) -> int:
+        es = self.ENGINE_SIZE
+        n = 0
+        for x, y, _ in board_history:
+            if not (ox <= x < ox + es and oy <= y < oy + es):
+                n += 1
+        return n
+
+    def _analyze_region(self, board_history: list) -> Tuple[int, int, int, int]:
         """
-        Cập nhật origin nếu cần.
-        Trả về True nếu origin đã đổi (cần gửi lại BOARD đầy đủ).
+        Bước 1+2: đọc history, xác định khung tối ưu.
+        Trả về (ox, oy, n_inside, n_outside).
         """
-        new_ox, new_oy = self._compute_origin(board_history)
-        n_stones = len(board_history)
+        ox, oy = self._compute_origin(board_history)
+        outside = self._count_outside(board_history, ox, oy)
+        inside = len(board_history) - outside
+        return ox, oy, inside, outside
 
-        # Kiểm tra xem mọi quân hiện tại có nằm trong khung cũ không
-        all_inside = True
-        if board_history and not force:
-            es = self.ENGINE_SIZE
-            for x, y, _ in board_history:
-                if not (self._origin_x <= x < self._origin_x + es and
-                        self._origin_y <= y < self._origin_y + es):
-                    all_inside = False
-                    break
-
-        changed = (new_ox != self._origin_x or new_oy != self._origin_y or
-                   force or self._region_dirty or not all_inside)
-
-        if changed:
-            old = (self._origin_x, self._origin_y)
-            self._origin_x, self._origin_y = new_ox, new_oy
-            self._region_dirty = False
-            self._last_window_stones = n_stones
-            if old != (new_ox, new_oy):
-                log.info(
-                    f"[KG] Region window → origin=({new_ox},{new_oy}) "
-                    f"cover x[{new_ox}:{new_ox + self.ENGINE_SIZE}) "
-                    f"y[{new_oy}:{new_oy + self.ENGINE_SIZE})"
-                )
-            return True
-        return False
-
-    def _to_engine(self, x: int, y: int) -> Optional[Tuple[int, int]]:
-        """Map tọa độ bàn thật → tọa độ engine (0..14)."""
-        ex = x - self._origin_x
-        ey = y - self._origin_y
+    def _to_engine(self, x: int, y: int, ox: int = None, oy: int = None) -> Optional[Tuple[int, int]]:
+        if ox is None:
+            ox = self._origin_x
+        if oy is None:
+            oy = self._origin_y
+        ex, ey = x - ox, y - oy
         if 0 <= ex < self.ENGINE_SIZE and 0 <= ey < self.ENGINE_SIZE:
             return ex, ey
         return None
 
     def _from_engine(self, ex: int, ey: int) -> Tuple[int, int]:
-        """Map tọa độ engine → bàn thật."""
         return ex + self._origin_x, ey + self._origin_y
 
-    def _stones_in_window(self, board_history: list) -> list:
-        """Chỉ lấy quân nằm trong khung hiện tại, đã map sang tọa độ engine."""
+    def _map_history_to_engine(self, board_history: list, ox: int, oy: int) -> list:
+        """Chỉ quân trong khung, tọa độ đã map 0..14. Bỏ quân ngoài khung."""
         out = []
         for x, y, sym in board_history:
-            mapped = self._to_engine(x, y)
-            if mapped is not None:
-                out.append((mapped[0], mapped[1], sym))
+            m = self._to_engine(x, y, ox, oy)
+            if m is not None:
+                out.append((m[0], m[1], sym))
         return out
+
+    def _soft_restart(self) -> bool:
+        """RESTART engine để xoá state cũ trước khi BOARD khung mới."""
+        if not self.proc or self.proc.poll() is not None:
+            return False
+        self._drain_output()
+        self._send("RESTART")
+        ok = False
+        for _ in range(6):
+            line = self._read_line(timeout=1.0)
+            if line.upper() == "OK":
+                ok = True
+                break
+        self._engine_has_board = False
+        self._committed_ox = None
+        self._committed_oy = None
+        if ok:
+            self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+            self._send("INFO ponder 1")
+            time.sleep(0.05)
+            self._drain_output()
+        return ok
+
+    def _commit_region(self, ox: int, oy: int, need_restart: bool) -> bool:
+        """
+        Gán origin mới. Nếu khung đổi hoặc engine chưa có board hợp lệ
+        → RESTART để không mang state cũ (tránh engine hiểu bàn trống/sai).
+        """
+        region_changed = (
+            self._committed_ox is None
+            or self._committed_oy is None
+            or ox != self._committed_ox
+            or oy != self._committed_oy
+            or not self._engine_has_board
+            or need_restart
+        )
+        self._origin_x, self._origin_y = ox, oy
+        if region_changed:
+            log.info(
+                f"[KG] Commit region origin=({ox},{oy}) "
+                f"cover y[{oy}:{oy + self.ENGINE_SIZE}) "
+                f"(restart={region_changed})"
+            )
+            if not self._soft_restart():
+                # RESTART fail → thử START lại nhẹ
+                self._send("START 15")
+                for _ in range(5):
+                    if self._read_line(timeout=0.8).upper() == "OK":
+                        break
+                self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+                self._drain_output()
+                self._engine_has_board = False
+            return True
+        return False
 
     # ---------- Lifecycle ----------
     def start_game(self, my_symbol=1) -> bool:
@@ -449,10 +488,11 @@ class KataGomoEngine:
                 self.my_side = my_symbol
                 self._origin_x = 0
                 self._origin_y = max(0, (self.board_height - self.ENGINE_SIZE) // 2)
-                self._region_dirty = True
-                self._last_window_stones = 0
+                self._committed_ox = None
+                self._committed_oy = None
+                self._engine_has_board = False
 
-                # Engine chỉ 15x15 → dùng START 15 (KHÔNG dùng RECTSTART)
+                # Engine chỉ 15x15 → START 15 (KHÔNG RECTSTART, KHÔNG tọa độ 19)
                 self._send("START 15")
                 ok = False
                 for _ in range(10):
@@ -471,9 +511,8 @@ class KataGomoEngine:
 
                 self._initialized = True
                 log.info(
-                    f"[KG] Engine started (pbrain 15x15 window) "
-                    f"binary={Path(self.binary).name} my_side={my_symbol} "
-                    f"origin=({self._origin_x},{self._origin_y})"
+                    f"[KG] Engine started (pbrain 15x15, region-first) "
+                    f"binary={Path(self.binary).name} my_side={my_symbol}"
                 )
                 return True
             except Exception as e:
@@ -485,107 +524,124 @@ class KataGomoEngine:
         with self.lock:
             if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return False
-            self._send("RESTART")
-            for _ in range(5):
-                if self._read_line(timeout=1.5).upper() == "OK":
-                    break
+            ok = self._soft_restart()
             self._origin_x = 0
             self._origin_y = max(0, (self.board_height - self.ENGINE_SIZE) // 2)
-            self._region_dirty = True
-            self._last_window_stones = 0
-            return True
+            self._committed_ox = None
+            self._committed_oy = None
+            self._engine_has_board = False
+            return ok
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
-                return self._get_move_pbrain_windowed(board_history, my_side)
+                return self._get_move_region_first(board_history, my_side)
             except Exception as e:
                 log.warning(f"[KG] get_move error: {e}")
+                self._engine_has_board = False
                 return None
 
-    def _get_move_pbrain_windowed(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+    def _get_move_region_first(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         """
-        1) Cập nhật khung 15x15 theo khu vực đánh.
-        2) Gửi BOARD với tọa độ đã map.
-        3) Nhận nước engine → map ngược.
-        4) Nếu nước ngoài khung / ô đã có quân → dịch khung rồi thử lại (tối đa 2 lần).
-           Không fallback ngay.
+        Pipeline bắt buộc:
+          đọc history → xác định region → (RESTART nếu đổi) → BOARD map → nhận nước → map ngược
+        Không bao giờ gửi tọa độ tuyệt đối / nước ngoài khung lên engine.
         """
         self._drain_output()
-        self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
-        self._send(f"INFO time_left {int(self.timeout_turn * 1000 * 20)}")
-
-        # Tập hợp ô đã chiếm (tọa độ tuyệt đối) để kiểm tra hợp lệ
         occupied = {(x, y) for x, y, _ in board_history}
 
-        for attempt in range(3):
-            region_changed = self._update_region(board_history, force=(attempt > 0))
-            window_stones = self._stones_in_window(board_history)
+        # --- Bước 1+2: phân tích region TRƯỚC khi đụng engine ---
+        ox, oy, n_in, n_out = self._analyze_region(board_history)
+        log.info(
+            f"[KG] Analyze region origin=({ox},{oy}) "
+            f"inside={n_in} outside={n_out} total={len(board_history)}"
+        )
+        if n_out > 0:
+            log.info(
+                f"[KG] {n_out} quân ngoài khung sẽ bị cắt (không gửi engine) "
+                f"— khung bám mặt trận gần nhất"
+            )
 
-            # Gửi BOARD (luôn full state trong khung)
+        # Thử tối đa 3 origin khác nhau nếu nước trả về không hợp lệ
+        candidate_origins = [(ox, oy)]
+        max_oy = max(0, self.board_height - self.ENGINE_SIZE)
+        # Thêm ứng viên: bám nước cuối, mép trên, mép dưới
+        if board_history:
+            ly = board_history[-1][1]
+            candidate_origins.append((0, max(0, min(ly - self.ENGINE_SIZE // 2, max_oy))))
+        candidate_origins.append((0, 0))
+        candidate_origins.append((0, max_oy))
+        # unique giữ thứ tự
+        seen = set()
+        uniq = []
+        for c in candidate_origins:
+            if c not in seen:
+                seen.add(c)
+                uniq.append(c)
+        candidate_origins = uniq
+
+        for attempt, (cox, coy) in enumerate(candidate_origins):
+            # --- Bước 3: commit region + RESTART nếu khung đổi ---
+            self._commit_region(cox, coy, need_restart=True)
+
+            # --- Bước 4: map + BOARD (chỉ quân trong khung, tọa độ 0..14) ---
+            mapped = self._map_history_to_engine(board_history, cox, coy)
+            self._drain_output()
+            self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+            self._send(f"INFO time_left {int(self.timeout_turn * 1000 * 20)}")
             self._send("BOARD")
-            for (ex, ey, sym) in window_stones:
+            for (ex, ey, sym) in mapped:
                 c = 1 if sym == self.my_side else 2
                 self._send(f"{ex},{ey},{c}")
             self._send("DONE")
 
             raw = self._read_engine_move()
             if raw is None:
-                log.warning(f"[KG] attempt={attempt}: engine không trả nước")
+                log.warning(f"[KG] attempt={attempt} origin=({cox},{coy}): không có response")
+                self._engine_has_board = False
                 continue
 
             ex, ey = raw
             if not (0 <= ex < self.ENGINE_SIZE and 0 <= ey < self.ENGINE_SIZE):
-                log.warning(f"[KG] attempt={attempt}: nước engine ngoài 15x15: ({ex},{ey})")
+                log.warning(f"[KG] attempt={attempt}: engine trả ({ex},{ey}) ngoài 0..14")
+                self._engine_has_board = False
                 continue
+
+            # Đánh dấu engine đã nhận BOARD hợp lệ
+            self._committed_ox, self._committed_oy = cox, coy
+            self._engine_has_board = True
+            self._origin_x, self._origin_y = cox, coy
 
             abs_x, abs_y = self._from_engine(ex, ey)
 
-            # Kiểm tra nằm trong bàn thật + ô trống
             if not (0 <= abs_x < self.board_width and 0 <= abs_y < self.board_height):
                 log.warning(
-                    f"[KG] attempt={attempt}: map ra ngoài bàn thật "
-                    f"({abs_x},{abs_y}) origin=({self._origin_x},{self._origin_y})"
+                    f"[KG] attempt={attempt}: map abs=({abs_x},{abs_y}) ngoài bàn "
+                    f"— thử origin khác (không fallback)"
                 )
-                # Dịch khung về phía nước vừa đề xuất rồi thử lại
-                self._nudge_origin_toward(abs_x, abs_y)
+                self._engine_has_board = False
                 continue
 
             if (abs_x, abs_y) in occupied:
                 log.warning(
-                    f"[KG] attempt={attempt}: ô đã có quân ({abs_x},{abs_y}), "
-                    f"thử dịch khung"
+                    f"[KG] attempt={attempt}: ({abs_x},{abs_y}) đã có quân "
+                    f"— thử origin khác (không fallback)"
                 )
-                self._nudge_origin_toward(abs_x, abs_y)
+                self._engine_has_board = False
                 continue
 
             log.info(
-                f"[KG] MOVE engine=({ex},{ey}) → abs=({abs_x},{abs_y}) "
-                f"origin=({self._origin_x},{self._origin_y}) "
-                f"window_stones={len(window_stones)}/{len(board_history)}"
+                f"[KG] OK engine=({ex},{ey}) → abs=({abs_x},{abs_y}) "
+                f"origin=({cox},{coy}) mapped={len(mapped)}/{len(board_history)}"
             )
             return abs_x, abs_y
 
-        log.warning("[KG] Hết attempt, không có nước hợp lệ từ engine")
+        # Hết origin ứng viên — vẫn không fallback ở đây; để do_move soft-retry
+        log.warning("[KG] Hết candidate origin, engine chưa cho nước hợp lệ")
+        self._engine_has_board = False
         return None
-
-    def _nudge_origin_toward(self, tx: int, ty: int):
-        """Dịch origin để cố bao phủ điểm (tx, ty)."""
-        es = self.ENGINE_SIZE
-        max_oy = max(0, self.board_height - es)
-        max_ox = max(0, self.board_width - es)
-        # Căn giữa điểm mục tiêu
-        new_ox = max(0, min(tx - es // 2, max_ox))
-        new_oy = max(0, min(ty - es // 2, max_oy))
-        if (new_ox, new_oy) != (self._origin_x, self._origin_y):
-            log.info(
-                f"[KG] Nudge origin ({self._origin_x},{self._origin_y}) "
-                f"→ ({new_ox},{new_oy}) toward ({tx},{ty})"
-            )
-            self._origin_x, self._origin_y = new_ox, new_oy
-            self._region_dirty = True
 
     def _read_engine_move(self) -> Optional[Tuple[int, int]]:
         deadline = time.monotonic() + self.timeout_turn + 3.0
@@ -595,6 +651,8 @@ class KataGomoEngine:
                 continue
             up = line.upper()
             if up.startswith(("MESSAGE", "ERROR", "DEBUG", "OK", "UNKNOWN")):
+                if up.startswith("ERROR"):
+                    log.warning(f"[KG] engine ERROR: {line}")
                 continue
             if "," in line:
                 parts = line.split(",")
@@ -1558,7 +1616,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO KATAGOMO - pbrain-katagomo_caro-15.exe v4.2 (window 15x15)")
+        log.info("BOT CARO KATAGOMO - pbrain-katagomo_caro-15.exe v4.3 (region-first)")
         log.info(f"{'='*50}")
         
         retry_count = 0
