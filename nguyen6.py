@@ -2,7 +2,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
-║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                    ║
+║  Engine: KATAGOMO 2026                                         ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
 ║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
@@ -46,17 +46,17 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== ALPHA GOMOKU CONFIG ========================
+# ======================== KATAGOMO CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo26_c5.exe"
+ENGINE_DIR = _BASE_DIR / "katagomo-engine"
+AG_BINARY = "katagomo26.exe"
 AG_VERSION = "2026"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
+AG_RULE = 8  # Caro rule
 AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
@@ -66,11 +66,11 @@ def auto_download_alphagomoku() -> Optional[str]:
             binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
+    log.info(f"[AG] Downloading Katagomo {AG_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/embryo26.zip")
+        archive = Path("/tmp/katagomo26.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -79,24 +79,30 @@ def auto_download_alphagomoku() -> Optional[str]:
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
-        try:
-            binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
+        
+        exe_files = list(ENGINE_DIR.glob("*.exe"))
+        if exe_files:
+            binary_path = exe_files[0]
+            try:
+                binary_path.chmod(0o755)
+            except Exception: pass
+            return str(binary_path)
+        return str(ENGINE_DIR)
     except Exception as e:
         log.error(f"[AG] Download failed: {e}")
         return None
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Embryo 2025: Windows exe chạy qua wine
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
-        try: f.chmod(0o644)
+    # Ưu tiên tìm file katagomo*.exe
+    for f in ENGINE_DIR.glob("katagomo*.exe"):
+        try: f.chmod(0o755)
         except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
-        return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
+    for f in ENGINE_DIR.glob("katagomo*"):
+        if f.is_file(): return str(f)
+    # Nếu không tìm thấy thì lấy file exe bất kỳ
+    for f in ENGINE_DIR.glob("*.exe"):
         return str(f)
     return None
 
@@ -181,7 +187,10 @@ class AlphaGomokuEngine:
                 for _ in range(5):
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
-                self._send("RECTSTART 15,19")
+                # Thay thế RECTSTART 15,19 bằng lệnh Katagomo
+                self._send("rectangular_boardsize 19 15")
+                self._send("clear_board")
+                self._send("komi 0.5")
                 for _ in range(5):
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
@@ -196,7 +205,7 @@ class AlphaGomokuEngine:
             if not self.binary:
                 return False
             try:
-                # Embryo 2025 là Windows exe → chạy qua Wine
+                # Chạy qua Wine nếu là file .exe trên môi trường Linux
                 is_exe = self.binary.lower().endswith(".exe")
                 if is_exe:
                     cmd = ["wine", self.binary]
@@ -209,7 +218,14 @@ class AlphaGomokuEngine:
                 self._buffer = bytearray()
                 self._init_selector()
                 self.my_side = my_symbol
-                self._send("RECTSTART 15,19")
+                
+                # 1. Khai báo kích thước bàn cờ chữ nhật (X trước, Y sau)
+                self._send("rectangular_boardsize 19 15")
+                # 2. Xóa các quân cờ cũ để bắt đầu ván mới
+                self._send("clear_board")
+                # 3. Thiết lập luật chơi Gomoku/Caro (Komi, quy tắc thắng...) nếu cần
+                self._send("komi 0.5")
+                
                 for _ in range(10):
                     line = self._read_line(timeout=1.0)
                     if line.upper() == "OK":
@@ -307,16 +323,10 @@ class AlphaGomokuEngine:
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
-# === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
-# Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mật khẩu
 CARO_USER_DIRECT = "nguyen6"
 CARO_PASSWD_DIRECT = "nhat123456"
-# Ưu tiên Secrets nếu có, fallback về hardcode
 USER = os.environ.get("CARO_USER1") or os.environ.get("CARO_USER") or CARO_USER_DIRECT
 PASSWD = os.environ.get("CARO_PASSWD1") or os.environ.get("CARO_PASSWD") or CARO_PASSWD_DIRECT
-# Nếu muốn chỉ dùng hardcode:
-# USER = "nguyen1"
-# PASSWD = "nguyen1nhat123456"
 
 VERSION = "5.0.2"
 GAME_ID = "caro"
@@ -507,7 +517,6 @@ class CaroBot:
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
 
-        # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
         self._identity_attempted = False
         self.identity_result = {}
 
@@ -526,7 +535,7 @@ class CaroBot:
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] Embryo v{AG_VERSION} OK! Rule={AG_RULE}")
+                log.info(f"[AG] Katagomo v{AG_VERSION} OK! Rule={AG_RULE}")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
@@ -785,7 +794,6 @@ class CaroBot:
             r.u8(); r.u8(); n = r.u8()
             for _ in range(n): r.read_ascii(); r.read_utf()
             
-            # --- KIỂM TRA ĐỐI THỦ THỰC SỰ NGỒI GHẾ ---
             has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
             
             self.is_playing = is_playing
@@ -895,7 +903,6 @@ class CaroBot:
     async def _delay_ready(self, delay: float):
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
-            # Sẽ gửi yêu cầu bàn cờ để kiểm tra và cập nhật ready đồng bộ thay vì ép buộc gửi ready
             await self.send(self.make_get_table())
 
     async def handle_player_enter(self, r: BinaryReader):
@@ -1105,7 +1112,7 @@ class CaroBot:
         else:
             log.warning(
                 f"[Identity] Avatar verify failed: expected=builtin{selected['id']}, "
-                f"actual=builtin{new_avatar}, HTTP={response.status_code}")
+                f'actual=builtin{new_avatar}, HTTP={response.status_code}')
         return {
             'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar,
             'selected_avatar': selected, 'balance_before': balance_before,
@@ -1210,7 +1217,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO EMBRYO - FULL_NAME + AVATAR v3.0")
+        log.info("BOT CARO KATAGOMO - FULL_NAME + AVATAR v3.0")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -1229,7 +1236,6 @@ class CaroBot:
             
             if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
             
-            # Một lần đăng nhập mỗi chu kỳ để tránh giới hạn/brute-force.
             login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
             if not login_ok:
                 retry_count += 1
@@ -1244,8 +1250,6 @@ class CaroBot:
 
             retry_count = 0
             if IDENTITY_TEST_ONLY:
-                # Chế độ kiểm tra: cập nhật + xác minh hồ sơ, không kết nối
-                # WebSocket, không vào phòng, không đặt cược/chơi game.
                 remaining = RUNTIME - (time.time() - self.start_time)
                 log.info(
                     f'[TEST] Identity test only; không chạy game. '
@@ -1265,8 +1269,8 @@ class CaroBot:
 
 def main():
     bin_path = auto_download_alphagomoku()
-    if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No AlphaGomoku - bot plays center only")
+    if bin_path: print(f"[SETUP] Katagomo ready: {os.path.basename(bin_path)}")
+    else: print("[SETUP] No Katagomo - bot plays center only")
     
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
