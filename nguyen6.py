@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO KATAGOMO GTP - FULL NAME + AVATAR v4.0                 ║
-║  Engine: KataGomo (KataGo-based) GTP protocol                    ║
-║  Thay thế hoàn toàn Embryo pbrain bằng KataGomo GTP              ║
-║  Hỗ trợ bàn 15x19 + rule freestyle/caro                          ║
-║  Tự động tải binary + model nếu chưa có                          ║
+║  BOT CARO KATAGOMO - FULL NAME + AVATAR v4.1                     ║
+║  Engine: pbrain-katagomo_caro-15.exe (pbrain protocol)           ║
+║  Thay thế hoàn toàn Embryo bằng KataGomo Caro                    ║
+║  Hỗ trợ bàn 15x19 + rule caro                                    ║
+║  Tự động tải / nhận diện pbrain-katagomo_caro-15.exe             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -51,8 +51,17 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "katagomo-engine"
-# Ưu tiên binary native Linux, fallback Wine .exe
-KG_BINARY_NAMES = ["katago", "katago.exe", "pbrain-katagomo.exe", "katagomo"]
+# Ưu tiên đúng binary pbrain-katagomo_caro-15.exe (Caro 15x15 / 15x19)
+KG_BINARY_PRIMARY = "pbrain-katagomo_caro-15.exe"
+KG_BINARY_NAMES = [
+    "pbrain-katagomo_caro-15.exe",   # đúng binary user yêu cầu
+    "pbrain-katagomo_caro.exe",
+    "pbrain-katagomo.exe",
+    "pbrain-katagomo*.exe",
+    "katago",
+    "katago.exe",
+    "katagomo",
+]
 KG_MODEL_NAMES = [
     "b18c384nbt-gomoku.bin.gz",
     "b28c512nbt-gomoku.bin.gz",
@@ -61,13 +70,11 @@ KG_MODEL_NAMES = [
 ]
 KG_CONFIG_NAMES = ["gtp_gomoku.cfg", "gtp_example.cfg", "default_gtp.cfg", "gtp.cfg"]
 
-# Link tải (Gomocup bản nano + GitHub release gợi ý)
+# Link tải (Gomocup bản nano – sau khi giải nén đổi/rename nếu cần)
 KG_DOWNLOAD_URLS = [
-    # Gomocup 2026 nano (pbrain, dễ tải, chạy qua Wine nếu cần)
     "http://download.gomocup.com/ai/KATAGOMO26.zip",
 ]
-# Model riêng (nếu có link public). Người dùng nên tự bỏ model mạnh vào ENGINE_DIR
-KG_MODEL_URLS = []  # Để trống – user tự tải model từ GitHub release
+KG_MODEL_URLS = []
 
 AG_TIMEOUT = 2000  # ms (dùng cho timeout_turn)
 
@@ -98,13 +105,34 @@ def _find_file(directory: Path, names: List[str]) -> Optional[Path]:
     return None
 
 def auto_download_katagomo() -> Optional[str]:
-    """Tải KATAGOMO26.zip từ Gomocup nếu chưa có binary."""
+    """Tải KATAGOMO26.zip từ Gomocup nếu chưa có binary pbrain-katagomo_caro-15.exe."""
+    # Ưu tiên đúng tên user yêu cầu
+    primary = ENGINE_DIR / KG_BINARY_PRIMARY
+    if primary.exists():
+        try:
+            primary.chmod(0o755)
+        except Exception:
+            pass
+        log.info(f"[KG] Binary đã có: {primary}")
+        return str(primary)
+
     binary = _find_file(ENGINE_DIR, KG_BINARY_NAMES)
     if binary:
         try:
             binary.chmod(0o755)
         except Exception:
             pass
+        # Nếu tìm thấy exe khác, copy/rename thành tên chuẩn nếu chưa có
+        if binary.name != KG_BINARY_PRIMARY and binary.suffix.lower() == ".exe":
+            target = ENGINE_DIR / KG_BINARY_PRIMARY
+            if not target.exists():
+                try:
+                    shutil.copy2(binary, target)
+                    target.chmod(0o755)
+                    log.info(f"[KG] Đã copy {binary.name} → {KG_BINARY_PRIMARY}")
+                    return str(target)
+                except Exception:
+                    pass
         log.info(f"[KG] Binary đã có: {binary}")
         return str(binary)
 
@@ -122,20 +150,47 @@ def auto_download_katagomo() -> Optional[str]:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
 
+        # Ưu tiên tìm đúng tên
+        primary = ENGINE_DIR / KG_BINARY_PRIMARY
+        if primary.exists():
+            primary.chmod(0o755)
+            log.info(f"[KG] Tải thành công: {primary}")
+            return str(primary)
+
         binary = _find_file(ENGINE_DIR, KG_BINARY_NAMES)
         if binary:
             try:
                 binary.chmod(0o755)
             except Exception:
                 pass
+            # Rename/copy thành tên chuẩn
+            if binary.name != KG_BINARY_PRIMARY and binary.suffix.lower() == ".exe":
+                target = ENGINE_DIR / KG_BINARY_PRIMARY
+                try:
+                    shutil.copy2(binary, target)
+                    target.chmod(0o755)
+                    log.info(f"[KG] Đã đặt tên chuẩn: {KG_BINARY_PRIMARY}")
+                    return str(target)
+                except Exception:
+                    pass
             log.info(f"[KG] Tải thành công: {binary}")
             return str(binary)
-        # Nếu chỉ có .exe pbrain
+
+        # Fallback: bất kỳ .exe nào
         for f in ENGINE_DIR.rglob("*.exe"):
             try:
                 f.chmod(0o755)
             except Exception:
                 pass
+            target = ENGINE_DIR / KG_BINARY_PRIMARY
+            if not target.exists():
+                try:
+                    shutil.copy2(f, target)
+                    target.chmod(0o755)
+                    log.info(f"[KG] Copy {f.name} → {KG_BINARY_PRIMARY}")
+                    return str(target)
+                except Exception:
+                    pass
             log.info(f"[KG] Tìm thấy exe: {f}")
             return str(f)
         log.warning("[KG] Giải nén xong nhưng không tìm thấy binary")
@@ -145,11 +200,16 @@ def auto_download_katagomo() -> Optional[str]:
         return None
 
 def detect_kg_binary() -> Optional[str]:
+    # Ưu tiên tuyệt đối pbrain-katagomo_caro-15.exe
+    primary = ENGINE_DIR / KG_BINARY_PRIMARY
+    if primary.exists():
+        return str(primary)
     p = _find_file(ENGINE_DIR, KG_BINARY_NAMES)
     if p:
         return str(p)
-    # Tìm mọi .exe trong thư mục
     if ENGINE_DIR.exists():
+        for f in ENGINE_DIR.rglob("pbrain-katagomo*.exe"):
+            return str(f)
         for f in ENGINE_DIR.rglob("*.exe"):
             return str(f)
         for f in ENGINE_DIR.rglob("katago*"):
@@ -269,8 +329,14 @@ class KataGomoEngine:
                 log.warning("[KG] Không tìm thấy binary")
                 return False
 
-            is_exe = self.binary.lower().endswith(".exe")
-            self._is_pbrain = "pbrain" in Path(self.binary).name.lower() or is_exe
+            bin_name = Path(self.binary).name.lower()
+            is_exe = bin_name.endswith(".exe")
+            # pbrain-katagomo_caro-15.exe và mọi pbrain-* đều dùng protocol pbrain
+            self._is_pbrain = (
+                "pbrain" in bin_name
+                or bin_name == KG_BINARY_PRIMARY.lower()
+                or (is_exe and "katagomo" in bin_name)
+            )
 
             try:
                 if is_exe:
@@ -278,12 +344,12 @@ class KataGomoEngine:
                 else:
                     cmd = [self.binary]
 
-                # Nếu có model + config → chạy GTP chuẩn
-                if self.model and self.config and not self._is_pbrain:
+                # Chỉ dùng GTP khi KHÔNG phải pbrain và có model
+                if (not self._is_pbrain) and self.model and self.config:
                     cmd = [self.binary, "gtp", "-model", self.model, "-config", self.config]
-                elif self.model and not self._is_pbrain:
+                elif (not self._is_pbrain) and self.model:
                     cmd = [self.binary, "gtp", "-model", self.model]
-                # else: pure pbrain binary (Gomocup nano)
+                # else: pure pbrain (pbrain-katagomo_caro-15.exe)
 
                 self.proc = subprocess.Popen(
                     cmd,
@@ -297,26 +363,32 @@ class KataGomoEngine:
                 self.my_side = my_symbol
 
                 if self._is_pbrain:
-                    # Protocol pbrain (giống Embryo)
+                    # Protocol pbrain – đúng cho pbrain-katagomo_caro-15.exe
+                    # Bàn 15x19 (Caro) hoặc 15x15 tùy engine
                     self._send("RECTSTART 15,19")
                     for _ in range(8):
-                        if self._read_line(timeout=1.0).upper() == "OK":
+                        line = self._read_line(timeout=1.0)
+                        if line.upper() == "OK":
                             break
                     self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
                     self._send("INFO ponder 1")
-                    time.sleep(0.15)
+                    # Một số bản katagomo pbrain hỗ trợ INFO rule
+                    self._send("INFO rule caro")
+                    time.sleep(0.2)
                     self._drain_output()
                 else:
                     # GTP
                     self._gtp(f"rectangular_boardsize {self.board_width} {self.board_height}")
                     self._gtp("clear_board")
-                    # Rule (nếu engine hỗ trợ)
-                    self._gtp("kata-set-rule freestyle")  # hoặc caro nếu model hỗ trợ
+                    self._gtp("kata-set-rule caro")
                     time.sleep(0.1)
                     self._drain_output()
 
                 self._initialized = True
-                log.info(f"[KG] Engine started ({'pbrain' if self._is_pbrain else 'GTP'}) my_side={my_symbol}")
+                log.info(
+                    f"[KG] Engine started ({'pbrain' if self._is_pbrain else 'GTP'}) "
+                    f"binary={Path(self.binary).name} my_side={my_symbol}"
+                )
                 return True
             except Exception as e:
                 log.error(f"[KG] Start error: {e}")
@@ -1345,7 +1417,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO KATAGOMO GTP - FULL_NAME + AVATAR v4.0")
+        log.info("BOT CARO KATAGOMO - pbrain-katagomo_caro-15.exe v4.1")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -1399,8 +1471,11 @@ def main():
     bin_path = auto_download_katagomo()
     if bin_path:
         print(f"[SETUP] KataGomo ready: {os.path.basename(bin_path)}")
+        if os.path.basename(bin_path) == KG_BINARY_PRIMARY:
+            print(f"[SETUP] Đang dùng đúng binary yêu cầu: {KG_BINARY_PRIMARY}")
     else:
-        print("[SETUP] No KataGomo binary - bot sẽ chơi gần trung tâm")
+        print(f"[SETUP] Không tìm thấy {KG_BINARY_PRIMARY} - bot sẽ chơi gần trung tâm")
+        print(f"[SETUP] Hãy đặt file {KG_BINARY_PRIMARY} vào thư mục katagomo-engine/")
     
     try:
         asyncio.get_running_loop()
