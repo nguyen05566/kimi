@@ -53,7 +53,7 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "katagomo-engine"
-AG_BINARY = "katagomo26.exe"
+AG_BINARY = "pbrain-katagomo_caro-15.exe"
 AG_VERSION = "2026"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
 AG_RULE = 8  # Caro rule
@@ -95,11 +95,11 @@ def auto_download_alphagomoku() -> Optional[str]:
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     # Ưu tiên tìm file katagomo*.exe
-    for f in ENGINE_DIR.glob("katagomo*.exe"):
+    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*.exe"):
         try: f.chmod(0o755)
         except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("katagomo*"):
+    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*"):
         if f.is_file(): return str(f)
     # Nếu không tìm thấy thì lấy file exe bất kỳ
     for f in ENGINE_DIR.glob("*.exe"):
