@@ -56,7 +56,7 @@ ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 AG_BINARY = "pbrain-embryo26_c5.exe"
 AG_VERSION = "2026"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-AG_RULE = 8  # Caro rule (Embryo 2025 _c5.exe)
+# AG_RULE bỏ - pbrain-embryo26_c5.exe đã viết riêng cho caro c5, không cần INFO rule
 AG_TIMEOUT = 2000  # 2 giây
 
 def auto_download_alphagomoku() -> Optional[str]:
@@ -102,11 +102,10 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=2000, board_size=15, rule=8):
+    def __init__(self, timeout_turn=2000, board_size=15):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
         self.board_size = board_size
-        self.rule = rule
         self.proc = None
         self.lock = threading.Lock()
         self._buffer = bytearray()
@@ -185,7 +184,6 @@ class AlphaGomokuEngine:
                 for _ in range(5):
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
-                self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
                 self.my_side = my_symbol
@@ -214,7 +212,6 @@ class AlphaGomokuEngine:
                     line = self._read_line(timeout=1.0)
                     if line.upper() == "OK":
                         break
-                self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
                 time.sleep(0.2)
@@ -521,12 +518,12 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] Embryo v{AG_VERSION} OK! Rule={AG_RULE}")
+                log.info(f"[AG] Embryo v{AG_VERSION} OK! (pbrain-embryo26_c5.exe - caro c5)")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
