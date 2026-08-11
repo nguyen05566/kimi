@@ -685,55 +685,54 @@ class CaroBot:
             await self.send(self.make_create_rule())
 
     async def do_move(self):
-        async with self.state_lock:
-            if not self.is_playing or not self.running or self.slot < 0: return
-            if self._moving:
-                log.warning("[BOT] do_move đang chạy -> bỏ qua")
-                return
-            self._moving = True
-            self.pending_move = False
-            self._last_move_xy = None
-            try:
-                start = time.time()
-                x, y = -1, -1
-                history = list(self.board.history)
-                
-                if self.ag_available:
-                    try:
-                        move = await asyncio.get_event_loop().run_in_executor(
-                            None, 
-                            lambda: self.ag.get_move(history, self.my_symbol)
-                        )
-                        
-                        if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                            and self.board.get(*move) == EMPTY):
-                            x, y = move; self.ag_moves += 1
-                        else:
-                            self.ag_errors += 1
-                            log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
-                            lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
-                            x, y = self.board.get_empty_near(lx, ly)
-                            self.ag_fallback_count += 1
-                            self.ag.start_game(my_symbol=self.my_symbol)
-                    except Exception as e:
-                        self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
-                        try: self.ag.stop(); self.ag = None; self.ag_available = False
-                        except Exception: pass
+        if not self.is_playing or not self.running or self.slot < 0: return
+        if self._moving:
+            log.warning("[BOT] do_move đang chạy -> bỏ qua")
+            return
+        self._moving = True
+        self.pending_move = False
+        self._last_move_xy = None
+        try:
+            start = time.time()
+            x, y = -1, -1
+            history = list(self.board.history)
+            
+            if self.ag_available:
+                try:
+                    move = await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        lambda: self.ag.get_move(history, self.my_symbol)
+                    )
+                    
+                    if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
+                        and self.board.get(*move) == EMPTY):
+                        x, y = move; self.ag_moves += 1
+                    else:
+                        self.ag_errors += 1
+                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback")
                         lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
-                else:
+                        self.ag.start_game(my_symbol=self.my_symbol)
+                except Exception as e:
+                    self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
+                    try: self.ag.stop(); self.ag = None; self.ag_available = False
+                    except Exception: pass
                     lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
                     x, y = self.board.get_empty_near(lx, ly)
-                    
-                elapsed = time.time() - start
-                pos = self.board.xy_to_pos(x, y)
-                log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s")
-                await self.send(self.make_play(pos))
-                self._last_move_xy = (x, y)
-                self.board.put(x, y, self.my_symbol)
-            finally:
-                self._moving = False
+                    self.ag_fallback_count += 1
+            else:
+                lx, ly = (history[-1][0], history[-1][1]) if history else (7, 9)
+                x, y = self.board.get_empty_near(lx, ly)
+                
+            elapsed = time.time() - start
+            pos = self.board.xy_to_pos(x, y)
+            log.info(f"MOVE ({x},{y}) pos={pos} took {elapsed:.2f}s")
+            await self.send(self.make_play(pos))
+            self._last_move_xy = (x, y)
+            self.board.put(x, y, self.my_symbol)
+        finally:
+            self._moving = False
 
     async def handle(self, raw: bytes):
         r = BinaryReader(raw)
@@ -877,32 +876,31 @@ class CaroBot:
             except Exception as e: log.error(f"Table error: {e}")
 
     async def handle_start(self, r: BinaryReader):
-        async with self.state_lock:
-            self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
-            self._moving = False; self._last_move_xy = None
-            self.opponent_gone_at = None
-            
-            player_count = r.u8()
-            for i in range(player_count):
-                r.i8(); r.i32()
-            
-            width = r.u8(); height = r.u8(); self.board.resize(width, height)
-            r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-            
-            log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
-            
-            if self.ag is None:
-                self.init_ag()
-            else:
-                self.ag.start_game(my_symbol=self.my_symbol)
-            
-            if self.slot < 0:
-                await asyncio.sleep(0.5); await self.send(self.make_get_table())
-            elif getattr(self, '_current_turn_sid', -1) == self.slot:
-                log.info("[BOT] Đến lượt ngay sau START_MATCH (SET_TURN trước START_MATCH) -> do_move()")
-                if not self.pending_move and not self._moving:
-                    self.pending_move = True
-                    asyncio.create_task(self._delayed_do_move(0.5))
+        self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
+        self._moving = False; self._last_move_xy = None
+        self.opponent_gone_at = None
+        
+        player_count = r.u8()
+        for i in range(player_count):
+            r.i8(); r.i32()
+        
+        width = r.u8(); height = r.u8(); self.board.resize(width, height)
+        r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
+        
+        log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
+        
+        if self.ag is None:
+            self.init_ag()
+        else:
+            self.ag.start_game(my_symbol=self.my_symbol)
+        
+        if self.slot < 0:
+            await asyncio.sleep(0.5); await self.send(self.make_get_table())
+        elif getattr(self, '_current_turn_sid', -1) == self.slot:
+            log.info("[BOT] Đến lượt ngay sau START_MATCH (SET_TURN trước START_MATCH) -> do_move()")
+            if not self.pending_move and not self._moving:
+                self.pending_move = True
+                asyncio.create_task(self._delayed_do_move(0.5))
 
     async def _delayed_do_move(self, delay: float):
         await asyncio.sleep(delay)
@@ -917,19 +915,18 @@ class CaroBot:
                 self.pending_move = True; await asyncio.sleep(1.2); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
-        async with self.state_lock:
-            pos = r.i16(); symbol = r.i8()
-            x, y = self.board.pos_to_xy(pos)
-            current = self.board.get(x, y)
-            if current == symbol:
-                if symbol == self.my_symbol and self._last_move_xy is not None:
-                    self._last_move_xy = None
-            elif current != EMPTY and current != symbol:
-                self.my_symbol = symbol
-                self.opponent_symbol = CROSS if symbol == CIRCLE else CIRCLE
-                self.board.undo(x, y); self.board.put(x, y, symbol)
-            else:
-                self.board.put(x, y, symbol)
+        pos = r.i16(); symbol = r.i8()
+        x, y = self.board.pos_to_xy(pos)
+        current = self.board.get(x, y)
+        if current == symbol:
+            if symbol == self.my_symbol and self._last_move_xy is not None:
+                self._last_move_xy = None
+        elif current != EMPTY and current != symbol:
+            self.my_symbol = symbol
+            self.opponent_symbol = CROSS if symbol == CIRCLE else CIRCLE
+            self.board.undo(x, y); self.board.put(x, y, symbol)
+        else:
+            self.board.put(x, y, symbol)
 
     async def handle_play(self, r: BinaryReader):
         status = r.i8()
