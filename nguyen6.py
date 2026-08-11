@@ -80,7 +80,7 @@ def auto_download_alphagomoku() -> Optional[str]:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
         
-        exe_files = list(ENGINE_DIR.glob("*.exe"))
+        exe_files = list(ENGINE_DIR.glob("pbrain-katagomo_caro-15*.exe"))
         if exe_files:
             binary_path = exe_files[0]
             try:
@@ -102,7 +102,7 @@ def detect_ag_binary() -> Optional[str]:
     for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*"):
         if f.is_file(): return str(f)
     # Nếu không tìm thấy thì lấy file exe bất kỳ
-    for f in ENGINE_DIR.glob("*.exe"):
+    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*.exe"):
         return str(f)
     return None
 
