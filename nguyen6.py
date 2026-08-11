@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO JAX - nguyen6.py  v5.1                                ║
-║  Engine: JAX Gomoku (pbrain-Jax.exe) - StandardCaro rule 8     ║
+║  BOT CARO KATAGOMO - nguyen6.py  v6.0                            ║
+║  Engine: Katagomo (pbrain-katagomo_caro-15.exe) - Caro 15x15    ║
 ║  Protocol: Gomoku Cup PBrain (START/BOARD/DONE/TURN)           ║
-║  Bàn gamevh: 15×19  |  Engine board: 15×15                     ║
+║  Bàn gamevh: 15×19  |  Engine board: 15×15 (pbrain caro 15)    ║
 ║  Sliding Window 15×15 trượt trên bàn 15×19                    ║
-║  Luật: 6+ liên tiếp thắng, 5 chặn 2 đầu không thắng            ║
-║  Tích hợp đầy đủ: Binary protocol + Board + GameClient + JAX   ║
+║  Luật: Caro 6 thắng, StandardCaro rule 8                       ║
+║  Tích hợp đầy đủ: Binary protocol + Board + GameClient + KG    ║
 ║                                                                  ║
-║  DOWNLOAD JAX Gomoku:                                            ║
-║  - Chính thức: http://download.gomocup.com/ai/JAX25.zip         ║
-║  - Mirror   : https://github.com/Gomocup/GomocupDownload/       ║
-║               raw/master/2024/JAX24.zip                          ║
-║  - Tự động tải nếu chưa có (auto_download_jax)                    ║
-║  - Engine: Kailong Jiang - JAX 2025                              ║
+║  DOWNLOAD Katagomo:                                              ║
+║  - Chính thức: http://download.gomocup.com/ai/KATAGOMO26.zip   ║
+║  - pbrain caro 15: pbrain-katagomo_caro-15.exe                   ║
+║  - Tự động tải nếu chưa có (auto_download_katagomo)               ║
+║  - Engine: Zhiyang Hang - Katagomo 2026 (Katago derivative)      ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -78,20 +77,30 @@ CMD_MAP = {
     529:"MOVE",533:"ASK_DRAW",534:"SURRENDER",535:"RETREAT",
 }
 
-# ======================== JAX ENGINE CONFIG ========================
-ENGINE_DIR = _BASE_DIR / "jax-engine" / "JAX25"
-ENGINE_BIN = "pbrain-Jax.exe"
-ENGINE_RULE = 8  # StandardCaro: 6 thắng, 5 chặn 2 đầu không thắng
-ENGINE_TIMEOUT = 2000  # ms
-ENGINE_BOARD = 15
-# --- Download JAX Gomoku ---
-# Nguồn chính thức: Gomocup download page
-# http://download.gomocup.com/ai/JAX25.zip  (JAX 2025 - Kailong Jiang)
-# Mirror GitHub: https://github.com/Gomocup/GomocupDownload/raw/master/2024/JAX24.zip
-JAX_DOWNLOAD_URL = "http://download.gomocup.com/ai/JAX25.zip"
-JAX_DOWNLOAD_MIRROR = "https://github.com/Gomocup/GomocupDownload/raw/master/2024/JAX24.zip"
-JAX_DOWNLOAD_FALLBACK = "http://download.gomocup.com/ai/JAX24.zip"
-JAX_VERSION = "2025"
+# ======================== KATAGOMO ENGINE CONFIG ========================
+# --- Giống hệt cấu trúc nguyen1.py -> nguyen5.py (Embryo) nhưng đổi sang Katagomo ---
+# nguyen1-5: ENGINE_DIR = _BASE_DIR / "alphagomoku-engine" / AG_BINARY = "pbrain-embryo26_c5.exe"
+# nguyen6  : ENGINE_DIR = _BASE_DIR / "katagomo-engine" / KG_BINARY = "pbrain-katagomo_caro-15.exe"
+try:
+    _KG_BASE_DIR = _BASE_DIR
+except NameError:
+    _KG_BASE_DIR = Path.cwd()
+
+ENGINE_DIR = _BASE_DIR / "katagomo-engine"
+KG_BINARY = "pbrain-katagomo_caro-15.exe"  # pbrain caro 15 - 15x15 Caro rule
+KG_VERSION = "2026"
+KG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"  # Katagomo 2026 - Zhiyang Hang
+KG_RULE = 8  # Caro rule (6 thắng, giống Embryo _c5)
+KG_TIMEOUT = 2000  # 2 giây - giống AG_TIMEOUT trong nguyen1-5
+KG_BOARD = 15  # pbrain caro 15
+
+# Alias để tương thích code cũ (ENGINE_*) - giữ nguyên tên biến như nguyen1-5 dùng AG_*
+ENGINE_BIN = KG_BINARY
+ENGINE_RULE = KG_RULE
+ENGINE_TIMEOUT = KG_TIMEOUT
+ENGINE_BOARD = KG_BOARD
+JAX_DOWNLOAD_URL = KG_DOWNLOAD_URL
+JAX_VERSION = KG_VERSION
 
 # ======================== WINE ========================
 def find_wine():
@@ -101,142 +110,135 @@ def find_wine():
     portable = _BASE_DIR / "wine-portable" / "wine-9.21-amd64" / "bin" / "wine64"
     return str(portable) if portable.exists() else None
 
-def find_jax_binary() -> Optional[str]:
-    """Tìm binary JAX, hỗ trợ nhiều vị trí."""
+# ======================== ĐOẠN TẢI + CẤP QUYỀN THỰC THI - GIỐNG HỆT nguyen1.py -> nguyen5.py ========================
+# Mẫu gốc nguyen1.py:
+#   ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
+#   AG_BINARY = "pbrain-embryo26_c5.exe"
+#   AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
+#   def auto_download_alphagomoku():
+#       binary_path = ENGINE_DIR / AG_BINARY
+#       if binary_path.exists(): binary_path.chmod(0o755); return str(binary_path)
+#       ENGINE_DIR.mkdir(...); archive = Path("/tmp/embryo26.zip")
+#       req = urllib.request.Request(AG_DOWNLOAD_URL, headers={...})
+#       with urllib.request.urlopen(req) as resp: archive.write_bytes(resp.read())
+#       with zipfile.ZipFile(archive) as zf: zf.extractall(str(ENGINE_DIR))
+#       binary_path.chmod(0o755); return str(binary_path)
+#
+# Bản Katagomo giữ nguyên cấu trúc, chỉ đổi tên/URL/binary sang caro 15:
+
+def auto_download_katagomo() -> Optional[str]:
+    """Tải Katagomo nếu chưa có - GIỐNG HỆT nguyen1-5 nhưng đổi URL/binary."""
+    binary_path = ENGINE_DIR / KG_BINARY  # katagomo-engine/pbrain-katagomo_caro-15.exe
+    if binary_path.exists():
+        try:
+            binary_path.chmod(0o755)
+        except Exception: pass
+        return str(binary_path)
+    log.info(f"[KG] Downloading Katagomo {KG_VERSION}...")  # giống [AG] Downloading Embryo
+    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        import zipfile
+        archive = Path("/tmp/katagomo26.zip")  # giống /tmp/embryo26.zip
+        req = urllib.request.Request(KG_DOWNLOAD_URL, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            archive.write_bytes(resp.read())
+        with zipfile.ZipFile(archive, "r") as zf:
+            zf.extractall(str(ENGINE_DIR))
+        archive.unlink(missing_ok=True)
+        # --- CẤP QUYỀN THỰC THI - GIỐNG nguyen1-5: binary_path.chmod(0o755) ---
+        try:
+            binary_path.chmod(0o755)
+        except Exception: pass
+        # Katagomo zip chứa nhiều pbrain (caro/standard/freestyle) + .onnx + .dll
+        # Cần chmod tất cả pbrain để wine có thể thực thi, giống detect_ag_binary chmod 0o644/0o755
+        for p in ENGINE_DIR.rglob("pbrain*"):
+            try: p.chmod(0o755)
+            except: pass
+        for p in ENGINE_DIR.rglob("*.exe"):
+            try: p.chmod(0o755)
+            except: pass
+        # Nếu binary caro 15 không ở root mà trong subfolder (do zip chứa folder), tìm và copy
+        if not binary_path.exists():
+            for cand in ENGINE_DIR.rglob(KG_BINARY):
+                if cand.is_file():
+                    try:
+                        import shutil as _sh
+                        _sh.copy2(str(cand), str(binary_path))
+                        binary_path.chmod(0o755)
+                        log.info(f"[KG] Copy {cand} -> {binary_path}")
+                    except: pass
+                    break
+        return str(binary_path) if binary_path.exists() else None
+    except Exception as e:
+        log.error(f"[KG] Download failed: {e}")
+        return None
+
+# Alias giữ tên cũ để code JAX trước đó vẫn chạy (nếu gọi auto_download_jax)
+def auto_download_jax() -> Optional[str]:
+    return auto_download_katagomo()
+
+def detect_kg_binary() -> Optional[str]:
+    """Tìm binary Katagomo - GIỐNG detect_ag_binary trong nguyen1-5"""
+    if not ENGINE_DIR.exists(): return None
+    # Ưu tiên caro 15 - pbrain caro 15
+    for f in ENGINE_DIR.rglob("pbrain-katagomo_caro-15.exe"):
+        try: f.chmod(0o755)
+        except: pass
+        return str(f)
+    for f in ENGINE_DIR.rglob("pbrain-katagomo_caro*"):
+        try: f.chmod(0o755)
+        except: pass
+        return str(f)
+    for f in ENGINE_DIR.rglob("pbrain-katagomo*.exe"):
+        try: f.chmod(0o644)
+        except: pass
+        return str(f)
+    for f in ENGINE_DIR.glob("pbrain*.exe"):
+        return str(f)
+    return None
+
+def detect_ag_binary() -> Optional[str]:
+    # Alias cho nguyen1-5 compatibility
+    return detect_kg_binary()
+
+def find_kg_binary() -> Optional[str]:
     candidates = [
-        ENGINE_DIR / ENGINE_BIN,
-        _BASE_DIR / "jax-engine" / ENGINE_BIN,
-        _BASE_DIR / ENGINE_BIN,
-        Path("/tmp/jax-engine/JAX25") / ENGINE_BIN,
+        ENGINE_DIR / KG_BINARY,
+        ENGINE_DIR / "pbrain-katagomo_caro-15.exe",
+        _BASE_DIR / "katagomo-engine" / KG_BINARY,
+        _BASE_DIR / KG_BINARY,
     ]
     for p in candidates:
         if p.exists():
             return str(p)
-    # glob fallback
-    for pattern in ["jax-engine/**/pbrain-Jax*", "jax-engine/**/pbrain-jax*", "**/pbrain-Jax.exe"]:
+    found = detect_kg_binary()
+    if found:
+        return found
+    # glob fallback giống find_jax_binary
+    for pattern in ["katagomo-engine/**/pbrain-katagomo*", "katagomo-engine/**/pbrain*", "**/pbrain-katagomo*.exe"]:
         for f in _BASE_DIR.glob(pattern):
             if f.is_file():
                 return str(f)
-    return str(ENGINE_DIR / ENGINE_BIN) if (ENGINE_DIR / ENGINE_BIN).exists() else None
+    return str(ENGINE_DIR / KG_BINARY) if (ENGINE_DIR / KG_BINARY).exists() else None
 
-def auto_download_jax() -> Optional[str]:
-    """Tự động tải JAX gomoku nếu chưa có.
-    - Nguồn chính: http://download.gomocup.com/ai/JAX25.zip (JAX 2025)
-    - Mirror: GitHub GomocupDownload
-    - Giải nén vào ENGINE_DIR, cấp quyền thực thi.
-    Trả về đường dẫn binary hoặc None.
-    """
-    binary_path = ENGINE_DIR / ENGINE_BIN
-    if binary_path.exists():
-        try: binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
-    # thử tìm ở vị trí khác trước khi tải
-    found = find_jax_binary()
-    if found and Path(found).exists():
-        return found
+def find_jax_binary() -> Optional[str]:
+    # Alias cũ
+    return find_kg_binary()
 
-    log.info(f"[JAX] Downloading JAX {JAX_VERSION} ...")
-    log.info(f"[JAX] Primary: {JAX_DOWNLOAD_URL}")
-    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-    # thư mục tạm giải nén
-    tmp_base = _BASE_DIR / "jax-engine"
-    tmp_base.mkdir(parents=True, exist_ok=True)
-    archive = Path("/tmp/jax25.zip")
-    try:
-        import zipfile
-        downloaded = False
-        for url in [JAX_DOWNLOAD_URL, JAX_DOWNLOAD_MIRROR, JAX_DOWNLOAD_FALLBACK]:
-            try:
-                log.info(f"[JAX] -> {url}")
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                    "Accept": "*/*"
-                })
-                with urllib.request.urlopen(req, timeout=180) as resp:
-                    data = resp.read()
-                    if len(data) < 10000:
-                        raise ValueError(f"File too small: {len(data)} bytes")
-                    archive.write_bytes(data)
-                log.info(f"[JAX] Tải xong {len(data)//1024}KB")
-                downloaded = True
-                break
-            except Exception as e:
-                log.warning(f"[JAX] Download fail {url}: {e}")
-                continue
-        if not downloaded or not archive.exists():
-            log.error("[JAX] Không tải được file zip từ bất kỳ nguồn nào")
-            return None
-
-        # Giải nén
-        log.info(f"[JAX] Giải nén {archive} -> {tmp_base}")
-        with zipfile.ZipFile(archive, "r") as zf:
-            # liệt kê để debug
-            namelist = zf.namelist()
-            log.info(f"[JAX] Zip contains {len(namelist)} files: {namelist[:8]}")
-            zf.extractall(str(tmp_base))
-
-        # Tìm binary sau khi giải nén (đệ quy)
-        candidates = list(tmp_base.rglob("pbrain-Jax*")) + list(tmp_base.rglob("pbrain-jax*")) + list(tmp_base.rglob("JAX*"))
-        # lọc file thực thi
-        exe_candidates = [p for p in candidates if p.is_file() and p.suffix.lower() in (".exe","") and "jax" in p.name.lower()]
-        if not exe_candidates:
-            # thử tìm bất kỳ pbrain*.exe
-            exe_candidates = list(tmp_base.rglob("pbrain*.exe"))
-
-        target = None
-        for cand in exe_candidates:
-            # ưu tiên JAX
-            if "jax" in cand.name.lower():
-                target = cand
-                break
-        if not target and exe_candidates:
-            target = exe_candidates[0]
-
-        if target and target.exists():
-            log.info(f"[JAX] Found binary trong zip: {target}")
-            # copy về vị trí chuẩn ENGINE_DIR / ENGINE_BIN
-            try:
-                ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-                if target.resolve() != binary_path.resolve():
-                    import shutil as _sh
-                    _sh.copy2(str(target), str(binary_path))
-                    log.info(f"[JAX] Copy -> {binary_path}")
-                binary_path.chmod(0o755)
-                try: target.chmod(0o755)
-                except: pass
-            except Exception as e:
-                log.warning(f"[JAX] Copy/chmod fail: {e}")
-            # dọn zip
-            try: archive.unlink(missing_ok=True)
-            except: pass
-            if binary_path.exists():
-                log.info(f"[JAX] Download OK: {binary_path} ({binary_path.stat().st_size//1024}KB)")
-                return str(binary_path)
-            return str(target)
-
-        # không tìm thấy binary cụ thể, thử find lại toàn bộ
-        fallback = find_jax_binary()
-        if fallback and Path(fallback).exists():
-            log.info(f"[JAX] Fallback found: {fallback}")
-            try: archive.unlink(missing_ok=True)
-            except: pass
-            return fallback
-
-        log.error(f"[JAX] Giải nén xong nhưng không tìm thấy {ENGINE_BIN} trong {tmp_base}")
-        try: archive.unlink(missing_ok=True)
-        except: pass
-        return None
-    except Exception as e:
-        log.error(f"[JAX] Download/extract failed: {e}", exc_info=True)
-        return None
-
-def ensure_jax_engine() -> Optional[str]:
-    """Đảm bảo JAX engine tồn tại, tự tải nếu thiếu. Trả về path hoặc None."""
-    p = find_jax_binary()
+def ensure_kg_engine() -> Optional[str]:
+    p = find_kg_binary()
     if p and Path(p).exists():
         return p
-    return auto_download_jax()
+    return auto_download_katagomo()
+
+def ensure_jax_engine() -> Optional[str]:
+    return ensure_kg_engine()
+
+# Giữ biến JAX_*/KG_* đồng bộ để code engine cũ không lỗi
+JAX_DOWNLOAD_MIRROR = KG_DOWNLOAD_URL
+JAX_DOWNLOAD_FALLBACK = KG_DOWNLOAD_URL
 
 # ======================== BINARY PROTOCOL ========================
 class BinReader:
@@ -420,14 +422,16 @@ class SlidingWindow:
     def range_str(self):
         return f"y={self.off}..{self.off+self.SIZE-1}"
 
-# ======================== JAX ENGINE (PBrain) ========================
-class JaxEngine:
-    """Wrapper cho pbrain-Jax.exe qua Wine.
+# ======================== KATAGOMO ENGINE (PBrain) - pbrain caro 15 ========================
+# Giống AlphaGomokuEngine trong nguyen1-5 nhưng dùng Katagomo caro 15
+class KatagomoEngine:
+    """Wrapper cho pbrain-katagomo_caro-15.exe qua Wine.
     Protocol: INFO / START / BOARD / DONE -> x,y
-    Rule 8 = StandardCaro (Freestyle Gomoku với luật 5 chặn 2 đầu)
+    Rule 8 = Caro (6 thắng) - giống AG_RULE trong nguyen1-5
+    Board 15 - pbrain caro 15
     """
-    def __init__(self, timeout_turn=ENGINE_TIMEOUT, board_size=ENGINE_BOARD, rule=ENGINE_RULE):
-        self.binary = find_jax_binary() or str(ENGINE_DIR / ENGINE_BIN)
+    def __init__(self, timeout_turn=KG_TIMEOUT, board_size=KG_BOARD, rule=KG_RULE):
+        self.binary = find_kg_binary() or str(ENGINE_DIR / KG_BINARY)
         self.timeout_turn = timeout_turn
         self.board_size = board_size
         self.rule = rule
@@ -447,20 +451,20 @@ class JaxEngine:
         """Khởi động engine mới. Trả True nếu OK. Tự tải nếu thiếu."""
         self.stop()
         if not self.wine:
-            log.warning("[JAX] Không tìm thấy wine! (cần wine để chạy .exe)")
+            log.warning("[KG] Không tìm thấy wine! (cần wine để chạy .exe)")
             return False
-        # Đảm bảo binary tồn tại, tự tải nếu thiếu
-        resolved = ensure_jax_engine()
+        # Đảm bảo binary tồn tại, tự tải nếu thiếu - giống nguyen1-5 ensure flow
+        resolved = ensure_kg_engine()
         if resolved:
             self.binary = resolved
         else:
-            resolved = find_jax_binary()
+            resolved = find_kg_binary()
             if resolved:
                 self.binary = resolved
         if not Path(self.binary).exists():
-            log.warning(f"[JAX] Binary không tồn tại: {self.binary}")
-            log.warning(f"[JAX] Thử tải thủ công: JAX25.zip từ {JAX_DOWNLOAD_URL}")
-            auto = auto_download_jax()
+            log.warning(f"[KG] Binary không tồn tại: {self.binary}")
+            log.warning(f"[KG] Thử tải thủ công: KATAGOMO26.zip từ {KG_DOWNLOAD_URL}")
+            auto = auto_download_katagomo()
             if auto and Path(auto).exists():
                 self.binary = auto
             else:
@@ -490,7 +494,7 @@ class JaxEngine:
                     ok = True
                     break
             if not ok:
-                log.warning("[JAX] START không trả OK, thử tiếp...")
+                log.warning("[KG] START không trả OK, thử tiếp...")
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send("INFO timeout_match 1000000")
             self._send("INFO time_left 1000000")
@@ -499,10 +503,10 @@ class JaxEngine:
             self._drain()
             self.ok = True
             self._initialized = True
-            log.info(f"[JAX] Started rule={self.rule} board={self.board_size} via {self.wine}")
+            log.info(f"[KG] Started rule={self.rule} board={self.board_size} via {self.wine}")
             return True
         except Exception as e:
-            log.error(f"[JAX] Start err: {e}")
+            log.error(f"[KG] Start err: {e}")
             self.ok = False
             return False
 
@@ -540,7 +544,7 @@ class JaxEngine:
             self.ok = True
             return True
         except Exception as e:
-            log.warning(f"[JAX] RESTART err: {e}")
+            log.warning(f"[KG] RESTART err: {e}")
             return self.start(self.my)
 
     def restart_game(self):
@@ -549,7 +553,7 @@ class JaxEngine:
     def get_move(self, hist: list, my: int) -> Optional[Tuple[int,int]]:
         """hist: [(x,y,sym)] tọa độ gamevh. Trả (x,y) gamevh hoặc None."""
         if not self.ok or not self.proc or self.proc.poll() is not None:
-            log.warning("[JAX] Engine not ready")
+            log.warning("[KG] Engine not ready")
             return None
         self._drain()
         self._send(f"INFO timeout_turn {self.timeout_turn}")
@@ -598,7 +602,7 @@ class JaxEngine:
                 continue
             up = line.upper()
             if line.startswith(("MESSAGE","DEBUG","ERROR","UNKNOWN")):
-                log.info(f"[JAX] {line}")
+                log.info(f"[KG] {line}")
                 continue
             if up.startswith("SUGGEST"):
                 continue
@@ -614,9 +618,9 @@ class JaxEngine:
                         if 0<=gx<GAMEVH_W and 0<=gy<GAMEVH_H:
                             return gx,gy
                         else:
-                            log.warning(f"[JAX] Move out of gvH: engine({ex},{ey}) -> gvh({gx},{gy}) off={self.win.off}")
+                            log.warning(f"[KG] Move out of gvH: engine({ex},{ey}) -> gvh({gx},{gy}) off={self.win.off}")
                             continue
-        log.warning(f"[JAX] Timeout sau {self.timeout_turn}ms, sent={sent}")
+        log.warning(f"[KG] Timeout sau {self.timeout_turn}ms, sent={sent}")
         return None
 
     def stop(self):
@@ -720,8 +724,10 @@ class JaxEngine:
     def _drain_output(self):
         self._drain()
 
-# Alias cho tương thích code cũ
-AlphaGomokuEngine = JaxEngine
+# Alias cho tương thích code cũ - giữ tên cũ để nguyen1-5 style không lỗi
+JaxEngine = KatagomoEngine
+AlphaGomokuEngine = KatagomoEngine
+JaxEngineAlias = KatagomoEngine
 
 # ======================== GAME CLIENT ========================
 class GameClient:
@@ -1061,7 +1067,7 @@ class GameClient:
             self.cookie = '; '.join(f'{k}={v}' for k,v in s.cookies.items())
             tm = re.search(r'var\s+token\s*=\s*(-?\d+)', gr.text)
             nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", gr.text)
-            pm = re.search(r'var\s+placePath\s*=\s*\"([^\"]+)\"', gr.text)
+            pm = re.search(r'var\s+placePath\s*=\s*"([^"]+)"', gr.text)
             if not tm or not nm: log.error('[BOT] Token/nick not found'); return False
             self.token = int(tm.group(1)); self.nick = nm.group(1); self.nickname=self.nick
             if pm: self.place_path = pm.group(1)
@@ -1090,7 +1096,7 @@ class GameClient:
             oa = self._get_avatar(bp.text)
             cat = []
             seen = set()
-            pat = re.compile(r'''buyAvatar\(\s*([\"']?)(\d+)\1\s*,\s*([\"'])(.*?)\3\s*,\s*([\"']?)([\d,.]+)\5\s*\)''', re.I|re.S)
+            pat = re.compile(r'''buyAvatar\(\s*(["']?)(\d+)\1\s*,\s*(["'])(.*?)\3\s*,\s*(["']?)([\d,.]+)\5\s*\)''', re.I|re.S)
             for ci in range(1,7):
                 pg = s.get(f'https://gamevh.net/com/ftl/game/profile/avatar_by_category.jsp?excludeLayout=true&category_id={ci}', timeout=15)
                 for m in pat.finditer(pg.text):
@@ -1112,31 +1118,31 @@ class GameClient:
 
     @staticmethod
     def _read_form(html, url):
-        fm = re.search(r'(?is)<form\b[^>]*name=[\"\\\']InputForm0[\"\\\'][^>]*>.*?</form>', html)
+        fm = re.search(r'(?is)<form\b[^>]*name=["\\\']InputForm0["\\\'][^>]*>.*?</form>', html)
         if not fm: return None, None
         form = fm.group(0)
         ot = re.search(r'(?is)<form\b[^>]*>', form).group(0)
-        ma = re.search(r'\baction\s*=\s*([\"\\\'])(.*?)\1', ot, re.I|re.S)
+        ma = re.search(r'\baction\s*=\s*(["\\\'])(.*?)\1', ot, re.I|re.S)
         act = urljoin(url, html_lib.unescape(ma.group(2))) if ma else url
         data = {}
         for tag in re.findall(r'(?is)<input\b[^>]*>', form):
-            nm = re.search(r'\bname\s*=\s*([\"\\\'])(.*?)\1', tag, re.I|re.S)
-            tp = re.search(r'\btype\s*=\s*([\"\\\'])(.*?)\1', tag, re.I|re.S)
-            vl = re.search(r'\bvalue\s*=\s*([\"\\\'])(.*?)\1', tag, re.I|re.S)
+            nm = re.search(r'\bname\s*=\s*(["\\\'])(.*?)\1', tag, re.I|re.S)
+            tp = re.search(r'\btype\s*=\s*(["\\\'])(.*?)\1', tag, re.I|re.S)
+            vl = re.search(r'\bvalue\s*=\s*(["\\\'])(.*?)\1', tag, re.I|re.S)
             if not nm: continue
             t = (tp.group(2) if tp else '').lower()
             if t in ('submit','button','image','file','reset'): continue
             if t in ('checkbox','radio') and not re.search(r'\bchecked\b', tag, re.I): continue
             data[nm.group(2)] = html_lib.unescape(vl.group(2)) if vl else ''
         for m in re.finditer(r'(?is)<select\b([^>]*)>(.*?)</select>', form):
-            sn = re.search(r'\bname\s*=\s*([\"\\\'])(.*?)\1', '<select '+m.group(1)+'>', re.I|re.S)
+            sn = re.search(r'\bname\s*=\s*(["\\\'])(.*?)\1', '<select '+m.group(1)+'>', re.I|re.S)
             if not sn: continue
             sel = re.search(r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>', m.group(2))
             if sel:
-                sv = re.search(r'\bvalue\s*=\s*([\"\\\'])(.*?)\1', '<option '+sel.group(1)+'>', re.I|re.S)
+                sv = re.search(r'\bvalue\s*=\s*(["\\\'])(.*?)\1', '<option '+sel.group(1)+'>', re.I|re.S)
                 data[sn.group(2)] = html_lib.unescape(sv.group(2)) if sv else ''
         for m in re.finditer(r'(?is)<textarea\b([^>]*)>(.*?)</textarea>', form):
-            tn = re.search(r'\bname\s*=\s*([\"\\\'])(.*?)\1', '<textarea '+m.group(1)+'>', re.I|re.S)
+            tn = re.search(r'\bname\s*=\s*(["\\\'])(.*?)\1', '<textarea '+m.group(1)+'>', re.I|re.S)
             if tn: data[tn.group(2)] = html_lib.unescape(m.group(2)).strip()
         return act, data
 
@@ -1183,9 +1189,9 @@ class GameClient:
                 try: await self.ws.close()
                 except: pass
 
-# ======================== BOT JAX (Kế thừa GameClient) ========================
+# ======================== BOT KATAGOMO (Kế thừa GameClient) - pbrain caro 15 ========================
 class CaroBot(GameClient):
-    """Bot Caro sử dụng JAX engine với Sliding Window"""
+    """Bot Caro sử dụng Katagomo engine (pbrain-katagomo_caro-15.exe) với Sliding Window 15x15"""
     def __init__(self):
         super().__init__()
         self.engine = None
@@ -1199,15 +1205,15 @@ class CaroBot(GameClient):
     def init_engine(self):
         if self.engine and self.eng_ok:
             return self.eng_ok
-        self.engine = JaxEngine(timeout_turn=ENGINE_TIMEOUT, board_size=ENGINE_BOARD, rule=ENGINE_RULE)
+        self.engine = KatagomoEngine(timeout_turn=KG_TIMEOUT, board_size=KG_BOARD, rule=KG_RULE)
         self.ag = self.engine
         self.eng_ok = self.engine.start(self.my_sym)
         self.eng_available = self.eng_ok
         self.ag_available = self.eng_ok
         if self.eng_ok:
-            log.info(f"[JAX] OK! Window={self.engine.win.range_str()} Board={ENGINE_BOARD} Rule={ENGINE_RULE}")
+            log.info(f"[KG] OK! Window={self.engine.win.range_str()} Board={ENGINE_BOARD} Rule={ENGINE_RULE}")
         else:
-            log.warning("[JAX] Khởi động thất bại -> sẽ fallback đánh gần nước cuối")
+            log.warning("[KG] Khởi động thất bại -> sẽ fallback đánh gần nước cuối")
         return self.eng_ok
 
     async def on_table_update(self):
@@ -1224,10 +1230,10 @@ class CaroBot(GameClient):
             # ván mới: restart engine (RESTART + START)
             ok = self.engine.restart()
             if not ok:
-                log.warning("[JAX] Restart fail, thử start lại")
+                log.warning("[KG] Restart fail, thử start lại")
                 self.eng_ok = self.engine.start(self.my_sym)
             else:
-                log.info(f"[JAX] RESTART OK Window={self.engine.win.range_str()}")
+                log.info(f"[KG] RESTART OK Window={self.engine.win.range_str()}")
 
     async def on_move(self, x, y, sym):
         if self.engine and hasattr(self.engine, 'win'):
@@ -1261,10 +1267,10 @@ class CaroBot(GameClient):
                         None, lambda: self.engine.get_move(hist, self.my_sym))
                     if mv and 0<=mv[0]<self.board.w and 0<=mv[1]<self.board.h and self.board.get(*mv)==EMPTY:
                         x,y = mv; self.eng_moves += 1; self.ag_moves+=1
-                        log.info(f"[JAX] Engine: ({x},{y}) win={self.engine.win.range_str()}")
+                        log.info(f"[KG] Engine: ({x},{y}) win={self.engine.win.range_str()}")
                     else:
                         self.eng_errs += 1; self.ag_errors+=1
-                        log.warning(f"[JAX] Invalid: {mv}, fallback")
+                        log.warning(f"[KG] Invalid: {mv}, fallback")
                         lx,ly = hist[-1][:2] if hist else (7,9)
                         x,y = self.board.empty_near(lx,ly)
                         self.ag_fallback_count+=1
@@ -1272,7 +1278,7 @@ class CaroBot(GameClient):
                         try: self.engine.restart()
                         except: pass
                 except Exception as e:
-                    self.eng_errs += 1; self.ag_errors+=1; log.warning(f"[JAX] Err: {e}", exc_info=True)
+                    self.eng_errs += 1; self.ag_errors+=1; log.warning(f"[KG] Err: {e}", exc_info=True)
                     try:
                         self.engine.stop()
                     except: pass
@@ -1290,7 +1296,7 @@ class CaroBot(GameClient):
             if self.board.get(x,y) != EMPTY:
                 log.warning(f"[BOT] Ô ({x},{y}) đã chiếm, tìm ô gần nhất")
                 x,y = self.board.empty_near(x,y)
-            log.info(f"MOVE ({x},{y}) {dt:.2f}s [JAX:{self.eng_moves} err:{self.eng_errs} win:{self.engine.win.range_str() if self.engine else 'N/A'}]")
+            log.info(f"MOVE ({x},{y}) {dt:.2f}s [KG:{self.eng_moves} err:{self.eng_errs} win:{self.engine.win.range_str() if self.engine else 'N/A'}]")
             await self.send(self.pkt_play(self.board.xy2pos(x,y)))
             self._last_xy = (x,y); self._last_move_xy=(x,y); self.board.put(x,y,self.my_sym)
         finally:
@@ -1304,35 +1310,35 @@ class CaroBot(GameClient):
 
 # ======================== MAIN ========================
 def main():
-    # Tự động tải JAX nếu chưa có
-    b = ensure_jax_engine() or find_jax_binary() or str(ENGINE_DIR / ENGINE_BIN)
-    # Nếu vẫn chưa có, thử auto download lần nữa (hiển thị log)
+    # Tự động tải Katagomo nếu chưa có - GIỐNG nguyen1-5 gọi auto_download_alphagomoku()
+    b = ensure_kg_engine() or find_kg_binary() or str(ENGINE_DIR / KG_BINARY)
+    # Nếu vẫn chưa có, thử auto download lần nữa (hiển thị log) - giống nguyen1-5 fallback
     if not Path(b).exists():
-        print(f"[!] JAX chưa có tại {b}, đang thử tải từ {JAX_DOWNLOAD_URL} ...")
-        b2 = auto_download_jax()
+        print(f"[!] Katagomo chưa có tại {b}, đang thử tải từ {KG_DOWNLOAD_URL} ...")
+        b2 = auto_download_katagomo()
         if b2 and Path(b2).exists():
             b = b2
 
     w = find_wine()
     if Path(b).exists() and w:
-        print(f"[OK] JAX: {Path(b).name} via {w} | Rule={ENGINE_RULE} Board={ENGINE_BOARD} Timeout={ENGINE_TIMEOUT}ms")
+        print(f"[OK] Katagomo: {Path(b).name} via {w} | Rule={KG_RULE} Board={KG_BOARD} Timeout={KG_TIMEOUT}ms")
         print(f"     Binary: {b}")
-        print(f"     Version: JAX {JAX_VERSION} - Kailong Jiang")
-        print(f"     Download: {JAX_DOWNLOAD_URL}")
-        print(f"     Mirror  : {JAX_DOWNLOAD_MIRROR}")
+        print(f"     Version: Katagomo {KG_VERSION} - Zhiyang Hang (Katago derivative)")
+        print(f"     Download: {KG_DOWNLOAD_URL}")
+        print(f"     pbrain: {KG_BINARY} (caro 15)")
         print(f"     Window: 15x15 sliding trên 15x19")
     elif Path(b).exists():
-        print(f"[!] JAX found {b} nhưng thiếu wine ({w})")
+        print(f"[!] Katagomo found {b} nhưng thiếu wine ({w})")
         print(f"    Cài wine: sudo apt install wine64")
     else:
-        print(f"[!] JAX not found: {b}")
+        print(f"[!] Katagomo not found: {b}")
         print(f"    Đã thử tải tự động từ:")
-        print(f"     - {JAX_DOWNLOAD_URL}")
-        print(f"     - {JAX_DOWNLOAD_MIRROR}")
+        print(f"     - {KG_DOWNLOAD_URL}")
         print(f"    Nếu mạng chặn, tải thủ công:")
-        print(f"     wget -O /tmp/JAX25.zip {JAX_DOWNLOAD_URL}")
-        print(f"     unzip /tmp/JAX25.zip -d jax-engine/")
-        print(f"     Hoặc: wget -O /tmp/JAX24.zip {JAX_DOWNLOAD_MIRROR}")
+        print(f"     wget -O /tmp/katagomo26.zip {KG_DOWNLOAD_URL}")
+        print(f"     unzip /tmp/katagomo26.zip -d katagomo-engine/")
+        print(f"     # Katagomo zip chứa: pbrain-katagomo_caro-15.exe + *.onnx + *.dll")
+        print(f"     chmod +x katagomo-engine/pbrain-katagomo_caro-15.exe")
         print(f"    Bot vẫn chạy fallback (đánh gần nước cuối) nếu không có engine")
     try:
         asyncio.get_running_loop().create_task(_run())
@@ -1344,8 +1350,8 @@ async def _run():
         bot = CaroBot()
         bot.start_time = time.time(); bot._running = True
         log.info("="*60)
-        log.info("BOT CARO JAX v5.1 - StandardCaro + Sliding Window 15x15")
-        log.info(f"Engine: JAX rule={ENGINE_RULE} board={ENGINE_BOARD} timeout={ENGINE_TIMEOUT}ms")
+        log.info("BOT CARO KATAGOMO v5.1 - StandardCaro + Sliding Window 15x15")
+        log.info(f"Engine: Katagomo caro 15 rule={ENGINE_RULE} board={ENGINE_BOARD} timeout={ENGINE_TIMEOUT}ms")
         log.info(f"Bàn gamevh: {GAMEVH_W}x{GAMEVH_H} | Cửa sổ engine: {SlidingWindow.SIZE}x{SlidingWindow.SIZE}")
         log.info("="*60)
         rc = 0
