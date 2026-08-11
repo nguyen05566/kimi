@@ -8,6 +8,13 @@
 ║  Sliding Window 15×15 trượt trên bàn 15×19                    ║
 ║  Luật: 6+ liên tiếp thắng, 5 chặn 2 đầu không thắng            ║
 ║  Tích hợp đầy đủ: Binary protocol + Board + GameClient + JAX   ║
+║                                                                  ║
+║  DOWNLOAD JAX Gomoku:                                            ║
+║  - Chính thức: http://download.gomocup.com/ai/JAX25.zip         ║
+║  - Mirror   : https://github.com/Gomocup/GomocupDownload/       ║
+║               raw/master/2024/JAX24.zip                          ║
+║  - Tự động tải nếu chưa có (auto_download_jax)                    ║
+║  - Engine: Kailong Jiang - JAX 2025                              ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -77,6 +84,14 @@ ENGINE_BIN = "pbrain-Jax.exe"
 ENGINE_RULE = 8  # StandardCaro: 6 thắng, 5 chặn 2 đầu không thắng
 ENGINE_TIMEOUT = 2000  # ms
 ENGINE_BOARD = 15
+# --- Download JAX Gomoku ---
+# Nguồn chính thức: Gomocup download page
+# http://download.gomocup.com/ai/JAX25.zip  (JAX 2025 - Kailong Jiang)
+# Mirror GitHub: https://github.com/Gomocup/GomocupDownload/raw/master/2024/JAX24.zip
+JAX_DOWNLOAD_URL = "http://download.gomocup.com/ai/JAX25.zip"
+JAX_DOWNLOAD_MIRROR = "https://github.com/Gomocup/GomocupDownload/raw/master/2024/JAX24.zip"
+JAX_DOWNLOAD_FALLBACK = "http://download.gomocup.com/ai/JAX24.zip"
+JAX_VERSION = "2025"
 
 # ======================== WINE ========================
 def find_wine():
@@ -103,6 +118,125 @@ def find_jax_binary() -> Optional[str]:
             if f.is_file():
                 return str(f)
     return str(ENGINE_DIR / ENGINE_BIN) if (ENGINE_DIR / ENGINE_BIN).exists() else None
+
+def auto_download_jax() -> Optional[str]:
+    """Tự động tải JAX gomoku nếu chưa có.
+    - Nguồn chính: http://download.gomocup.com/ai/JAX25.zip (JAX 2025)
+    - Mirror: GitHub GomocupDownload
+    - Giải nén vào ENGINE_DIR, cấp quyền thực thi.
+    Trả về đường dẫn binary hoặc None.
+    """
+    binary_path = ENGINE_DIR / ENGINE_BIN
+    if binary_path.exists():
+        try: binary_path.chmod(0o755)
+        except Exception: pass
+        return str(binary_path)
+    # thử tìm ở vị trí khác trước khi tải
+    found = find_jax_binary()
+    if found and Path(found).exists():
+        return found
+
+    log.info(f"[JAX] Downloading JAX {JAX_VERSION} ...")
+    log.info(f"[JAX] Primary: {JAX_DOWNLOAD_URL}")
+    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+    # thư mục tạm giải nén
+    tmp_base = _BASE_DIR / "jax-engine"
+    tmp_base.mkdir(parents=True, exist_ok=True)
+    archive = Path("/tmp/jax25.zip")
+    try:
+        import zipfile
+        downloaded = False
+        for url in [JAX_DOWNLOAD_URL, JAX_DOWNLOAD_MIRROR, JAX_DOWNLOAD_FALLBACK]:
+            try:
+                log.info(f"[JAX] -> {url}")
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                    "Accept": "*/*"
+                })
+                with urllib.request.urlopen(req, timeout=180) as resp:
+                    data = resp.read()
+                    if len(data) < 10000:
+                        raise ValueError(f"File too small: {len(data)} bytes")
+                    archive.write_bytes(data)
+                log.info(f"[JAX] Tải xong {len(data)//1024}KB")
+                downloaded = True
+                break
+            except Exception as e:
+                log.warning(f"[JAX] Download fail {url}: {e}")
+                continue
+        if not downloaded or not archive.exists():
+            log.error("[JAX] Không tải được file zip từ bất kỳ nguồn nào")
+            return None
+
+        # Giải nén
+        log.info(f"[JAX] Giải nén {archive} -> {tmp_base}")
+        with zipfile.ZipFile(archive, "r") as zf:
+            # liệt kê để debug
+            namelist = zf.namelist()
+            log.info(f"[JAX] Zip contains {len(namelist)} files: {namelist[:8]}")
+            zf.extractall(str(tmp_base))
+
+        # Tìm binary sau khi giải nén (đệ quy)
+        candidates = list(tmp_base.rglob("pbrain-Jax*")) + list(tmp_base.rglob("pbrain-jax*")) + list(tmp_base.rglob("JAX*"))
+        # lọc file thực thi
+        exe_candidates = [p for p in candidates if p.is_file() and p.suffix.lower() in (".exe","") and "jax" in p.name.lower()]
+        if not exe_candidates:
+            # thử tìm bất kỳ pbrain*.exe
+            exe_candidates = list(tmp_base.rglob("pbrain*.exe"))
+
+        target = None
+        for cand in exe_candidates:
+            # ưu tiên JAX
+            if "jax" in cand.name.lower():
+                target = cand
+                break
+        if not target and exe_candidates:
+            target = exe_candidates[0]
+
+        if target and target.exists():
+            log.info(f"[JAX] Found binary trong zip: {target}")
+            # copy về vị trí chuẩn ENGINE_DIR / ENGINE_BIN
+            try:
+                ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+                if target.resolve() != binary_path.resolve():
+                    import shutil as _sh
+                    _sh.copy2(str(target), str(binary_path))
+                    log.info(f"[JAX] Copy -> {binary_path}")
+                binary_path.chmod(0o755)
+                try: target.chmod(0o755)
+                except: pass
+            except Exception as e:
+                log.warning(f"[JAX] Copy/chmod fail: {e}")
+            # dọn zip
+            try: archive.unlink(missing_ok=True)
+            except: pass
+            if binary_path.exists():
+                log.info(f"[JAX] Download OK: {binary_path} ({binary_path.stat().st_size//1024}KB)")
+                return str(binary_path)
+            return str(target)
+
+        # không tìm thấy binary cụ thể, thử find lại toàn bộ
+        fallback = find_jax_binary()
+        if fallback and Path(fallback).exists():
+            log.info(f"[JAX] Fallback found: {fallback}")
+            try: archive.unlink(missing_ok=True)
+            except: pass
+            return fallback
+
+        log.error(f"[JAX] Giải nén xong nhưng không tìm thấy {ENGINE_BIN} trong {tmp_base}")
+        try: archive.unlink(missing_ok=True)
+        except: pass
+        return None
+    except Exception as e:
+        log.error(f"[JAX] Download/extract failed: {e}", exc_info=True)
+        return None
+
+def ensure_jax_engine() -> Optional[str]:
+    """Đảm bảo JAX engine tồn tại, tự tải nếu thiếu. Trả về path hoặc None."""
+    p = find_jax_binary()
+    if p and Path(p).exists():
+        return p
+    return auto_download_jax()
 
 # ======================== BINARY PROTOCOL ========================
 class BinReader:
@@ -310,17 +444,27 @@ class JaxEngine:
         self.my_side = 1
 
     def start(self, my_sym=1):
-        """Khởi động engine mới. Trả True nếu OK."""
+        """Khởi động engine mới. Trả True nếu OK. Tự tải nếu thiếu."""
         self.stop()
         if not self.wine:
-            log.warning("[JAX] Không tìm thấy wine!")
+            log.warning("[JAX] Không tìm thấy wine! (cần wine để chạy .exe)")
             return False
-        resolved = find_jax_binary()
+        # Đảm bảo binary tồn tại, tự tải nếu thiếu
+        resolved = ensure_jax_engine()
         if resolved:
             self.binary = resolved
+        else:
+            resolved = find_jax_binary()
+            if resolved:
+                self.binary = resolved
         if not Path(self.binary).exists():
             log.warning(f"[JAX] Binary không tồn tại: {self.binary}")
-            return False
+            log.warning(f"[JAX] Thử tải thủ công: JAX25.zip từ {JAX_DOWNLOAD_URL}")
+            auto = auto_download_jax()
+            if auto and Path(auto).exists():
+                self.binary = auto
+            else:
+                return False
         import os as _os
         env = _os.environ.copy()
         env["WINEPREFIX"] = str(_BASE_DIR / ".wine")
@@ -1160,18 +1304,36 @@ class CaroBot(GameClient):
 
 # ======================== MAIN ========================
 def main():
-    b = find_jax_binary() or str(ENGINE_DIR / ENGINE_BIN)
+    # Tự động tải JAX nếu chưa có
+    b = ensure_jax_engine() or find_jax_binary() or str(ENGINE_DIR / ENGINE_BIN)
+    # Nếu vẫn chưa có, thử auto download lần nữa (hiển thị log)
+    if not Path(b).exists():
+        print(f"[!] JAX chưa có tại {b}, đang thử tải từ {JAX_DOWNLOAD_URL} ...")
+        b2 = auto_download_jax()
+        if b2 and Path(b2).exists():
+            b = b2
+
     w = find_wine()
     if Path(b).exists() and w:
         print(f"[OK] JAX: {Path(b).name} via {w} | Rule={ENGINE_RULE} Board={ENGINE_BOARD} Timeout={ENGINE_TIMEOUT}ms")
         print(f"     Binary: {b}")
+        print(f"     Version: JAX {JAX_VERSION} - Kailong Jiang")
+        print(f"     Download: {JAX_DOWNLOAD_URL}")
+        print(f"     Mirror  : {JAX_DOWNLOAD_MIRROR}")
         print(f"     Window: 15x15 sliding trên 15x19")
     elif Path(b).exists():
         print(f"[!] JAX found {b} nhưng thiếu wine ({w})")
+        print(f"    Cài wine: sudo apt install wine64")
     else:
         print(f"[!] JAX not found: {b}")
-        print(f"    Đặt pbrain-Jax.exe vào {ENGINE_DIR}/")
-        print(f"    Bot vẫn chạy fallback (đánh gần nước cuối)")
+        print(f"    Đã thử tải tự động từ:")
+        print(f"     - {JAX_DOWNLOAD_URL}")
+        print(f"     - {JAX_DOWNLOAD_MIRROR}")
+        print(f"    Nếu mạng chặn, tải thủ công:")
+        print(f"     wget -O /tmp/JAX25.zip {JAX_DOWNLOAD_URL}")
+        print(f"     unzip /tmp/JAX25.zip -d jax-engine/")
+        print(f"     Hoặc: wget -O /tmp/JAX24.zip {JAX_DOWNLOAD_MIRROR}")
+        print(f"    Bot vẫn chạy fallback (đánh gần nước cuối) nếu không có engine")
     try:
         asyncio.get_running_loop().create_task(_run())
     except RuntimeError:
