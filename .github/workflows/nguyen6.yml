@@ -8,8 +8,6 @@ on:
         required: false
         default: '5.9'
         type: string
-  schedule:
-    - cron: '0 */6 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-gamevh-account
@@ -38,23 +36,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot (loop until timeout)
+      - name: Run Caro Bot
         env:
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
-        run: |
-          echo "Starting nguyen6.py loop - will auto-restart on exit until job timeout (6h)"
-          while true; do
-            echo "=== $(date) Starting nguyen6.py ==="
-            python3 nguyen6.py || echo "nguyen6.py exited with code $?"
-            echo "=== $(date) nguyen6.py finished, restarting in 10s ==="
-            sleep 10
-          done
-      - name: Auto-restart workflow (khi hết phiên tự chạy tiếp)
-        if: always()
-        run: |
-          echo "Job finished at $(date), triggering next run..."
-          sleep 5
-          gh workflow run "$(basename ${{ github.workflow }})" --ref ${{ github.ref_name }} || echo "gh run failed, will rely on cron"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+        run: python3 nguyen6.py
