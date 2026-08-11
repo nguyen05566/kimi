@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO SQUIRREL24 - KATAGOMO GTP RECTANGULAR 15x19 NATIVE    ║
+║  BOT CARO SQUIRREL24 - PROXY ENGINE v5.1 (STABLE & ANTI-NOISE)    ║
 ║  Engine: SQUIRREL24 (KataGomo26) in GTP Mode                     ║
 ║  - FULL VIEW 15x19: Đánh trực tiếp toàn bàn cờ hình chữ nhật     ║
 ║  - GTP NATIVE: Không cần Sliding Window Proxy                    ║
@@ -120,9 +120,11 @@ def detect_ag_binary() -> Optional[str]:
 # ═══════════════════════════════════════════════════════════════════════
 #  SQUIRREL PROXY ENGINE v5.0 - DYNAMIC VIEW & ANTI-NOISE FILTERING
 # ═══════════════════════════════════════════════════════════════════════
-class KataGomoGTPEngine:
-    WIDTH = 15
-    HEIGHT = 19
+class SquirrelProxyEngine:
+    VIRTUAL_WIDTH = 15
+    VIRTUAL_HEIGHT = 19
+    ENGINE_SIZE = 15
+    MAX_Y_OFFSET = VIRTUAL_HEIGHT - ENGINE_SIZE  # = 4
 
     def __init__(self, timeout_turn: int = 2500, rule: int = 8):
         self.binary = None
@@ -136,8 +138,6 @@ class KataGomoGTPEngine:
         self.my_side = CROSS
         self.debug = os.environ.get("CARO_DEBUG") == "1"
         self._selector = None
-        self._synced = False
-        self._expected_history_len = -1
 
     def _init_selector(self):
         self._close_selector()
@@ -146,7 +146,7 @@ class KataGomoGTPEngine:
                 self._selector = selectors.DefaultSelector()
                 self._selector.register(self.proc.stdout, selectors.EVENT_READ)
             except Exception as e:
-                log.warning(f"[GTP] Selector register error: {e}")
+                log.warning(f"[PROXY] Selector register error: {e}")
                 self._selector = None
 
     def _close_selector(self):
@@ -159,7 +159,7 @@ class KataGomoGTPEngine:
 
     def _log(self, msg: str):
         if self.debug:
-            log.info(f"[GTP] {msg}")
+            log.info(f"[PROXY] {msg}")
 
     def _send(self, cmd: str):
         if self.proc and self.proc.poll() is None:
@@ -168,9 +168,9 @@ class KataGomoGTPEngine:
                 self.proc.stdin.flush()
                 self._log(f"[SEND] {cmd}")
             except Exception as e:
-                log.error(f"[GTP] Send error: {e}")
+                log.error(f"[PROXY] Send error: {e}")
 
-    def _read_line(self, timeout: float = 1.0) -> str:
+    def _read_line(self, timeout: float = 0.5) -> str:
         if not self.proc or self.proc.poll() is not None:
             return ""
         deadline = time.monotonic() + timeout
@@ -203,43 +203,6 @@ class KataGomoGTPEngine:
         while self._read_line(timeout=0.01):
             pass
 
-    def _gtp_cmd(self, cmd: str, timeout: float = 3.0) -> str:
-        self._send(cmd)
-        deadline = time.monotonic() + timeout
-        res = []
-        while time.monotonic() < deadline:
-            line = self._read_line(timeout=min(1.0, deadline - time.monotonic()))
-            if not line:
-                continue
-            res.append(line)
-            if line.startswith("=") or line.startswith("?"):
-                self._read_line(timeout=0.05)
-                break
-        return " ".join(res)
-
-    @staticmethod
-    def to_gtp_coord(x: int, y: int, height: int = 19) -> str:
-        cols = "ABCDEFGHJKLMNOPQRST"
-        if 0 <= x < len(cols) and 0 <= y < height:
-            return f"{cols[x]}{height - y}"
-        return "H10"
-
-    @staticmethod
-    def from_gtp_coord(coord_str: str, height: int = 19) -> Optional[Tuple[int, int]]:
-        cols = "ABCDEFGHJKLMNOPQRST"
-        coord_str = coord_str.strip().upper()
-        if not coord_str:
-            return None
-        col_char = coord_str[0]
-        row_str = coord_str[1:]
-        if col_char not in cols or not row_str.isdigit():
-            return None
-        x = cols.index(col_char)
-        y = height - int(row_str)
-        if 0 <= x < 15 and 0 <= y < height:
-            return (x, y)
-        return None
-
     def start_engine(self) -> bool:
         self.stop()
         if not self.binary:
@@ -248,101 +211,178 @@ class KataGomoGTPEngine:
             cwd_dir = str(Path(self.binary).parent)
             is_exe = self.binary.lower().endswith(".exe")
             if is_exe:
-                cmd = ["wine", self.binary, "gtp", "-config", "caro15x.cfg", "-model", "caro15x.onnx"]
+                cmd = ["wine", self.binary]
             else:
-                cmd = [self.binary, "gtp", "-config", "caro15x.cfg", "-model", "caro15x.onnx"]
+                cmd = [self.binary]
             
-            log.info(f"[GTP] Starting KataGomo in GTP mode: {' '.join(cmd)}")
+            log.info(f"[PROXY] Starting engine: {' '.join(cmd)}")
             self.proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, cwd=cwd_dir
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=cwd_dir
             )
             self._buffer = bytearray()
             self._init_selector()
-            time.sleep(0.3)
+            time.sleep(0.2)
+            self._drain_output()
+
+            self._send("START 15")
+            for _ in range(10):
+                line = self._read_line(timeout=1.0)
+                if line.upper() == "OK":
+                    log.info("[PROXY] ✓ Engine START OK")
+                    break
+            else:
+                log.warning("[PROXY] ⚠ No OK response to START")
+
+            self._send(f"INFO rule {self.rule}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO ponder 1")
             self._drain_output()
             
-            check_resp = self._gtp_cmd("known_command rectangular_boardsize", timeout=2.0)
-            if "= true" in check_resp.lower() or "=" in check_resp:
-                log.info("[GTP] ✓ Engine supports rectangular_boardsize")
-                resp = self._gtp_cmd(f"rectangular_boardsize {self.WIDTH} {self.HEIGHT}", timeout=2.0)
-            else:
-                log.warning("[GTP] ⚠ rectangular_boardsize check fallback -> boardsize")
-                resp = self._gtp_cmd(f"boardsize {self.WIDTH} {self.HEIGHT}", timeout=2.0)
-                
-            self._gtp_cmd("clear_board", timeout=1.0)
             self._initialized = True
-            log.info(f"[GTP] ✓ KataGomo GTP 15x19 initialized OK! (resp: {resp})")
             return True
         except Exception as e:
-            log.error(f"[GTP] Start engine error: {e}")
+            log.error(f"[PROXY] Start error: {e}")
             self._initialized = False
             return False
 
     def start_game(self, my_symbol: int = CROSS) -> bool:
         with self.lock:
             self.my_side = my_symbol
-            side_str = "BLACK (X)" if my_symbol == CROSS else "WHITE (O)"
-            log.info(f"[GTP] New game - I am {side_str}")
-            self._synced = False
+            side_str = "X (CROSS)" if my_symbol == CROSS else "O (CIRCLE)"
+            log.info(f"[PROXY] New game - I am {side_str}")
+
             if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return self.start_engine()
+
+            self._send("RESTART")
+            for _ in range(5):
+                line = self._read_line(timeout=1.0)
+                if line.upper() == "OK":
+                    log.info("[PROXY] ✓ RESTART OK")
+                    break
+            else:
+                log.warning("[PROXY] ⚠ RESTART no OK")
+
+            self._send(f"INFO rule {self.rule}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO ponder 1")
             self._drain_output()
-            self._gtp_cmd("clear_board", timeout=1.0)
             return True
+
+    def _calculate_offset(self, history: list) -> int:
+        if not history:
+            return 2  # Offset trung tâm mặc định
+
+        last_y = history[-1][1]
+        best_offset = 0
+        best_score = -1.0
+        total_moves = len(history)
+
+        for off in range(self.MAX_Y_OFFSET + 1):
+            score = 0.0
+            for idx, (_, y, _) in enumerate(history):
+                if off <= y < off + self.ENGINE_SIZE:
+                    recency_weight = 1.0 + ((idx + 1) / total_moves) * 3.5
+                    score += recency_weight
+            
+            if off <= last_y < off + self.ENGINE_SIZE:
+                score += 5.0
+                
+            center_y = off + self.ENGINE_SIZE // 2
+            score -= abs(center_y - last_y) * 0.2
+
+            if score > best_score:
+                best_score = score
+                best_offset = off
+
+        return best_offset
+
+    def _read_engine_move(self, timeout_total: float = 2.5) -> Optional[Tuple[int, int]]:
+        deadline = time.monotonic() + timeout_total
+        while time.monotonic() < deadline:
+            line = self._read_line(timeout=0.5)
+            if not line:
+                continue
+            if line.upper().startswith(("MESSAGE", "ERROR", "DEBUG", "UNKNOWN", "OK")):
+                log.info(f"[ENGINE-LOG] {line}")
+                continue
+            match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+        return None
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
-            if not self._initialized or not self.proc or self.proc.poll() is not None:
+            if not self._initialized:
                 if not self.start_engine():
                     return None
             
             self.my_side = my_side
+            offset_y = self._calculate_offset(board_history)
+            self._log(f"Dynamic Window offset_y={offset_y}, history_len={len(board_history)}")
             self._drain_output()
             
-            first_sym = board_history[0][2] if board_history else my_side
-            def sym_to_gtp_color(s: int) -> str:
-                return "B" if s == first_sym else "W"
-
-            can_use_turn = self._synced and len(board_history) == self._expected_history_len + 1
-            if can_use_turn and len(board_history) > 0:
-                last_x, last_y, last_sym = board_history[-1]
-                self._send(f"play {sym_to_gtp_color(last_sym)} {self.to_gtp_coord(last_x, last_y)}")
-            else:
-                self._send("clear_board")
-                for (x, y, sym) in board_history:
-                    self._send(f"play {sym_to_gtp_color(sym)} {self.to_gtp_coord(x, y)}")
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send(f"INFO time_left {self.timeout_turn * 20}")
             
-            my_color_str = sym_to_gtp_color(my_side)
-            self._send(f"genmove {my_color_str}")
+            # 1. BÀN TRỐNG
+            if len(board_history) == 0:
+                self._log("Empty board -> sending BEGIN")
+                self._send("BEGIN")
+                move = self._read_engine_move(timeout_total=2.5)
+                if move:
+                    ex, ey = move
+                    vx, vy = ex, ey + 2
+                    if not (0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT):
+                        vx, vy = 7, 9
+                    log.info(f"[PROXY] ✓ BEGIN move: engine({ex},{ey}) -> virtual({vx},{vy})")
+                    return (vx, vy)
+                return (7, 9)
             
-            deadline = time.monotonic() + (self.timeout_turn / 1000.0) + 3.0
-            while time.monotonic() < deadline:
-                rem_time = deadline - time.monotonic()
-                line = self._read_line(timeout=min(1.0, rem_time))
-                if not line:
-                    continue
-                if line.startswith("="):
-                    parts = line[1:].strip().split()
-                    if parts:
-                        coord_str = parts[0]
-                        if coord_str.lower() in ("pass", "resign"):
-                            log.warning(f"[GTP] AI returned {coord_str}")
-                            return None
-                        move_xy = self.from_gtp_coord(coord_str, height=self.HEIGHT)
-                        if move_xy:
-                            self._synced = True
-                            self._expected_history_len = len(board_history) + 1
-                            log.info(f"[GTP] ✓ AI move: {coord_str} -> matrix({move_xy[0]},{move_xy[1]})")
-                            return move_xy
-            log.warning("[GTP] ⚠ Timeout or no move from genmove")
-            self._synced = False
+            # 2. GỬI BÀN CỜ VỚI OFFSET CHÍNH XÁC
+            self._send("BOARD")
+            my_count = 0
+            opp_count = 0
+            
+            for (hx, hy, hsym) in board_history:
+                if offset_y <= hy < offset_y + self.ENGINE_SIZE:
+                    ex = hx
+                    ey = hy - offset_y
+                    c = 1 if hsym == self.my_side else 2
+                    self._send(f"{ex},{ey},{c}")
+                    if c == 1: my_count += 1
+                    else: opp_count += 1
+            
+            self._send("DONE")
+            log.info(f"[PROXY] BOARD sent: {my_count} my + {opp_count} opp, offset_y={offset_y}")
+            
+            # 3. ĐỌC VÀ CHUYỂN ĐỔI TỌA ĐỘ
+            move = self._read_engine_move(timeout_total=3.0)
+            if move:
+                ex, ey = move
+                vx, vy = ex, ey + offset_y
+                
+                if 0 <= vx < self.VIRTUAL_WIDTH and 0 <= vy < self.VIRTUAL_HEIGHT:
+                    is_occupied = any(hx == vx and hy == vy for hx, hy, _ in board_history)
+                    if not is_occupied:
+                        log.info(f"[PROXY] ✓ Move: engine({ex},{ey}) -> virtual({vx},{vy})")
+                        return (vx, vy)
+                    else:
+                        log.warning(f"[PROXY] ⚠ ({vx},{vy}) occupied, invalid move")
+                else:
+                    log.warning(f"[PROXY] ⚠ ({vx},{vy}) out of bounds")
+            
+            log.error("[PROXY] ✗ No valid move from engine")
             return None
 
     def _stop_unlocked(self):
         if self.proc:
             try:
-                self._send("quit")
+                self._send("END")
             except Exception:
                 pass
             try:
@@ -363,18 +403,6 @@ class KataGomoGTPEngine:
 
     def __del__(self):
         self.stop()
-
-# ======================== GTP COORD TEST ========================
-if "--test-coords" in sys.argv:
-    print("=== TESTING GTP 15x19 COORDINATES ===")
-    assert KataGomoGTPEngine.to_gtp_coord(0, 0) == "A19", KataGomoGTPEngine.to_gtp_coord(0, 0)
-    assert KataGomoGTPEngine.to_gtp_coord(14, 18) == "P1", KataGomoGTPEngine.to_gtp_coord(14, 18)
-    assert KataGomoGTPEngine.to_gtp_coord(7, 9) == "H10", KataGomoGTPEngine.to_gtp_coord(7, 9)
-    assert KataGomoGTPEngine.from_gtp_coord("A19") == (0, 0)
-    assert KataGomoGTPEngine.from_gtp_coord("P1") == (14, 18)
-    assert KataGomoGTPEngine.from_gtp_coord("H10") == (7, 9)
-    print("✓ All GTP 15x19 coordinates conversion PASSED!")
-    sys.exit(0)
 
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
@@ -597,7 +625,7 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = KataGomoGTPEngine(timeout_turn=AG_TIMEOUT, rule=AG_RULE)
+            self.ag = SquirrelProxyEngine(timeout_turn=AG_TIMEOUT, rule=AG_RULE)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
