@@ -3,7 +3,7 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO ALPHAGOMOKU (MK) - FULL NAME + AVATAR v5.0             ║
 ║  Engine: AlphaGomoku MK 2026 – #1 Caro Gomocup                   ║
-║  Luật: INFO rule 9 (exactly-5 + caro)                            ║
+║  Luật: INFO rule 9 (caro (rule 8))                            ║
 ║  Bàn server 15x19 → khung 15x15 region-first                     ║
 ║  Pipeline: đọc bàn → region → RESTART → BOARD map → nhận nước    ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -64,9 +64,10 @@ AG_BINARY_NAMES = [
 ]
 # Gomocup 2026 – #1 Caro
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
-# INFO rule 9 = exactly-5 (1) + caro (8) – chuẩn Gomocup Caro
-AG_RULE = 9
-AG_TIMEOUT = 2000  # ms timeout_turn
+# INFO rule 8 = caro; timeout 4s/nước; match server 1800s
+AG_RULE = 8
+AG_TIMEOUT = 4000           # ms / nước (4s)
+AG_MATCH_TIMEOUT = 1800000  # ms / ván = 30 phút (khớp BOT_MATCH_DURATION)
 
 # Alias giữ tương thích tên cũ trong file
 KG_BINARY_PRIMARY = AG_BINARY_PRIMARY
@@ -190,13 +191,26 @@ class AlphaGomokuEngine:
       5. Nhận nước → map ngược bàn thật
       6. Lỗi → thử origin khác + RESTART (không fallback liền)
 
-    Luật: INFO rule 9 = exactly-5 + caro (chuẩn Gomocup Caro).
+    Luật: INFO rule 9 = caro (rule 8) (chuẩn Gomocup Caro).
     """
     ENGINE_SIZE = 15
 
-    def __init__(self, timeout_turn=2000, board_size=15, board_height=19):
+    def __init__(self, timeout_turn=None, board_size=15, board_height=19,
+                 match_timeout_ms=None):
         self.binary = detect_ag_binary()
-        self.timeout_turn = timeout_turn / 1000.0
+        # timeout_turn: giây (nội bộ); match: ms
+        tt_ms = timeout_turn if timeout_turn is not None else AG_TIMEOUT
+        if tt_ms > 100:  # đã là ms
+            self.timeout_turn_ms = int(tt_ms)
+            self.timeout_turn = tt_ms / 1000.0
+        else:
+            self.timeout_turn = float(tt_ms)
+            self.timeout_turn_ms = int(tt_ms * 1000)
+        self.match_timeout_ms = int(
+            match_timeout_ms if match_timeout_ms is not None else AG_MATCH_TIMEOUT
+        )
+        self.time_left_ms = self.match_timeout_ms
+        self._match_start_mono = None
         self.board_width = board_size
         self.board_height = board_height
         self.proc = None
@@ -210,7 +224,15 @@ class AlphaGomokuEngine:
         self._committed_ox = None
         self._committed_oy = None
         self._engine_has_board = False
-        self.rule = AG_RULE  # 9 = caro + exactly-5
+        self.rule = AG_RULE  # 8 = caro
+
+    def _send_time_infos(self):
+        """Gửi timeout_turn / timeout_match / time_left cho engine."""
+        # Tránh time_left về 0 (engine có thể panic / đánh bừa)
+        left = max(self.time_left_ms, self.timeout_turn_ms)
+        self._send(f"INFO timeout_turn {self.timeout_turn_ms}")
+        self._send(f"INFO timeout_match {self.match_timeout_ms}")
+        self._send(f"INFO time_left {left}")
 
     # ---------- I/O ----------
     def _init_selector(self):
@@ -363,7 +385,7 @@ class AlphaGomokuEngine:
         self._committed_ox = None
         self._committed_oy = None
         if ok:
-            self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+            self._send_time_infos()
             self._send("INFO ponder 1")
             self._send(f"INFO rule {self.rule}")
             time.sleep(0.05)
@@ -395,7 +417,7 @@ class AlphaGomokuEngine:
                 for _ in range(5):
                     if self._read_line(timeout=0.8).upper() == "OK":
                         break
-                self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+                self._send_time_infos()
                 self._send(f"INFO rule {self.rule}")
                 self._drain_output()
                 self._engine_has_board = False
@@ -470,7 +492,10 @@ class AlphaGomokuEngine:
                 if not ok:
                     log.warning("[AG] START 15 không nhận OK, vẫn tiếp tục")
 
-                self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+                # Reset đồng hồ ván 30 phút
+                self.time_left_ms = self.match_timeout_ms
+                self._match_start_mono = time.monotonic()
+                self._send_time_infos()
                 self._send("INFO ponder 1")
                 # rule 9 = exactly-5 (1) + caro (8) – chuẩn Gomocup Caro
                 self._send(f"INFO rule {self.rule}")
@@ -479,7 +504,8 @@ class AlphaGomokuEngine:
 
                 self._initialized = True
                 log.info(
-                    f"[AG] AlphaGomoku started (rule={self.rule}, region-first) "
+                    f"[AG] AlphaGomoku started (rule={self.rule}, "
+                    f"turn={self.timeout_turn_ms}ms, match={self.match_timeout_ms}ms=30m) "
                     f"binary={Path(self.binary).name} my_side={my_symbol}"
                 )
                 return True
@@ -492,6 +518,8 @@ class AlphaGomokuEngine:
         with self.lock:
             if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return False
+            self.time_left_ms = self.match_timeout_ms
+            self._match_start_mono = time.monotonic()
             ok = self._soft_restart()
             self._origin_x = 0
             self._origin_y = max(0, (self.board_height - self.ENGINE_SIZE) // 2)
@@ -557,8 +585,15 @@ class AlphaGomokuEngine:
             # --- Bước 4: map + BOARD (chỉ quân trong khung, tọa độ 0..14) ---
             mapped = self._map_history_to_engine(board_history, cox, coy)
             self._drain_output()
-            self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
-            self._send(f"INFO time_left {int(self.timeout_turn * 1000 * 20)}")
+            # Cập nhật time_left theo đồng hồ thật (không để engine tưởng hết giờ)
+            if self._match_start_mono is not None:
+                elapsed_ms = int((time.monotonic() - self._match_start_mono) * 1000)
+                self.time_left_ms = max(
+                    self.match_timeout_ms - elapsed_ms,
+                    self.timeout_turn_ms,
+                )
+            self._send_time_infos()
+            t0 = time.monotonic()
             self._send("BOARD")
             for (ex, ey, sym) in mapped:
                 c = 1 if sym == self.my_side else 2
@@ -566,6 +601,7 @@ class AlphaGomokuEngine:
             self._send("DONE")
 
             raw = self._read_engine_move()
+            think_ms = int((time.monotonic() - t0) * 1000)
             if raw is None:
                 log.warning(f"[AG] attempt={attempt} origin=({cox},{coy}): không có response")
                 self._engine_has_board = False
@@ -600,9 +636,12 @@ class AlphaGomokuEngine:
                 self._engine_has_board = False
                 continue
 
+            # Trừ thời gian đã nghĩ khỏi time_left
+            self.time_left_ms = max(self.time_left_ms - think_ms, self.timeout_turn_ms)
             log.info(
                 f"[AG] OK engine=({ex},{ey}) → abs=({abs_x},{abs_y}) "
-                f"origin=({cox},{coy}) mapped={len(mapped)}/{len(board_history)}"
+                f"origin=({cox},{coy}) mapped={len(mapped)}/{len(board_history)} "
+                f"think={think_ms}ms time_left={self.time_left_ms}ms"
             )
             return abs_x, abs_y
 
@@ -612,7 +651,7 @@ class AlphaGomokuEngine:
         return None
 
     def _read_engine_move(self) -> Optional[Tuple[int, int]]:
-        deadline = time.monotonic() + self.timeout_turn + 3.0
+        deadline = time.monotonic() + self.timeout_turn + 5.0
         while time.monotonic() < deadline:
             line = self._read_line(timeout=0.8)
             if not line:
@@ -674,8 +713,8 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
-BOT_MATCH_DURATION = '0'
-BOT_TURN_DURATION = '60'
+BOT_MATCH_DURATION = '1800'  # 30 phút (giây) trên server
+BOT_TURN_DURATION = '60'     # 60s/nước trên server
 EMPTY = -1
 CIRCLE = 0
 CROSS = 1
@@ -1636,7 +1675,7 @@ def main():
     bin_path = auto_download_alphagomoku()
     if bin_path:
         print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
-        print(f"[SETUP] Rule={AG_RULE} (exactly-5 + caro), board window 15x15 on 15x19")
+        print(f"[SETUP] Rule={AG_RULE} (caro (rule 8)), board window 15x15 on 15x19")
     else:
         print("[SETUP] Không tìm thấy AlphaGomoku binary – bot sẽ chơi gần trung tâm")
         print(f"[SETUP] Tải: {AG_DOWNLOAD_URL}")
