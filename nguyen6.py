@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO EMBRYO - FULL NAME + AVATAR v3.0                     ║
-║  Engine: KATAGOMO 2026                                         ║
+║  BOT CARO KATAGOMO - FULL NAME + AVATAR v3.0                   ║
+║  Engine: pbrain-katagomo_caro-15 (2026)                        ║
+║  FIX: Đồng bộ kích thước bàn cờ động (15 cột x 19 dòng)         ║
 ║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
 ║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
 ║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
@@ -80,13 +81,24 @@ def auto_download_alphagomoku() -> Optional[str]:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
         
-        exe_files = list(ENGINE_DIR.glob("pbrain-katagomo_caro-15*.exe"))
-        if exe_files:
-            binary_path = exe_files[0]
+        # Tìm chính xác engine pbrain-katagomo_caro-15 (có thể nằm trong thư mục con)
+        candidates = list(ENGINE_DIR.rglob("pbrain-katagomo_caro-15*"))
+        if candidates:
+            binary_path = candidates[0]
             try:
                 binary_path.chmod(0o755)
             except Exception: pass
             return str(binary_path)
+            
+        # Fallback: Tìm bất kỳ file katagomo nào
+        candidates = list(ENGINE_DIR.rglob("pbrain-katagomo*"))
+        if candidates:
+            binary_path = candidates[0]
+            try:
+                binary_path.chmod(0o755)
+            except Exception: pass
+            return str(binary_path)
+            
         return str(ENGINE_DIR)
     except Exception as e:
         log.error(f"[AG] Download failed: {e}")
@@ -94,15 +106,19 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Ưu tiên tìm file katagomo*.exe
-    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*.exe"):
-        try: f.chmod(0o755)
-        except Exception: pass
-        return str(f)
-    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*"):
-        if f.is_file(): return str(f)
-    # Nếu không tìm thấy thì lấy file exe bất kỳ
-    for f in ENGINE_DIR.glob("pbrain-katagomo_caro-15*.exe"):
+    # Ưu tiên tìm file pbrain-katagomo_caro-15
+    for f in ENGINE_DIR.rglob("pbrain-katagomo_caro-15*"):
+        if f.is_file():
+            try: f.chmod(0o755)
+            except Exception: pass
+            return str(f)
+    # Fallback
+    for f in ENGINE_DIR.rglob("pbrain-katagomo*"):
+        if f.is_file():
+            try: f.chmod(0o755)
+            except Exception: pass
+            return str(f)
+    for f in ENGINE_DIR.rglob("*.exe"):
         return str(f)
     return None
 
@@ -179,7 +195,7 @@ class AlphaGomokuEngine:
         while self._read_line(timeout=0.01):
             pass
 
-    def start_game(self, my_symbol=1) -> bool:
+    def start_game(self, my_symbol=1, width=15, height=19) -> bool:
         with self.lock:
             self._synced = False
             if self.proc and self.proc.poll() is None:
@@ -187,8 +203,8 @@ class AlphaGomokuEngine:
                 for _ in range(5):
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
-                # Thay thế RECTSTART 15,19 bằng lệnh Katagomo
-                self._send("rectangular_boardsize 19 15")
+                # Gửi kích thước THỰC TẾ của bàn cờ (Fix lỗi biên 15x19)
+                self._send(f"rectangular_boardsize {width} {height}")
                 self._send("clear_board")
                 self._send("komi 0.5")
                 for _ in range(5):
@@ -219,11 +235,9 @@ class AlphaGomokuEngine:
                 self._init_selector()
                 self.my_side = my_symbol
                 
-                # 1. Khai báo kích thước bàn cờ chữ nhật (X trước, Y sau)
-                self._send("rectangular_boardsize 19 15")
-                # 2. Xóa các quân cờ cũ để bắt đầu ván mới
+                # Gửi kích thước THỰC TẾ của bàn cờ (Fix lỗi biên 15x19)
+                self._send(f"rectangular_boardsize {width} {height}")
                 self._send("clear_board")
-                # 3. Thiết lập luật chơi Gomoku/Caro (Komi, quy tắc thắng...) nếu cần
                 self._send("komi 0.5")
                 
                 for _ in range(10):
@@ -532,10 +546,11 @@ class CaroBot:
         try:
             self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
             self.ag.binary = binary
-            ok = self.ag.start_game(my_symbol=self.my_symbol)
+            # Truyền width và height thực tế vào engine
+            ok = self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] Katagomo v{AG_VERSION} OK! Rule={AG_RULE}")
+                log.info(f"[AG] Katagomo OK! Board={self.board.width}x{self.board.height}, Rule={AG_RULE}")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
@@ -650,7 +665,8 @@ class CaroBot:
                             lx, ly = 7, 9
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
-                        self.ag.start_game(my_symbol=self.my_symbol)
+                        # Truyền width và height thực tế vào engine khi reset
+                        self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
                 except Exception as e:
                     self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
@@ -835,7 +851,8 @@ class CaroBot:
         if self.ag is None:
             self.init_ag()
         else:
-            self.ag.start_game(my_symbol=self.my_symbol)
+            # Truyền width và height thực tế vào engine khi bắt đầu ván mới
+            self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
         
         if self.slot < 0:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
