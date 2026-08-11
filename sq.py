@@ -300,18 +300,20 @@ class KataGomoGTPEngine:
             self.my_side = my_side
             self._drain_output()
             
+            first_sym = board_history[0][2] if board_history else my_side
+            def sym_to_gtp_color(s: int) -> str:
+                return "B" if s == first_sym else "W"
+
             can_use_turn = self._synced and len(board_history) == self._expected_history_len + 1
             if can_use_turn and len(board_history) > 0:
                 last_x, last_y, last_sym = board_history[-1]
-                color_str = "B" if last_sym == CROSS else "W"
-                self._send(f"play {color_str} {self.to_gtp_coord(last_x, last_y)}")
+                self._send(f"play {sym_to_gtp_color(last_sym)} {self.to_gtp_coord(last_x, last_y)}")
             else:
                 self._send("clear_board")
                 for (x, y, sym) in board_history:
-                    color_str = "B" if sym == CROSS else "W"
-                    self._send(f"play {color_str} {self.to_gtp_coord(x, y)}")
+                    self._send(f"play {sym_to_gtp_color(sym)} {self.to_gtp_coord(x, y)}")
             
-            my_color_str = "B" if self.my_side == CROSS else "W"
+            my_color_str = sym_to_gtp_color(my_side)
             self._send(f"genmove {my_color_str}")
             
             deadline = time.monotonic() + (self.timeout_turn / 1000.0) + 3.0
@@ -896,9 +898,19 @@ class CaroBot:
             
             if self.slot < 0:
                 await asyncio.sleep(0.5); await self.send(self.make_get_table())
+            elif getattr(self, '_current_turn_sid', -1) == self.slot:
+                log.info("[BOT] Đến lượt ngay sau START_MATCH (SET_TURN trước START_MATCH) -> do_move()")
+                if not self.pending_move and not self._moving:
+                    self.pending_move = True
+                    asyncio.create_task(self._delayed_do_move(0.5))
+
+    async def _delayed_do_move(self, delay: float):
+        await asyncio.sleep(delay)
+        await self.do_move()
 
     async def handle_turn(self, r: BinaryReader):
         sid = r.i8(); r.i16(); r.i16()
+        self._current_turn_sid = sid
         if self.slot < 0: return
         if sid == self.slot and self.is_playing and self.running:
             if not self.pending_move and not self._moving:
