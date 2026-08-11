@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO KATAGOMO - FULL NAME + AVATAR v4.3                     ║
-║  Engine: pbrain-katagomo_caro-15.exe (chỉ 15x15)                 ║
-║  Pipeline: đọc bàn → xác định region → RESTART → BOARD map       ║
-║  Không gửi tọa độ tuyệt đối / nước ngoài khung lên engine        ║
-║  START 15; dịch origin + RESTART trước khi fallback              ║
+║  BOT CARO ALPHAGOMOKU (MK) - FULL NAME + AVATAR v5.0             ║
+║  Engine: AlphaGomoku MK 2026 – #1 Caro Gomocup                   ║
+║  Luật: INFO rule 9 (exactly-5 + caro)                            ║
+║  Bàn server 15x19 → khung 15x15 region-first                     ║
+║  Pipeline: đọc bàn → region → RESTART → BOARD map → nhận nước    ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -44,39 +44,34 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== KATAGOMO GTP CONFIG ========================
+# ======================== ALPHAGOMOKU CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "katagomo-engine"
-# Ưu tiên đúng binary pbrain-katagomo_caro-15.exe (Caro 15x15 / 15x19)
-KG_BINARY_PRIMARY = "pbrain-katagomo_caro-15.exe"
-KG_BINARY_NAMES = [
-    "pbrain-katagomo_caro-15.exe",   # đúng binary user yêu cầu
-    "pbrain-katagomo_caro.exe",
-    "pbrain-katagomo.exe",
-    "pbrain-katagomo*.exe",
-    "katago",
-    "katago.exe",
-    "katagomo",
+ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
+# Binary AlphaGomoku MK (pbrain)
+AG_BINARY_PRIMARY = "pbrain-AlphaGomoku.exe"
+AG_BINARY_NAMES = [
+    "pbrain-AlphaGomoku.exe",
+    "pbrain-alphagomoku.exe",
+    "pbrain-AlphaGomoku*.exe",
+    "pbrain-alphagomoku*.exe",
+    "AlphaGomoku.exe",
+    "alphagomoku.exe",
+    "pbrain-*.exe",
 ]
-KG_MODEL_NAMES = [
-    "b18c384nbt-gomoku.bin.gz",
-    "b28c512nbt-gomoku.bin.gz",
-    "model.bin.gz",
-    "*.bin.gz",
-]
-KG_CONFIG_NAMES = ["gtp_gomoku.cfg", "gtp_example.cfg", "default_gtp.cfg", "gtp.cfg"]
+# Gomocup 2026 – #1 Caro
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
+# INFO rule 9 = exactly-5 (1) + caro (8) – chuẩn Gomocup Caro
+AG_RULE = 9
+AG_TIMEOUT = 2000  # ms timeout_turn
 
-# Link tải (Gomocup bản nano – sau khi giải nén đổi/rename nếu cần)
-KG_DOWNLOAD_URLS = [
-    "http://download.gomocup.com/ai/KATAGOMO26.zip",
-]
-KG_MODEL_URLS = []
-
-AG_TIMEOUT = 2000  # ms (dùng cho timeout_turn)
+# Alias giữ tương thích tên cũ trong file
+KG_BINARY_PRIMARY = AG_BINARY_PRIMARY
+KG_BINARY_NAMES = AG_BINARY_NAMES
+KG_DOWNLOAD_URLS = [AG_DOWNLOAD_URL]
 
 def _find_file(directory: Path, names: List[str]) -> Optional[Path]:
     if not directory.exists():
@@ -104,149 +99,103 @@ def _find_file(directory: Path, names: List[str]) -> Optional[Path]:
                         return p
     return None
 
-def auto_download_katagomo() -> Optional[str]:
-    """Tải KATAGOMO26.zip từ Gomocup nếu chưa có binary pbrain-katagomo_caro-15.exe."""
-    # Ưu tiên đúng tên user yêu cầu
-    primary = ENGINE_DIR / KG_BINARY_PRIMARY
+def auto_download_alphagomoku() -> Optional[str]:
+    """Tải ALPHAGOMOKU.MK26.zip từ Gomocup nếu chưa có binary."""
+    primary = ENGINE_DIR / AG_BINARY_PRIMARY
     if primary.exists():
         try:
             primary.chmod(0o755)
         except Exception:
             pass
-        log.info(f"[KG] Binary đã có: {primary}")
+        log.info(f"[AG] Binary đã có: {primary}")
         return str(primary)
 
-    binary = _find_file(ENGINE_DIR, KG_BINARY_NAMES)
+    binary = _find_file(ENGINE_DIR, AG_BINARY_NAMES)
     if binary:
         try:
             binary.chmod(0o755)
         except Exception:
             pass
-        # Nếu tìm thấy exe khác, copy/rename thành tên chuẩn nếu chưa có
-        if binary.name != KG_BINARY_PRIMARY and binary.suffix.lower() == ".exe":
-            target = ENGINE_DIR / KG_BINARY_PRIMARY
-            if not target.exists():
-                try:
-                    shutil.copy2(binary, target)
-                    target.chmod(0o755)
-                    log.info(f"[KG] Đã copy {binary.name} → {KG_BINARY_PRIMARY}")
-                    return str(target)
-                except Exception:
-                    pass
-        log.info(f"[KG] Binary đã có: {binary}")
+        log.info(f"[AG] Binary đã có: {binary}")
         return str(binary)
 
-    log.info("[KG] Đang tải KATAGOMO từ Gomocup...")
+    log.info("[AG] Đang tải AlphaGomoku MK26 từ Gomocup...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/katagomo26.zip")
-        req = urllib.request.Request(KG_DOWNLOAD_URLS[0], headers={
+        archive = Path("/tmp/alphagomoku26.zip")
+        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:
             archive.write_bytes(resp.read())
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
 
-        # Ưu tiên tìm đúng tên
-        primary = ENGINE_DIR / KG_BINARY_PRIMARY
-        if primary.exists():
-            primary.chmod(0o755)
-            log.info(f"[KG] Tải thành công: {primary}")
-            return str(primary)
-
-        binary = _find_file(ENGINE_DIR, KG_BINARY_NAMES)
+        binary = _find_file(ENGINE_DIR, AG_BINARY_NAMES)
         if binary:
             try:
                 binary.chmod(0o755)
             except Exception:
                 pass
-            # Rename/copy thành tên chuẩn
-            if binary.name != KG_BINARY_PRIMARY and binary.suffix.lower() == ".exe":
-                target = ENGINE_DIR / KG_BINARY_PRIMARY
-                try:
-                    shutil.copy2(binary, target)
-                    target.chmod(0o755)
-                    log.info(f"[KG] Đã đặt tên chuẩn: {KG_BINARY_PRIMARY}")
-                    return str(target)
-                except Exception:
-                    pass
-            log.info(f"[KG] Tải thành công: {binary}")
+            log.info(f"[AG] Tải thành công: {binary}")
             return str(binary)
 
-        # Fallback: bất kỳ .exe nào
         for f in ENGINE_DIR.rglob("*.exe"):
             try:
                 f.chmod(0o755)
             except Exception:
                 pass
-            target = ENGINE_DIR / KG_BINARY_PRIMARY
-            if not target.exists():
-                try:
-                    shutil.copy2(f, target)
-                    target.chmod(0o755)
-                    log.info(f"[KG] Copy {f.name} → {KG_BINARY_PRIMARY}")
-                    return str(target)
-                except Exception:
-                    pass
-            log.info(f"[KG] Tìm thấy exe: {f}")
+            log.info(f"[AG] Tìm thấy exe: {f}")
             return str(f)
-        log.warning("[KG] Giải nén xong nhưng không tìm thấy binary")
+        log.warning("[AG] Giải nén xong nhưng không tìm thấy binary")
         return None
     except Exception as e:
-        log.error(f"[KG] Download failed: {e}")
+        log.error(f"[AG] Download failed: {e}")
         return None
 
-def detect_kg_binary() -> Optional[str]:
-    # Ưu tiên tuyệt đối pbrain-katagomo_caro-15.exe
-    primary = ENGINE_DIR / KG_BINARY_PRIMARY
+def detect_ag_binary() -> Optional[str]:
+    primary = ENGINE_DIR / AG_BINARY_PRIMARY
     if primary.exists():
         return str(primary)
-    p = _find_file(ENGINE_DIR, KG_BINARY_NAMES)
+    p = _find_file(ENGINE_DIR, AG_BINARY_NAMES)
     if p:
         return str(p)
     if ENGINE_DIR.exists():
-        for f in ENGINE_DIR.rglob("pbrain-katagomo*.exe"):
+        for f in ENGINE_DIR.rglob("*AlphaGomoku*.exe"):
+            return str(f)
+        for f in ENGINE_DIR.rglob("*alphagomoku*.exe"):
+            return str(f)
+        for f in ENGINE_DIR.rglob("pbrain-*.exe"):
             return str(f)
         for f in ENGINE_DIR.rglob("*.exe"):
             return str(f)
-        for f in ENGINE_DIR.rglob("katago*"):
-            if f.is_file():
-                return str(f)
     return None
 
-def detect_kg_model() -> Optional[str]:
-    p = _find_file(ENGINE_DIR, KG_MODEL_NAMES)
-    return str(p) if p else None
+# Alias tương thích
+auto_download_katagomo = auto_download_alphagomoku
+detect_kg_binary = detect_ag_binary
 
-def detect_kg_config() -> Optional[str]:
-    p = _find_file(ENGINE_DIR, KG_CONFIG_NAMES)
-    return str(p) if p else None
-
-# ======================== KATAGOMO PBRAIN ENGINE ========================
-class KataGomoEngine:
+# ======================== ALPHAGOMOKU PBRAIN ENGINE ========================
+class AlphaGomokuEngine:
     """
-    Wrapper cho pbrain-katagomo_caro-15.exe (chỉ 15x15).
+    Wrapper pbrain cho AlphaGomoku (MK) 2026 – #1 Caro Gomocup.
 
-    Quy trình BẮT BUỘC mỗi nước (không gửi tọa độ tuyệt đối lên engine):
-      1. Đọc toàn bộ board_history (bàn thật 15x19)
+    Quy trình BẮT BUỘC mỗi nước:
+      1. Đọc board_history (bàn server 15x19)
       2. Phân tích → chọn khung 15x15 (origin)
-      3. Nếu khung đổi so với lần trước → RESTART engine (xoá state cũ)
-      4. Map quân trong khung → gửi BOARD (tọa độ 0..14)
-      5. Nhận nước engine → map ngược ra bàn thật
-      6. Nếu lỗi → dịch khung + RESTART + BOARD lại (không fallback liền)
+      3. Khung đổi → RESTART (xoá state cũ)
+      4. Map quân trong khung → BOARD (tọa độ 0..14)
+      5. Nhận nước → map ngược bàn thật
+      6. Lỗi → thử origin khác + RESTART (không fallback liền)
 
-    Lý do: gửi nước ngoài khung / tọa độ tuyệt đối → engine hiểu sai
-    (coi như bàn trống / tọa độ invalid) → state hỏng → fallback.
+    Luật: INFO rule 9 = exactly-5 + caro (chuẩn Gomocup Caro).
     """
     ENGINE_SIZE = 15
 
     def __init__(self, timeout_turn=2000, board_size=15, board_height=19):
-        self.binary = detect_kg_binary()
-        self.model = detect_kg_model()
-        self.config = detect_kg_config()
+        self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn / 1000.0
         self.board_width = board_size
         self.board_height = board_height
@@ -256,14 +205,12 @@ class KataGomoEngine:
         self.my_side = 1
         self._initialized = False
         self._selector = None
-        self._is_pbrain = True
-        # Khung 15x15 trên bàn thật: [ox, ox+15) x [oy, oy+15)
         self._origin_x = 0
         self._origin_y = 2
-        # Origin đã commit vào engine (sau BOARD gần nhất)
         self._committed_ox = None
         self._committed_oy = None
-        self._engine_has_board = False  # True sau khi BOARD thành công
+        self._engine_has_board = False
+        self.rule = AG_RULE  # 9 = caro + exactly-5
 
     # ---------- I/O ----------
     def _init_selector(self):
@@ -273,7 +220,7 @@ class KataGomoEngine:
                 self._selector = selectors.DefaultSelector()
                 self._selector.register(self.proc.stdout, selectors.EVENT_READ)
             except Exception as e:
-                log.warning(f"[KG] Selector register error: {e}")
+                log.warning(f"[AG] Selector register error: {e}")
                 self._selector = None
 
     def _close_selector(self):
@@ -418,6 +365,7 @@ class KataGomoEngine:
         if ok:
             self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
             self._send("INFO ponder 1")
+            self._send(f"INFO rule {self.rule}")
             time.sleep(0.05)
             self._drain_output()
         return ok
@@ -438,50 +386,69 @@ class KataGomoEngine:
         self._origin_x, self._origin_y = ox, oy
         if region_changed:
             log.info(
-                f"[KG] Commit region origin=({ox},{oy}) "
+                f"[AG] Commit region origin=({ox},{oy}) "
                 f"cover y[{oy}:{oy + self.ENGINE_SIZE}) "
                 f"(restart={region_changed})"
             )
             if not self._soft_restart():
-                # RESTART fail → thử START lại nhẹ
                 self._send("START 15")
                 for _ in range(5):
                     if self._read_line(timeout=0.8).upper() == "OK":
                         break
                 self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+                self._send(f"INFO rule {self.rule}")
                 self._drain_output()
                 self._engine_has_board = False
             return True
         return False
 
     # ---------- Lifecycle ----------
+    def _wine_cmd(self, binary: str) -> list:
+        """Chọn wine / wine64 tùy môi trường."""
+        candidates = [
+            "/usr/lib/wine/wine64",
+            "/usr/bin/wine64",
+            "wine64",
+            "wine",
+        ]
+        wine_bin = "wine"
+        for c in candidates:
+            if c.startswith("/") and Path(c).exists():
+                wine_bin = c
+                break
+            elif not c.startswith("/"):
+                # which
+                p = shutil.which(c)
+                if p:
+                    wine_bin = p
+                    break
+        env_loader = os.environ.get("WINELOADER")
+        if env_loader and Path(env_loader).exists():
+            return [env_loader, binary]
+        return [wine_bin, binary]
+
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
             self._stop_unlocked()
             if not self.binary:
-                log.warning("[KG] Không tìm thấy binary")
+                self.binary = detect_ag_binary()
+            if not self.binary:
+                log.warning("[AG] Không tìm thấy binary AlphaGomoku")
                 return False
 
-            bin_name = Path(self.binary).name.lower()
-            is_exe = bin_name.endswith(".exe")
-            self._is_pbrain = (
-                "pbrain" in bin_name
-                or bin_name == KG_BINARY_PRIMARY.lower()
-                or (is_exe and "katagomo" in bin_name)
-            )
-
             try:
-                if is_exe:
-                    cmd = ["wine", self.binary]
-                else:
-                    cmd = [self.binary]
+                is_exe = self.binary.lower().endswith(".exe")
+                cmd = self._wine_cmd(self.binary) if is_exe else [self.binary]
 
+                env = os.environ.copy()
+                env.setdefault("WINEDEBUG", "-all")
                 self.proc = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     cwd=str(ENGINE_DIR),
+                    env=env,
                 )
                 self._buffer = bytearray()
                 self._init_selector()
@@ -492,31 +459,32 @@ class KataGomoEngine:
                 self._committed_oy = None
                 self._engine_has_board = False
 
-                # Engine chỉ 15x15 → START 15 (KHÔNG RECTSTART, KHÔNG tọa độ 19)
+                # AlphaGomoku: START 15 (vuông), không RECTSTART
                 self._send("START 15")
                 ok = False
-                for _ in range(10):
+                for _ in range(12):
                     line = self._read_line(timeout=1.0)
                     if line.upper() == "OK":
                         ok = True
                         break
                 if not ok:
-                    log.warning("[KG] START 15 không nhận OK, vẫn tiếp tục")
+                    log.warning("[AG] START 15 không nhận OK, vẫn tiếp tục")
 
                 self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
                 self._send("INFO ponder 1")
-                self._send("INFO rule caro")
-                time.sleep(0.15)
+                # rule 9 = exactly-5 (1) + caro (8) – chuẩn Gomocup Caro
+                self._send(f"INFO rule {self.rule}")
+                time.sleep(0.2)
                 self._drain_output()
 
                 self._initialized = True
                 log.info(
-                    f"[KG] Engine started (pbrain 15x15, region-first) "
+                    f"[AG] AlphaGomoku started (rule={self.rule}, region-first) "
                     f"binary={Path(self.binary).name} my_side={my_symbol}"
                 )
                 return True
             except Exception as e:
-                log.error(f"[KG] Start error: {e}")
+                log.error(f"[AG] Start error: {e}")
                 self._initialized = False
                 return False
 
@@ -539,7 +507,7 @@ class KataGomoEngine:
                     return None
                 return self._get_move_region_first(board_history, my_side)
             except Exception as e:
-                log.warning(f"[KG] get_move error: {e}")
+                log.warning(f"[AG] get_move error: {e}")
                 self._engine_has_board = False
                 return None
 
@@ -555,12 +523,12 @@ class KataGomoEngine:
         # --- Bước 1+2: phân tích region TRƯỚC khi đụng engine ---
         ox, oy, n_in, n_out = self._analyze_region(board_history)
         log.info(
-            f"[KG] Analyze region origin=({ox},{oy}) "
+            f"[AG] Analyze region origin=({ox},{oy}) "
             f"inside={n_in} outside={n_out} total={len(board_history)}"
         )
         if n_out > 0:
             log.info(
-                f"[KG] {n_out} quân ngoài khung sẽ bị cắt (không gửi engine) "
+                f"[AG] {n_out} quân ngoài khung sẽ bị cắt (không gửi engine) "
                 f"— khung bám mặt trận gần nhất"
             )
 
@@ -599,13 +567,13 @@ class KataGomoEngine:
 
             raw = self._read_engine_move()
             if raw is None:
-                log.warning(f"[KG] attempt={attempt} origin=({cox},{coy}): không có response")
+                log.warning(f"[AG] attempt={attempt} origin=({cox},{coy}): không có response")
                 self._engine_has_board = False
                 continue
 
             ex, ey = raw
             if not (0 <= ex < self.ENGINE_SIZE and 0 <= ey < self.ENGINE_SIZE):
-                log.warning(f"[KG] attempt={attempt}: engine trả ({ex},{ey}) ngoài 0..14")
+                log.warning(f"[AG] attempt={attempt}: engine trả ({ex},{ey}) ngoài 0..14")
                 self._engine_has_board = False
                 continue
 
@@ -618,7 +586,7 @@ class KataGomoEngine:
 
             if not (0 <= abs_x < self.board_width and 0 <= abs_y < self.board_height):
                 log.warning(
-                    f"[KG] attempt={attempt}: map abs=({abs_x},{abs_y}) ngoài bàn "
+                    f"[AG] attempt={attempt}: map abs=({abs_x},{abs_y}) ngoài bàn "
                     f"— thử origin khác (không fallback)"
                 )
                 self._engine_has_board = False
@@ -626,20 +594,20 @@ class KataGomoEngine:
 
             if (abs_x, abs_y) in occupied:
                 log.warning(
-                    f"[KG] attempt={attempt}: ({abs_x},{abs_y}) đã có quân "
+                    f"[AG] attempt={attempt}: ({abs_x},{abs_y}) đã có quân "
                     f"— thử origin khác (không fallback)"
                 )
                 self._engine_has_board = False
                 continue
 
             log.info(
-                f"[KG] OK engine=({ex},{ey}) → abs=({abs_x},{abs_y}) "
+                f"[AG] OK engine=({ex},{ey}) → abs=({abs_x},{abs_y}) "
                 f"origin=({cox},{coy}) mapped={len(mapped)}/{len(board_history)}"
             )
             return abs_x, abs_y
 
         # Hết origin ứng viên — vẫn không fallback ở đây; để do_move soft-retry
-        log.warning("[KG] Hết candidate origin, engine chưa cho nước hợp lệ")
+        log.warning("[AG] Hết candidate origin, engine chưa cho nước hợp lệ")
         self._engine_has_board = False
         return None
 
@@ -652,7 +620,7 @@ class KataGomoEngine:
             up = line.upper()
             if up.startswith(("MESSAGE", "ERROR", "DEBUG", "OK", "UNKNOWN")):
                 if up.startswith("ERROR"):
-                    log.warning(f"[KG] engine ERROR: {line}")
+                    log.warning(f"[AG] engine ERROR: {line}")
                 continue
             if "," in line:
                 parts = line.split(",")
@@ -686,7 +654,9 @@ class KataGomoEngine:
             self._stop_unlocked()
 
 # Alias để tương thích code cũ
-AlphaGomokuEngine = KataGomoEngine
+# Alias tương thích code cũ
+KataGomokuEngine = AlphaGomokuEngine
+KataGomoEngine = AlphaGomokuEngine
 
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
@@ -890,32 +860,28 @@ class CaroBot:
         self.identity_result = {}
 
     def init_ag(self):
-        if self.ag is not None: return self.ag_available
-        binary = detect_kg_binary()
+        if self.ag is not None:
+            return self.ag_available
+        binary = detect_ag_binary()
         if not binary:
-            binary = auto_download_katagomo()
+            binary = auto_download_alphagomoku()
         if not binary:
-            log.warning("[KG] No binary found!")
+            log.warning("[AG] No AlphaGomoku binary found!")
             self.ag_available = False
             return False
         try:
-            self.ag = KataGomoEngine(timeout_turn=AG_TIMEOUT, board_size=15, board_height=19)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, board_height=19)
             self.ag.binary = binary
-            # Cập nhật model/config nếu có
-            m = detect_kg_model()
-            c = detect_kg_config()
-            if m: self.ag.model = m
-            if c: self.ag.config = c
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[KG] KataGomo OK! binary={os.path.basename(binary)}")
+                log.info(f"[AG] AlphaGomoku OK! binary={os.path.basename(binary)} rule={AG_RULE}")
             else:
                 self.ag_available = False
-                log.warning("[KG] Start failed!")
+                log.warning("[AG] Start failed!")
             return self.ag_available
         except Exception as e:
-            log.error(f"[KG] Init error: {e}")
+            log.error(f"[AG] Init error: {e}")
             self.ag_available = False
             return False
 
@@ -1022,7 +988,7 @@ class CaroBot:
                         # → soft restart (RESTART) rồi thử 1 lần nữa, chưa fallback
                         self.ag_errors += 1
                         log.warning(
-                            f"[KG] Nước chưa hợp lệ sau region-retry: {move}. "
+                            f"[AG] Nước chưa hợp lệ sau region-retry: {move}. "
                             f"Soft RESTART rồi thử lại 1 lần..."
                         )
                         try:
@@ -1036,11 +1002,11 @@ class CaroBot:
                                     and self.board.get(*move2) == EMPTY):
                                 x, y = move2
                                 self.ag_moves += 1
-                                log.info(f"[KG] Retry sau RESTART OK: {move2}")
+                                log.info(f"[AG] Retry sau RESTART OK: {move2}")
                             else:
                                 raise RuntimeError(f"retry still invalid: {move2}")
                         except Exception as e2:
-                            log.warning(f"[KG] Soft retry fail ({e2}) → fallback gần nước cuối")
+                            log.warning(f"[AG] Soft retry fail ({e2}) → fallback gần nước cuối")
                             if history:
                                 lx, ly = history[-1][0], history[-1][1]
                             else:
@@ -1049,7 +1015,7 @@ class CaroBot:
                             self.ag_fallback_count += 1
                 except Exception as e:
                     self.ag_errors += 1
-                    log.warning(f"[KG] Error: {e}")
+                    log.warning(f"[AG] Error: {e}")
                     # Chỉ kill engine khi exception nặng (crash process)
                     try:
                         if self.ag and (self.ag.proc is None or self.ag.proc.poll() is not None):
@@ -1073,7 +1039,7 @@ class CaroBot:
 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [KG]")
+            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
@@ -1616,7 +1582,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO KATAGOMO - pbrain-katagomo_caro-15.exe v4.3 (region-first)")
+        log.info("BOT CARO ALPHAGOMOKU (MK) v5.0 – rule 9 Caro, region-first")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -1667,15 +1633,15 @@ class CaroBot:
             if self.ag: self.ag.stop(); self.ag = None
 
 def main():
-    bin_path = auto_download_katagomo()
+    bin_path = auto_download_alphagomoku()
     if bin_path:
-        print(f"[SETUP] KataGomo ready: {os.path.basename(bin_path)}")
-        if os.path.basename(bin_path) == KG_BINARY_PRIMARY:
-            print(f"[SETUP] Đang dùng đúng binary yêu cầu: {KG_BINARY_PRIMARY}")
+        print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
+        print(f"[SETUP] Rule={AG_RULE} (exactly-5 + caro), board window 15x15 on 15x19")
     else:
-        print(f"[SETUP] Không tìm thấy {KG_BINARY_PRIMARY} - bot sẽ chơi gần trung tâm")
-        print(f"[SETUP] Hãy đặt file {KG_BINARY_PRIMARY} vào thư mục katagomo-engine/")
-    
+        print("[SETUP] Không tìm thấy AlphaGomoku binary – bot sẽ chơi gần trung tâm")
+        print(f"[SETUP] Tải: {AG_DOWNLOAD_URL}")
+        print(f"[SETUP] Giải nén vào thư mục: {ENGINE_DIR}/")
+
     try:
         asyncio.get_running_loop()
         loop = asyncio.get_running_loop()
