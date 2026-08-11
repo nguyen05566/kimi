@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO KATAGOMO - FULL NAME + AVATAR v4.1                     ║
-║  Engine: pbrain-katagomo_caro-15.exe (pbrain protocol)           ║
-║  Thay thế hoàn toàn Embryo bằng KataGomo Caro                    ║
-║  Hỗ trợ bàn 15x19 + rule caro                                    ║
-║  Tự động tải / nhận diện pbrain-katagomo_caro-15.exe             ║
+║  BOT CARO KATAGOMO - FULL NAME + AVATAR v4.2                     ║
+║  Engine: pbrain-katagomo_caro-15.exe (chỉ 15x15)                 ║
+║  Bàn thật 15x19 → khung trượt 15x15 theo khu vực đang đánh       ║
+║  Map tọa độ gửi/nhận; dịch khung trước khi fallback              ║
+║  START 15 (không dùng RECTSTART)                                 ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -225,17 +225,23 @@ def detect_kg_config() -> Optional[str]:
     p = _find_file(ENGINE_DIR, KG_CONFIG_NAMES)
     return str(p) if p else None
 
-# ======================== KATAGOMO GTP ENGINE ========================
+# ======================== KATAGOMO PBRAIN ENGINE ========================
 class KataGomoEngine:
     """
-    Wrapper GTP cho KataGomo / KataGo.
-    API tương thích với AlphaGomokuEngine cũ (start_game / get_move / stop).
+    Wrapper cho pbrain-katagomo_caro-15.exe (chỉ 15x15).
+
+    Bàn thật của server: 15 (width) x 19 (height).
+    Engine chỉ nhận START 15 → bot duy trì một khung 15x15 trượt
+    (origin ox, oy) bao phủ khu vực đang đánh, map tọa độ gửi/nhận.
+    Không fallback ngay khi nước ngoài khung — thử dịch khung trước.
     """
+    ENGINE_SIZE = 15
+
     def __init__(self, timeout_turn=2000, board_size=15, board_height=19):
         self.binary = detect_kg_binary()
         self.model = detect_kg_model()
         self.config = detect_kg_config()
-        self.timeout_turn = timeout_turn / 1000.0  # giây
+        self.timeout_turn = timeout_turn / 1000.0
         self.board_width = board_size
         self.board_height = board_height
         self.proc = None
@@ -244,8 +250,14 @@ class KataGomoEngine:
         self.my_side = 1
         self._initialized = False
         self._selector = None
-        self._is_pbrain = False  # True nếu binary là pbrain (Gomocup nano)
+        self._is_pbrain = True
+        # Khung 15x15 trên bàn thật: [ox, ox+15) x [oy, oy+15)
+        self._origin_x = 0
+        self._origin_y = 2          # giữa theo chiều cao 19 (0..18) → 2..16
+        self._region_dirty = True   # cần tính lại origin
+        self._last_window_stones = 0
 
+    # ---------- I/O ----------
     def _init_selector(self):
         self._close_selector()
         if self.proc and self.proc.stdout:
@@ -305,23 +317,105 @@ class KataGomoEngine:
         while self._read_line(timeout=0.02):
             pass
 
-    def _gtp(self, cmd: str, timeout: float = 8.0) -> str:
-        """Gửi lệnh GTP, trả về phần sau dấu = (bỏ qua comment)."""
-        self._drain_output()
-        self._send(cmd)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            line = self._read_line(timeout=0.4)
-            if not line:
-                continue
-            if line.startswith("="):
-                return line[1:].strip()
-            if line.startswith("?"):
-                log.warning(f"[KG] GTP error: {line}")
-                return ""
-            # Bỏ qua các dòng info/debug
-        return ""
+    # ---------- Region / window mapping ----------
+    def _compute_origin(self, board_history: list) -> Tuple[int, int]:
+        """
+        Chọn origin (ox, oy) sao cho khung 15x15 bao hết (hoặc tối đa)
+        các quân đang có, ưu tiên căn giữa theo bounding-box.
+        board_width=15 → ox luôn 0.
+        board_height=19 → oy ∈ [0, 4].
+        """
+        es = self.ENGINE_SIZE
+        max_oy = max(0, self.board_height - es)  # 19-15=4
+        max_ox = max(0, self.board_width - es)   # 15-15=0
 
+        if not board_history:
+            # Bàn trống: căn giữa theo chiều cao
+            return 0, max_oy // 2
+
+        xs = [x for x, y, s in board_history]
+        ys = [y for x, y, s in board_history]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        # Căn giữa bounding box
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        ox = int(round(cx - es / 2.0))
+        oy = int(round(cy - es / 2.0))
+
+        ox = max(0, min(ox, max_ox))
+        oy = max(0, min(oy, max_oy))
+
+        # Nếu bbox rộng hơn 15 theo 1 chiều → ưu tiên bao nước gần nhất
+        # (chiều width luôn = 15 nên chỉ quan tâm height)
+        if max_y - min_y + 1 > es:
+            # Lấy tâm theo các quân gần đây (nửa lịch sử cuối)
+            recent = board_history[-(len(board_history) // 2 + 1):]
+            rys = [y for x, y, s in recent]
+            cy = sum(rys) / len(rys)
+            oy = int(round(cy - es / 2.0))
+            oy = max(0, min(oy, max_oy))
+
+        return ox, oy
+
+    def _update_region(self, board_history: list, force: bool = False) -> bool:
+        """
+        Cập nhật origin nếu cần.
+        Trả về True nếu origin đã đổi (cần gửi lại BOARD đầy đủ).
+        """
+        new_ox, new_oy = self._compute_origin(board_history)
+        n_stones = len(board_history)
+
+        # Kiểm tra xem mọi quân hiện tại có nằm trong khung cũ không
+        all_inside = True
+        if board_history and not force:
+            es = self.ENGINE_SIZE
+            for x, y, _ in board_history:
+                if not (self._origin_x <= x < self._origin_x + es and
+                        self._origin_y <= y < self._origin_y + es):
+                    all_inside = False
+                    break
+
+        changed = (new_ox != self._origin_x or new_oy != self._origin_y or
+                   force or self._region_dirty or not all_inside)
+
+        if changed:
+            old = (self._origin_x, self._origin_y)
+            self._origin_x, self._origin_y = new_ox, new_oy
+            self._region_dirty = False
+            self._last_window_stones = n_stones
+            if old != (new_ox, new_oy):
+                log.info(
+                    f"[KG] Region window → origin=({new_ox},{new_oy}) "
+                    f"cover x[{new_ox}:{new_ox + self.ENGINE_SIZE}) "
+                    f"y[{new_oy}:{new_oy + self.ENGINE_SIZE})"
+                )
+            return True
+        return False
+
+    def _to_engine(self, x: int, y: int) -> Optional[Tuple[int, int]]:
+        """Map tọa độ bàn thật → tọa độ engine (0..14)."""
+        ex = x - self._origin_x
+        ey = y - self._origin_y
+        if 0 <= ex < self.ENGINE_SIZE and 0 <= ey < self.ENGINE_SIZE:
+            return ex, ey
+        return None
+
+    def _from_engine(self, ex: int, ey: int) -> Tuple[int, int]:
+        """Map tọa độ engine → bàn thật."""
+        return ex + self._origin_x, ey + self._origin_y
+
+    def _stones_in_window(self, board_history: list) -> list:
+        """Chỉ lấy quân nằm trong khung hiện tại, đã map sang tọa độ engine."""
+        out = []
+        for x, y, sym in board_history:
+            mapped = self._to_engine(x, y)
+            if mapped is not None:
+                out.append((mapped[0], mapped[1], sym))
+        return out
+
+    # ---------- Lifecycle ----------
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
             self._stop_unlocked()
@@ -331,7 +425,6 @@ class KataGomoEngine:
 
             bin_name = Path(self.binary).name.lower()
             is_exe = bin_name.endswith(".exe")
-            # pbrain-katagomo_caro-15.exe và mọi pbrain-* đều dùng protocol pbrain
             self._is_pbrain = (
                 "pbrain" in bin_name
                 or bin_name == KG_BINARY_PRIMARY.lower()
@@ -344,13 +437,6 @@ class KataGomoEngine:
                 else:
                     cmd = [self.binary]
 
-                # Chỉ dùng GTP khi KHÔNG phải pbrain và có model
-                if (not self._is_pbrain) and self.model and self.config:
-                    cmd = [self.binary, "gtp", "-model", self.model, "-config", self.config]
-                elif (not self._is_pbrain) and self.model:
-                    cmd = [self.binary, "gtp", "-model", self.model]
-                # else: pure pbrain (pbrain-katagomo_caro-15.exe)
-
                 self.proc = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
@@ -361,33 +447,33 @@ class KataGomoEngine:
                 self._buffer = bytearray()
                 self._init_selector()
                 self.my_side = my_symbol
+                self._origin_x = 0
+                self._origin_y = max(0, (self.board_height - self.ENGINE_SIZE) // 2)
+                self._region_dirty = True
+                self._last_window_stones = 0
 
-                if self._is_pbrain:
-                    # Protocol pbrain – đúng cho pbrain-katagomo_caro-15.exe
-                    # Bàn 15x19 (Caro) hoặc 15x15 tùy engine
-                    self._send("RECTSTART 15,19")
-                    for _ in range(8):
-                        line = self._read_line(timeout=1.0)
-                        if line.upper() == "OK":
-                            break
-                    self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
-                    self._send("INFO ponder 1")
-                    # Một số bản katagomo pbrain hỗ trợ INFO rule
-                    self._send("INFO rule caro")
-                    time.sleep(0.2)
-                    self._drain_output()
-                else:
-                    # GTP
-                    self._gtp(f"rectangular_boardsize {self.board_width} {self.board_height}")
-                    self._gtp("clear_board")
-                    self._gtp("kata-set-rule caro")
-                    time.sleep(0.1)
-                    self._drain_output()
+                # Engine chỉ 15x15 → dùng START 15 (KHÔNG dùng RECTSTART)
+                self._send("START 15")
+                ok = False
+                for _ in range(10):
+                    line = self._read_line(timeout=1.0)
+                    if line.upper() == "OK":
+                        ok = True
+                        break
+                if not ok:
+                    log.warning("[KG] START 15 không nhận OK, vẫn tiếp tục")
+
+                self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
+                self._send("INFO ponder 1")
+                self._send("INFO rule caro")
+                time.sleep(0.15)
+                self._drain_output()
 
                 self._initialized = True
                 log.info(
-                    f"[KG] Engine started ({'pbrain' if self._is_pbrain else 'GTP'}) "
-                    f"binary={Path(self.binary).name} my_side={my_symbol}"
+                    f"[KG] Engine started (pbrain 15x15 window) "
+                    f"binary={Path(self.binary).name} my_side={my_symbol} "
+                    f"origin=({self._origin_x},{self._origin_y})"
                 )
                 return True
             except Exception as e:
@@ -399,48 +485,116 @@ class KataGomoEngine:
         with self.lock:
             if not self._initialized or not self.proc or self.proc.poll() is not None:
                 return False
-            if self._is_pbrain:
-                self._send("RESTART")
-                for _ in range(5):
-                    if self._read_line(timeout=1.5).upper() == "OK":
-                        return True
-                return True
-            else:
-                self._gtp("clear_board")
-                return True
+            self._send("RESTART")
+            for _ in range(5):
+                if self._read_line(timeout=1.5).upper() == "OK":
+                    break
+            self._origin_x = 0
+            self._origin_y = max(0, (self.board_height - self.ENGINE_SIZE) // 2)
+            self._region_dirty = True
+            self._last_window_stones = 0
+            return True
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
-
-                if self._is_pbrain:
-                    return self._get_move_pbrain(board_history, my_side)
-                else:
-                    return self._get_move_gtp(board_history, my_side)
+                return self._get_move_pbrain_windowed(board_history, my_side)
             except Exception as e:
                 log.warning(f"[KG] get_move error: {e}")
                 return None
 
-    def _get_move_pbrain(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+    def _get_move_pbrain_windowed(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+        """
+        1) Cập nhật khung 15x15 theo khu vực đánh.
+        2) Gửi BOARD với tọa độ đã map.
+        3) Nhận nước engine → map ngược.
+        4) Nếu nước ngoài khung / ô đã có quân → dịch khung rồi thử lại (tối đa 2 lần).
+           Không fallback ngay.
+        """
         self._drain_output()
         self._send(f"INFO timeout_turn {int(self.timeout_turn * 1000)}")
         self._send(f"INFO time_left {int(self.timeout_turn * 1000 * 20)}")
 
-        # Luôn dùng BOARD cho an toàn
-        self._send("BOARD")
-        for (x, y, sym) in board_history:
-            c = 1 if sym == self.my_side else 2
-            self._send(f"{x},{y},{c}")
-        self._send("DONE")
+        # Tập hợp ô đã chiếm (tọa độ tuyệt đối) để kiểm tra hợp lệ
+        occupied = {(x, y) for x, y, _ in board_history}
 
+        for attempt in range(3):
+            region_changed = self._update_region(board_history, force=(attempt > 0))
+            window_stones = self._stones_in_window(board_history)
+
+            # Gửi BOARD (luôn full state trong khung)
+            self._send("BOARD")
+            for (ex, ey, sym) in window_stones:
+                c = 1 if sym == self.my_side else 2
+                self._send(f"{ex},{ey},{c}")
+            self._send("DONE")
+
+            raw = self._read_engine_move()
+            if raw is None:
+                log.warning(f"[KG] attempt={attempt}: engine không trả nước")
+                continue
+
+            ex, ey = raw
+            if not (0 <= ex < self.ENGINE_SIZE and 0 <= ey < self.ENGINE_SIZE):
+                log.warning(f"[KG] attempt={attempt}: nước engine ngoài 15x15: ({ex},{ey})")
+                continue
+
+            abs_x, abs_y = self._from_engine(ex, ey)
+
+            # Kiểm tra nằm trong bàn thật + ô trống
+            if not (0 <= abs_x < self.board_width and 0 <= abs_y < self.board_height):
+                log.warning(
+                    f"[KG] attempt={attempt}: map ra ngoài bàn thật "
+                    f"({abs_x},{abs_y}) origin=({self._origin_x},{self._origin_y})"
+                )
+                # Dịch khung về phía nước vừa đề xuất rồi thử lại
+                self._nudge_origin_toward(abs_x, abs_y)
+                continue
+
+            if (abs_x, abs_y) in occupied:
+                log.warning(
+                    f"[KG] attempt={attempt}: ô đã có quân ({abs_x},{abs_y}), "
+                    f"thử dịch khung"
+                )
+                self._nudge_origin_toward(abs_x, abs_y)
+                continue
+
+            log.info(
+                f"[KG] MOVE engine=({ex},{ey}) → abs=({abs_x},{abs_y}) "
+                f"origin=({self._origin_x},{self._origin_y}) "
+                f"window_stones={len(window_stones)}/{len(board_history)}"
+            )
+            return abs_x, abs_y
+
+        log.warning("[KG] Hết attempt, không có nước hợp lệ từ engine")
+        return None
+
+    def _nudge_origin_toward(self, tx: int, ty: int):
+        """Dịch origin để cố bao phủ điểm (tx, ty)."""
+        es = self.ENGINE_SIZE
+        max_oy = max(0, self.board_height - es)
+        max_ox = max(0, self.board_width - es)
+        # Căn giữa điểm mục tiêu
+        new_ox = max(0, min(tx - es // 2, max_ox))
+        new_oy = max(0, min(ty - es // 2, max_oy))
+        if (new_ox, new_oy) != (self._origin_x, self._origin_y):
+            log.info(
+                f"[KG] Nudge origin ({self._origin_x},{self._origin_y}) "
+                f"→ ({new_ox},{new_oy}) toward ({tx},{ty})"
+            )
+            self._origin_x, self._origin_y = new_ox, new_oy
+            self._region_dirty = True
+
+    def _read_engine_move(self) -> Optional[Tuple[int, int]]:
         deadline = time.monotonic() + self.timeout_turn + 3.0
         while time.monotonic() < deadline:
             line = self._read_line(timeout=0.8)
             if not line:
                 continue
-            if line.startswith(("MESSAGE", "ERROR", "DEBUG", "OK")):
+            up = line.upper()
+            if up.startswith(("MESSAGE", "ERROR", "DEBUG", "OK", "UNKNOWN")):
                 continue
             if "," in line:
                 parts = line.split(",")
@@ -451,50 +605,10 @@ class KataGomoEngine:
                         continue
         return None
 
-    def _get_move_gtp(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
-        self._drain_output()
-        self._gtp("clear_board")
-
-        # Replay lịch sử
-        for x, y, sym in board_history:
-            color = "B" if sym == 1 else "W"
-            # GTP gốc dưới-trái: A1 = (0, height-1)
-            col = chr(ord('A') + x)
-            if col >= 'I':  # GTP bỏ chữ I
-                col = chr(ord(col) + 1)
-            row = self.board_height - y
-            self._gtp(f"play {color} {col}{row}", timeout=2.0)
-
-        color = "B" if my_side == 1 else "W"
-        # time_settings main_time byo_yomi_time byo_yomi_stones
-        self._gtp(f"time_settings 0 {max(1, int(self.timeout_turn))} 1", timeout=2.0)
-
-        resp = self._gtp(f"genmove {color}", timeout=self.timeout_turn + 4.0)
-        if not resp or resp.lower() in ("pass", "resign", ""):
-            return None
-
-        # Parse "K10" hoặc "K10" (bỏ I)
-        resp = resp.strip().upper()
-        m = re.match(r"^([A-Z])(\d+)$", resp)
-        if not m:
-            return None
-        col_ch, row_s = m.group(1), m.group(2)
-        # Chuyển cột (bỏ qua I)
-        x = ord(col_ch) - ord('A')
-        if col_ch > 'I':
-            x -= 1
-        y = self.board_height - int(row_s)
-        if 0 <= x < self.board_width and 0 <= y < self.board_height:
-            return x, y
-        return None
-
     def _stop_unlocked(self):
         if self.proc:
             try:
-                if self._is_pbrain:
-                    self._send("END")
-                else:
-                    self._send("quit")
+                self._send("END")
             except Exception:
                 pass
             try:
@@ -830,34 +944,62 @@ class CaroBot:
         try:
             start = time.time()
             x, y = -1, -1
-            
+            history = list(self.board.history)
+
             if self.ag_available:
                 try:
-                    history = list(self.board.history)
-                    
+                    # Engine tự xử lý region window + retry nội bộ (tối đa 3 lần)
+                    # Không hard-reset / fallback ngay khi nước ngoài khung
                     move = await asyncio.get_event_loop().run_in_executor(
-                        None, 
+                        None,
                         lambda: self.ag.get_move(history, self.my_symbol)
                     )
-                    
+
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                        and self.board.get(*move) == EMPTY):
-                        x, y = move; self.ag_moves += 1
+                            and self.board.get(*move) == EMPTY):
+                        x, y = move
+                        self.ag_moves += 1
                     else:
+                        # Engine đã thử dịch khung nội bộ nhưng vẫn fail
+                        # → soft restart (RESTART) rồi thử 1 lần nữa, chưa fallback
                         self.ag_errors += 1
-                        log.warning(f"[KG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
-                        else:
-                            lx, ly = 7, 9
-                        x, y = self.board.get_empty_near(lx, ly)
-                        self.ag_fallback_count += 1
-                        self.ag.start_game(my_symbol=self.my_symbol)
+                        log.warning(
+                            f"[KG] Nước chưa hợp lệ sau region-retry: {move}. "
+                            f"Soft RESTART rồi thử lại 1 lần..."
+                        )
+                        try:
+                            self.ag.restart_game()
+                            move2 = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: self.ag.get_move(history, self.my_symbol)
+                            )
+                            if (move2 and 0 <= move2[0] < self.board.width
+                                    and 0 <= move2[1] < self.board.height
+                                    and self.board.get(*move2) == EMPTY):
+                                x, y = move2
+                                self.ag_moves += 1
+                                log.info(f"[KG] Retry sau RESTART OK: {move2}")
+                            else:
+                                raise RuntimeError(f"retry still invalid: {move2}")
+                        except Exception as e2:
+                            log.warning(f"[KG] Soft retry fail ({e2}) → fallback gần nước cuối")
+                            if history:
+                                lx, ly = history[-1][0], history[-1][1]
+                            else:
+                                lx, ly = 7, 9
+                            x, y = self.board.get_empty_near(lx, ly)
+                            self.ag_fallback_count += 1
                 except Exception as e:
-                    self.ag_errors += 1; log.warning(f"[KG] Error: {e}")
-                    try: self.ag.stop(); self.ag = None; self.ag_available = False
-                    except Exception: pass
-                    history = self.board.history
+                    self.ag_errors += 1
+                    log.warning(f"[KG] Error: {e}")
+                    # Chỉ kill engine khi exception nặng (crash process)
+                    try:
+                        if self.ag and (self.ag.proc is None or self.ag.proc.poll() is not None):
+                            self.ag.stop()
+                            self.ag = None
+                            self.ag_available = False
+                    except Exception:
+                        pass
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
@@ -865,13 +1007,12 @@ class CaroBot:
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
-                history = self.board.history
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
                 else:
                     lx, ly = 7, 9
                 x, y = self.board.get_empty_near(lx, ly)
-                
+
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
             log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [KG]")
@@ -1417,7 +1558,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO KATAGOMO - pbrain-katagomo_caro-15.exe v4.1")
+        log.info("BOT CARO KATAGOMO - pbrain-katagomo_caro-15.exe v4.2 (window 15x15)")
         log.info(f"{'='*50}")
         
         retry_count = 0
