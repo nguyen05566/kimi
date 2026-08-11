@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO KATAGOMO - FULL NAME + AVATAR v3.0                   ║
+║  BOT CARO KATAGOMO - FULL NAME + AVATAR v5.0 (FINAL)           ║
 ║  Engine: pbrain-katagomo_caro-15 (2026)                        ║
-║  FIX: Đồng bộ kích thước bàn cờ động (15 cột x 19 dòng)         ║
-║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
-║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
-║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
-║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
+║  FIX: Bounding Box 20x20 tránh crash tensor shape              ║
+║  FIX: Bức tường ô nhiễm chặn AI đánh ra ngoài biên             ║
+║  FIX: Ép AI chặn đòn ở dòng biên (4 mở ngoài rìa)              ║
+║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời  ║
+║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket  ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 import subprocess, sys, os, importlib, urllib.request, json, time, struct
@@ -37,7 +37,6 @@ for pkg in REQUIRED:
 import websockets, requests
 
 # ======================== SAFE IDENTITY CONFIG ========================
-# Đây là TÊN ĐẦY ĐỦ (FULL_NAME), không phải tên đăng nhập.
 ADJECTIVES = ["Pro", "Dark", "Light", "Shadow", "Ghost", "Fire", "Ice", "Thunder",
               "Silent", "Swift", "Crazy", "Lucky", "Mega", "Super", "Ultra", "Hyper",
               "Cyber", "Neo", "Tech", "Alpha", "Beta", "Zero", "Max", "King", "Queen"]
@@ -59,12 +58,12 @@ AG_VERSION = "2026"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/KATAGOMO26.zip"
 AG_RULE = 8  # Caro rule
 AG_TIMEOUT = 2000  # 2 giây
+ENGINE_BOARD_SIZE = 20  # Bounding Box vuông bao trùm server 15x19
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
     if binary_path.exists():
-        try:
-            binary_path.chmod(0o755)
+        try: binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
     log.info(f"[AG] Downloading Katagomo {AG_VERSION}...")
@@ -81,24 +80,12 @@ def auto_download_alphagomoku() -> Optional[str]:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
         
-        # Tìm chính xác engine pbrain-katagomo_caro-15 (có thể nằm trong thư mục con)
-        candidates = list(ENGINE_DIR.rglob("pbrain-katagomo_caro-15*"))
-        if candidates:
-            binary_path = candidates[0]
-            try:
-                binary_path.chmod(0o755)
-            except Exception: pass
-            return str(binary_path)
-            
-        # Fallback: Tìm bất kỳ file katagomo nào
         candidates = list(ENGINE_DIR.rglob("pbrain-katagomo*"))
         if candidates:
             binary_path = candidates[0]
-            try:
-                binary_path.chmod(0o755)
+            try: binary_path.chmod(0o755)
             except Exception: pass
             return str(binary_path)
-            
         return str(ENGINE_DIR)
     except Exception as e:
         log.error(f"[AG] Download failed: {e}")
@@ -106,13 +93,6 @@ def auto_download_alphagomoku() -> Optional[str]:
 
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Ưu tiên tìm file pbrain-katagomo_caro-15
-    for f in ENGINE_DIR.rglob("pbrain-katagomo_caro-15*"):
-        if f.is_file():
-            try: f.chmod(0o755)
-            except Exception: pass
-            return str(f)
-    # Fallback
     for f in ENGINE_DIR.rglob("pbrain-katagomo*"):
         if f.is_file():
             try: f.chmod(0o755)
@@ -124,10 +104,9 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=2000, board_size=15, rule=8):
+    def __init__(self, timeout_turn=2000, rule=8):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
-        self.board_size = board_size
         self.rule = rule
         self.proc = None
         self.lock = threading.Lock()
@@ -148,10 +127,8 @@ class AlphaGomokuEngine:
 
     def _close_selector(self):
         if self._selector:
-            try:
-                self._selector.close()
-            except Exception:
-                pass
+            try: self._selector.close()
+            except Exception: pass
             self._selector = None
 
     def _send(self, cmd: str):
@@ -163,8 +140,7 @@ class AlphaGomokuEngine:
                 pass
 
     def _read_line(self, timeout=10.0) -> str:
-        if not self.proc or self.proc.poll() is not None:
-            return ""
+        if not self.proc or self.proc.poll() is not None: return ""
         deadline = time.monotonic() + timeout
         while True:
             idx = self._buffer.find(b"\n")
@@ -173,8 +149,7 @@ class AlphaGomokuEngine:
                 del self._buffer[:idx + 1]
                 return line_bytes.decode("utf-8", errors="replace")
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return ""
+            if remaining <= 0: return ""
             try:
                 if self._selector:
                     ready = self._selector.select(timeout=min(remaining, 1.0))
@@ -185,31 +160,29 @@ class AlphaGomokuEngine:
                     sel.close()
                 if ready:
                     chunk = os.read(self.proc.stdout.fileno(), 4096)
-                    if not chunk:
-                        return ""
+                    if not chunk: return ""
                     self._buffer.extend(chunk)
             except Exception:
                 return ""
 
     def _drain_output(self):
-        while self._read_line(timeout=0.01):
-            pass
+        while self._read_line(timeout=0.01): pass
 
-    def start_game(self, my_symbol=1, width=15, height=19) -> bool:
+    def start_game(self, my_symbol=1) -> bool:
         with self.lock:
             self._synced = False
+            
             if self.proc and self.proc.poll() is None:
                 self._send("RESTART")
                 for _ in range(5):
-                    if self._read_line(timeout=0.5).upper() == "OK":
-                        break
-                # Gửi kích thước THỰC TẾ của bàn cờ (Fix lỗi biên 15x19)
-                self._send(f"rectangular_boardsize {width} {height}")
-                self._send("clear_board")
-                self._send("komi 0.5")
+                    if self._read_line(timeout=0.5).upper() == "OK": break
+                
+                # Bounding Box 20x20 chuẩn Piskvork
+                self._send(f"START {ENGINE_BOARD_SIZE}")
+                log.info(f"[AG] Khởi tạo Bounding Box {ENGINE_BOARD_SIZE}x{ENGINE_BOARD_SIZE}")
+                
                 for _ in range(5):
-                    if self._read_line(timeout=0.5).upper() == "OK":
-                        break
+                    if self._read_line(timeout=0.5).upper() == "OK": break
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
@@ -218,15 +191,10 @@ class AlphaGomokuEngine:
                 return True
 
             self._stop_unlocked()
-            if not self.binary:
-                return False
+            if not self.binary: return False
             try:
-                # Chạy qua Wine nếu là file .exe trên môi trường Linux
                 is_exe = self.binary.lower().endswith(".exe")
-                if is_exe:
-                    cmd = ["wine", self.binary]
-                else:
-                    cmd = [self.binary]
+                cmd = ["wine", self.binary] if is_exe else [self.binary]
                 self.proc = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
@@ -235,15 +203,12 @@ class AlphaGomokuEngine:
                 self._init_selector()
                 self.my_side = my_symbol
                 
-                # Gửi kích thước THỰC TẾ của bàn cờ (Fix lỗi biên 15x19)
-                self._send(f"rectangular_boardsize {width} {height}")
-                self._send("clear_board")
-                self._send("komi 0.5")
+                self._send(f"START {ENGINE_BOARD_SIZE}")
+                log.info(f"[AG] Khởi tạo Bounding Box {ENGINE_BOARD_SIZE}x{ENGINE_BOARD_SIZE}")
                 
                 for _ in range(10):
                     line = self._read_line(timeout=1.0)
-                    if line.upper() == "OK":
-                        break
+                    if line.upper() == "OK": break
                 self._send(f"INFO rule {self.rule}")
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send("INFO ponder 1")
@@ -256,27 +221,13 @@ class AlphaGomokuEngine:
                 self._initialized = False
                 return False
 
-    def restart_game(self) -> bool:
-        with self.lock:
-            if not self._initialized or not self.proc or self.proc.poll() is not None:
-                return False
-            self._send("RESTART")
-            for _ in range(5):
-                line = self._read_line(timeout=2.0)
-                if line.upper() == "OK":
-                    log.info("[AG] RESTART successful")
-                    return True
-            log.warning("[AG] RESTART did not return OK, assuming reset")
-            return True
-
-    def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
+    def get_move(self, board_history: list, my_side: int, server_width=15, server_height=19) -> Optional[Tuple[int, int]]:
         with self.lock:
             try:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
                 
                 self._drain_output()
-                
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {self.timeout_turn * 20}")
                 
@@ -287,25 +238,43 @@ class AlphaGomokuEngine:
                     self._send(f"TURN {last_x},{last_y}")
                 else:
                     self._send("BOARD")
+                    
+                    # 1. Gửi toàn bộ lịch sử trận đấu thật (nằm trong server_width x server_height)
                     for (x, y, sym) in board_history:
                         c = 1 if sym == self.my_side else 2
                         self._send(f"{x},{y},{c}")
+                        
+                    # 2. BỨC TƯỜNG Ô NHIỄM (Áo giáp tàng hình)
+                    # Gửi các ô nằm NGOÀI vùng Server (nhưng vẫn trong bàn ảo 20x20) 
+                    # dưới dạng quân của ĐỐI THỦ (mã số 2).
+                    # Ép AI không được đánh ra ngoài và buộc phải lo phòng thủ trong vùng server.
+                    opponent_code = 2 if self.my_side == 1 else 1
+                    for x in range(ENGINE_BOARD_SIZE):
+                        for y in range(ENGINE_BOARD_SIZE):
+                            if x >= server_width or y >= server_height:
+                                self._send(f"{x},{y},{opponent_code}")
+                                
                     self._send("DONE")
                 
                 deadline = time.monotonic() + (self.timeout_turn / 1000.0) + 3.0
                 while time.monotonic() < deadline:
                     rem_time = deadline - time.monotonic()
                     line = self._read_line(timeout=min(1.0, rem_time))
-                    if not line:
-                        continue
-                    if line.startswith(("MESSAGE", "ERROR", "DEBUG")):
-                        continue
+                    if not line: continue
+                    if line.startswith(("MESSAGE", "ERROR", "DEBUG")): continue
                     if "," in line:
                         parts = line.split(",")
                         if len(parts) == 2:
                             self._synced = True
                             self._expected_history_len = len(board_history) + 1
-                            return int(parts[0].strip()), int(parts[1].strip())
+                            ai_x = int(parts[0].strip())
+                            ai_y = int(parts[1].strip())
+                            
+                            if 0 <= ai_x < server_width and 0 <= ai_y < server_height:
+                                return ai_x, ai_y
+                            else:
+                                log.warning(f"[AG] AI cố đánh ra ngoài biên: {ai_x},{ai_y}. Fallback!")
+                                return None
                 return None
             except Exception as e:
                 log.warning(f"[AG] get_move error: {e}")
@@ -314,25 +283,18 @@ class AlphaGomokuEngine:
 
     def _stop_unlocked(self):
         if self.proc:
-            try:
-                self._send("END")
+            try: self._send("END")
+            except Exception: pass
+            try: self.proc.terminate(); self.proc.wait(3)
             except Exception:
-                pass
-            try:
-                self.proc.terminate()
-                self.proc.wait(3)
-            except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
+                try: self.proc.kill()
+                except Exception: pass
             self.proc = None
             self._initialized = False
         self._close_selector()
 
     def stop(self):
-        with self.lock:
-            self._stop_unlocked()
+        with self.lock: self._stop_unlocked()
 
 # ======================== CONSTANTS & CONFIG ========================
 WS_URL = "wss://gamevh.net/ws/gameServer"
@@ -537,20 +499,18 @@ class CaroBot:
     def init_ag(self):
         if self.ag is not None: return self.ag_available
         binary = detect_ag_binary()
-        if not binary:
-            binary = auto_download_alphagomoku()
+        if not binary: binary = auto_download_alphagomoku()
         if not binary:
             log.warning("[AG] No binary found!")
             self.ag_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, rule=AG_RULE)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, rule=AG_RULE)
             self.ag.binary = binary
-            # Truyền width và height thực tế vào engine
-            ok = self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
+            ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] Katagomo OK! Board={self.board.width}x{self.board.height}, Rule={AG_RULE}")
+                log.info(f"[AG] Katagomo OK! Rule={AG_RULE}")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
@@ -647,26 +607,22 @@ class CaroBot:
             if self.ag_available:
                 try:
                     history = list(self.board.history)
-                    
                     move = await asyncio.get_event_loop().run_in_executor(
                         None, 
-                        lambda: self.ag.get_move(history, self.my_symbol)
+                        lambda: self.ag.get_move(history, self.my_symbol, self.board.width, self.board.height)
                     )
                     
-                    if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                        and self.board.get(*move) == EMPTY):
-                        x, y = move; self.ag_moves += 1
+                    if move and self.board.get(*move) == EMPTY:
+                        x, y = move
+                        self.ag_moves += 1
                     else:
                         self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
-                        else:
-                            lx, ly = 7, 9
+                        log.warning(f"[AG] AI trả về nước không hợp lệ: {move}. Bot tự chọn ô thay thế.")
+                        if history: lx, ly = history[-1][0], history[-1][1]
+                        else: lx, ly = self.board.width // 2, self.board.height // 2
                         x, y = self.board.get_empty_near(lx, ly)
                         self.ag_fallback_count += 1
-                        # Truyền width và height thực tế vào engine khi reset
-                        self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
+                        
                 except Exception as e:
                     self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
                     try: self.ag.stop(); self.ag = None; self.ag_available = False
@@ -674,7 +630,7 @@ class CaroBot:
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
-                        lx, ly = 7, 9
+                        lx, ly = self.board.width // 2, self.board.height // 2
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
             else:
@@ -682,7 +638,7 @@ class CaroBot:
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
                 else:
-                    lx, ly = 7, 9
+                    lx, ly = self.board.width // 2, self.board.height // 2
                 x, y = self.board.get_empty_near(lx, ly)
                 
             elapsed = time.time() - start
@@ -825,7 +781,7 @@ class CaroBot:
                         self.ready = True; await self.send(self.make_ready())
                 else:
                     if self.ready:
-                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
+                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện. Hủy Sẵn sàng.")
                     self.ready = False
             elif not is_playing and self.slot < 0:
                 self.in_table = False; self.table_id = None
@@ -851,8 +807,8 @@ class CaroBot:
         if self.ag is None:
             self.init_ag()
         else:
-            # Truyền width và height thực tế vào engine khi bắt đầu ván mới
-            self.ag.start_game(my_symbol=self.my_symbol, width=self.board.width, height=self.board.height)
+            # Restart với bàn 20x20, bức tường ô nhiễm sẽ tự áp dụng qua get_move()
+            self.ag.start_game(my_symbol=self.my_symbol)
         
         if self.slot < 0:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
@@ -986,12 +942,10 @@ class CaroBot:
         return html_lib.unescape(m.group(2)) if m else ""
 
     def _read_profile_form(self, page_text: str, page_url: str):
-        """Đọc form hồ sơ và giữ nguyên mọi trường hiện có."""
         form_match = re.search(
             r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>',
             page_text)
-        if not form_match:
-            return None, None
+        if not form_match: return None, None
         form = form_match.group(0)
         open_tag = re.search(r'(?is)<form\b[^>]*>', form).group(0)
         action = urljoin(page_url, self._html_attr(open_tag, 'action'))
@@ -1008,8 +962,7 @@ class CaroBot:
 
         for match in re.finditer(r'(?is)<select\b([^>]*)>(.*?)</select>', form):
             name = self._html_attr('<select ' + match.group(1) + '>', 'name')
-            if not name:
-                continue
+            if not name: continue
             selected = re.search(
                 r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>',
                 match.group(2))
@@ -1023,7 +976,6 @@ class CaroBot:
         return action, data
 
     def update_random_full_name(self, session: requests.Session) -> Dict:
-        """Đổi FULL_NAME mà không chạm tới endpoint đổi tên đăng nhập."""
         edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
         new_name = generate_random_full_name()
         page = session.get(edit_url, timeout=15, allow_redirects=True)
@@ -1062,8 +1014,7 @@ class CaroBot:
         m = re.search(
             r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>',
             page_text)
-        if not m:
-            return None
+        if not m: return None
         digits = re.sub(r'[^0-9-]', '', html_lib.unescape(re.sub(r'<[^>]+>', '', m.group(1))))
         return int(digits) if digits and digits != '-' else None
 
@@ -1084,8 +1035,7 @@ class CaroBot:
             page = session.get(url, timeout=15)
             for match in pattern.finditer(page.text):
                 avatar_id = int(match.group(2))
-                if avatar_id in seen:
-                    continue
+                if avatar_id in seen: continue
                 seen.add(avatar_id)
                 cost = int(re.sub(r'[^0-9]', '', match.group(6)) or '0')
                 catalog.append({
@@ -1097,7 +1047,6 @@ class CaroBot:
         return catalog
 
     def update_random_avatar(self, session: requests.Session) -> Dict:
-        """Chọn avatar ngẫu nhiên từ catalog sống; có thể phát sinh phí xu."""
         profile_url = 'https://gamevh.net/com/ftl/game/profile/player_profile.jsp'
         before_page = session.get(profile_url, timeout=15)
         old_avatar = self._extract_profile_avatar(before_page.text)
@@ -1234,7 +1183,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO KATAGOMO - FULL_NAME + AVATAR v3.0")
+        log.info("BOT CARO KATAGOMO - FINAL BUILD v5.0")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -1258,8 +1207,7 @@ class CaroBot:
                 retry_count += 1
                 retry_delay = min(30 * (2 ** (retry_count - 1)), 300)
                 remaining = RUNTIME - (time.time() - self.start_time)
-                if remaining <= 0:
-                    break
+                if remaining <= 0: break
                 retry_delay = min(retry_delay, remaining)
                 log.warning(f'[BOT] Login thất bại; thử lại sau {retry_delay:.0f}s')
                 await asyncio.sleep(retry_delay)
