@@ -712,7 +712,7 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
               float(os.environ.get("CARO_RUNTIME_HOURS", "5.9")) * 3600)
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
-BOT_BET_XU = 1000
+BOT_BET_XU = 10000
 BOT_MATCH_DURATION = '1800'  # 30 phút (giây) trên server
 BOT_TURN_DURATION = '60'     # 60s/nước trên server
 EMPTY = -1
