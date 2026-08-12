@@ -177,8 +177,18 @@ class AlphaGomokuEngine:
                 return ""
 
     def _drain_output(self):
-        while self._read_line(timeout=0.01):
-            pass
+        """Drain engine output thoroughly — quan trọng để tránh ponder output nhiễm buffer."""
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            line = self._read_line(timeout=0.05)
+            if not line:
+                # Không còn dòng nào sẵn trong buffer → thoát
+                break
+            # Log ponder/debug output thay vì bỏ im
+            if line.startswith(('MESSAGE', 'DEBUG', 'ERROR')):
+                log.debug(f'[AG] drain: {line}')
+            else:
+                log.warning(f'[AG] drain unexpected: {line}')
 
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
@@ -239,9 +249,10 @@ class AlphaGomokuEngine:
             for _ in range(5):
                 line = self._read_line(timeout=2.0)
                 if line.upper() == "OK":
-                    log.info("[AG] RESTART successful")
-                    return True
-            log.warning("[AG] RESTART did not return OK, assuming reset")
+                    break
+            self._send(f"INFO timeout_turn {self.timeout_turn}")
+            self._send("INFO ponder 1")
+            log.info("[AG] RESTART + ponder OK")
             return True
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
@@ -250,6 +261,11 @@ class AlphaGomokuEngine:
                 if not self._initialized or not self.proc or self.proc.poll() is not None:
                     return None
                 
+                self._drain_output()
+                
+                # Gửi STOP để hủy ponder đang chạy (nếu có) trước khi gửi TURN/BOARD
+                self._send("STOP")
+                time.sleep(0.05)
                 self._drain_output()
                 
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
@@ -268,6 +284,7 @@ class AlphaGomokuEngine:
                     self._send("DONE")
                 
                 deadline = time.monotonic() + (self.timeout_turn / 1000.0) + 3.0
+                move_count = 0
                 while time.monotonic() < deadline:
                     rem_time = deadline - time.monotonic()
                     line = self._read_line(timeout=min(1.0, rem_time))
@@ -278,9 +295,21 @@ class AlphaGomokuEngine:
                     if "," in line:
                         parts = line.split(",")
                         if len(parts) == 2:
+                            try:
+                                mx, my = int(parts[0].strip()), int(parts[1].strip())
+                            except ValueError:
+                                continue
+                            # Kiểm tra nước đi hợp lệ: phải trong bàn
+                            if not (0 <= mx < self.board_size and 0 <= my < self.board_size):
+                                log.warning(f"[AG] Bỏ qua nước ngoài bàn: {mx},{my}")
+                                continue
+                            move_count += 1
+                            if move_count > 1:
+                                log.warning(f"[AG] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
                             self._synced = True
                             self._expected_history_len = len(board_history) + 1
-                            return int(parts[0].strip()), int(parts[1].strip())
+                            return mx, my
+                log.warning("[AG] Timeout — engine không trả kết quả")
                 return None
             except Exception as e:
                 log.warning(f"[AG] get_move error: {e}")
@@ -634,6 +663,11 @@ class CaroBot:
                         lambda: self.ag.get_move(history, self.my_symbol)
                     )
                     
+                    # Kiểm tra ván còn đang chơi không (GAMEOVER có thể đến trong lúc engine tính)
+                    if not self.is_playing or not self.running:
+                        log.info("[BOT] Ván đã kết thúc trong lúc engine tính, bỏ qua nước đi")
+                        return  # thoát sớm, _moving sẽ được set False bởi finally
+                    
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
                         and self.board.get(*move) == EMPTY):
                         x, y = move; self.ag_moves += 1
@@ -755,6 +789,10 @@ class CaroBot:
             self._joining_table = False
 
     async def handle_table(self, r: BinaryReader):
+        # Guard: KHÔNG reload board khi engine đang tính — tránh xung đột history
+        if self._moving:
+            log.info("[TABLE] Engine đang tính, bỏ qua board reload")
+            return
         try:
             first_byte = r.i8()
             if first_byte != 0:
@@ -845,6 +883,9 @@ class CaroBot:
                 self.pending_move = True; await asyncio.sleep(1.5); await self.do_move()
 
     async def handle_move(self, r: BinaryReader):
+        # Guard: bỏ qua MOVE khi engine đang tính — board sẽ được reload sau
+        if self._moving:
+            return
         pos = r.i16(); symbol = r.i8()
         x, y = self.board.pos_to_xy(pos)
         current = self.board.get(x, y)
@@ -1286,3 +1327,4 @@ async def _run_bot():
 
 if __name__ == "__main__": main()
 elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
+
