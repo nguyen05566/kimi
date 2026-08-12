@@ -290,23 +290,20 @@ class AlphaGomokuEngine:
                         continue
                     if line.startswith(("MESSAGE", "ERROR", "DEBUG")):
                         continue
-                    if "," in line:
-                        parts = line.split(",")
-                        if len(parts) == 2:
-                            try:
-                                mx, my = int(parts[0].strip()), int(parts[1].strip())
-                            except ValueError:
-                                continue
-                            # Kiểm tra nước đi hợp lệ: phải trong bàn
-                            if not (0 <= mx < self.board_width and 0 <= my < self.board_height):
-                                log.warning(f"[AG] Bỏ qua nước ngoài bàn: {mx},{my}")
-                                continue
-                            move_count += 1
-                            if move_count > 1:
-                                log.warning(f"[AG] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
-                            self._synced = True
-                            self._expected_history_len = len(board_history) + 1
-                            return mx, my
+                    # Regex lọc cực chặt: chỉ chấp nhận dòng chứa duy nhất "X,Y" (bỏ qua rác "eval X,Y" hay "X,Y score")
+                    match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
+                    if match:
+                        mx, my = int(match.group(1)), int(match.group(2))
+                        # Kiểm tra nước đi hợp lệ: phải trong bàn
+                        if not (0 <= mx < self.board_width and 0 <= my < self.board_height):
+                            log.warning(f"[AG] Bỏ qua nước ngoài bàn: {mx},{my}")
+                            continue
+                        move_count += 1
+                        if move_count > 1:
+                            log.warning(f"[AG] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
+                        self._synced = True
+                        self._expected_history_len = len(board_history) + 1
+                        return mx, my
                 log.warning("[AG] Timeout — engine không trả kết quả")
                 return None
             except Exception as e:
