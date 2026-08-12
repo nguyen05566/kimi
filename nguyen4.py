@@ -103,10 +103,9 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=3000, board_size=15, timeout_match=1800000):
+    def __init__(self, timeout_turn=3000, board_size=15):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
-        self.timeout_match = timeout_match
         self.board_size = board_size
         self.proc = None
         self.lock = threading.Lock()
@@ -187,7 +186,6 @@ class AlphaGomokuEngine:
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
-                self._send(f"INFO timeout_match {self.timeout_match}")
                 self._send("INFO ponder 1")
                 self.my_side = my_symbol
                 self._initialized = True
@@ -216,7 +214,6 @@ class AlphaGomokuEngine:
                     if line.upper() == "OK":
                         break
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
-                self._send(f"INFO timeout_match {self.timeout_match}")
                 self._send("INFO ponder 1")
                 time.sleep(0.2)
                 self._drain_output()
@@ -522,7 +519,7 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, timeout_match=AG_MATCH_TIMEOUT)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
