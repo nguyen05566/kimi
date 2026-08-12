@@ -8,8 +8,6 @@ on:
         required: false
         default: '5.9'
         type: string
-  schedule:
-    - cron: '0 */6 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-gamevh-account
@@ -56,12 +54,3 @@ jobs:
             echo "=== $(date) nguyen4.py finished, restarting in 10s ==="
             sleep 10
           done
-      - name: Auto-restart workflow (khi hết phiên tự chạy tiếp)
-        if: always()
-        run: |
-          echo "Job finished at $(date), triggering next run..."
-          sleep 5
-          gh workflow run "$(basename ${{ github.workflow }})" --ref ${{ github.ref_name }} || echo "gh run failed, will rely on cron"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
