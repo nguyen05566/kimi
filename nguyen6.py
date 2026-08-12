@@ -662,13 +662,10 @@ class AlphaGomokuEngine:
                 if up.startswith("ERROR"):
                     log.warning(f"[AG] engine ERROR: {line}")
                 continue
-            if "," in line:
-                parts = line.split(",")
-                if len(parts) == 2:
-                    try:
-                        return int(parts[0].strip()), int(parts[1].strip())
-                    except ValueError:
-                        continue
+            # Regex lọc cực chặt: chỉ chấp nhận dòng chứa duy nhất "X,Y" (bỏ qua rác "eval X,Y" hay "X,Y score")
+            match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
+            if match:
+                return int(match.group(1)), int(match.group(2))
         return None
 
     def _stop_unlocked(self):
