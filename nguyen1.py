@@ -30,8 +30,15 @@ for pkg in REQUIRED:
         importlib.import_module(pkg)
     except ImportError:
         print(f"[SETUP] Installing {pkg}...")
-        subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL)
-        importlib.import_module(pkg)
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL, check=True)
+            importlib.import_module(pkg)
+        except Exception:
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q"], stderr=subprocess.DEVNULL, check=True)
+                importlib.import_module(pkg)
+            except Exception as e:
+                print(f"[SETUP] Failed to install {pkg}: {e}")
 
 import websockets, requests
 
@@ -366,7 +373,7 @@ class BinaryReader:
         if self.pos + 8 > len(self.data): return 0
         hi = struct.unpack_from('>i', self.data, self.pos)[0]
         lo = struct.unpack_from('>I', self.data, self.pos + 4)[0]
-        self.pos += 8; return (hi << 32) + lo
+        self.pos += 8; return (hi << 32) | lo
     def read_ascii(self) -> str:
         if self.pos >= len(self.data): return ""
         n = self.u8()
@@ -893,8 +900,11 @@ class CaroBot:
     async def _delay_ready(self, delay: float):
         await asyncio.sleep(delay)
         if not self.is_playing and self.in_table:
-            # Sẽ gửi yêu cầu bàn cờ để kiểm tra và cập nhật ready đồng bộ thay vì ép buộc gửi ready
             await self.send(self.make_get_table())
+            # Sau khi cập nhật trạng thái bàn, gửi SET_READY để sẵn sàng ván mới
+            if not self.is_playing and self.in_table:
+                self.ready = True
+                await self.send(self.make_ready())
 
     async def handle_player_enter(self, r: BinaryReader):
         place_level = r.i8()
