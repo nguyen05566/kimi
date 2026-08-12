@@ -57,7 +57,8 @@ AG_BINARY = "pbrain-embryo26_c5.exe"
 AG_VERSION = "2026"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
 # AG_RULE bỏ - pbrain-embryo26_c5.exe đã viết riêng cho caro c5, không cần INFO rule
-AG_TIMEOUT = 2000  # 2 giây
+AG_TIMEOUT = 3000  # 3 giây
+AG_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION='1800'
 
 def auto_download_alphagomoku() -> Optional[str]:
     binary_path = ENGINE_DIR / AG_BINARY
@@ -102,9 +103,10 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=2000, board_size=15):
+    def __init__(self, timeout_turn=3000, board_size=15, timeout_match=1800000):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
+        self.timeout_match = timeout_match
         self.board_size = board_size
         self.proc = None
         self.lock = threading.Lock()
@@ -185,6 +187,7 @@ class AlphaGomokuEngine:
                     if self._read_line(timeout=0.5).upper() == "OK":
                         break
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
+                self._send(f"INFO timeout_match {self.timeout_match}")
                 self._send("INFO ponder 1")
                 self.my_side = my_symbol
                 self._initialized = True
@@ -213,6 +216,7 @@ class AlphaGomokuEngine:
                     if line.upper() == "OK":
                         break
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
+                self._send(f"INFO timeout_match {self.timeout_match}")
                 self._send("INFO ponder 1")
                 time.sleep(0.2)
                 self._drain_output()
@@ -322,7 +326,7 @@ RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
 AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
 IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
 BOT_BET_XU = 1000
-BOT_MATCH_DURATION = '0'
+BOT_MATCH_DURATION = '1800'
 BOT_TURN_DURATION = '60'
 EMPTY = -1
 CIRCLE = 0
@@ -518,7 +522,7 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15, timeout_match=AG_MATCH_TIMEOUT)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
