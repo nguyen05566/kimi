@@ -253,7 +253,7 @@ class AlphaGomokuEngine:
                 self._drain_output()
                 
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
-                self._send(f"INFO time_left {self.timeout_turn * 20}")
+                self._send(f"INFO time_left {AG_MATCH_TIMEOUT}")
                 
                 can_use_turn = getattr(self, "_synced", False) and len(board_history) == getattr(self, "_expected_history_len", -1) + 1
                 
