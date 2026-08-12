@@ -110,10 +110,10 @@ def detect_ag_binary() -> Optional[str]:
 
 # ======================== ENGINE WRAPPER ========================
 class AlphaGomokuEngine:
-    def __init__(self, timeout_turn=3000, board_size=15):
+    def __init__(self, timeout_turn=3000, board_width=15, board_height=19):
         self.binary = detect_ag_binary()
         self.timeout_turn = timeout_turn
-        self.board_size = board_size
+        self.board_width = board_width; self.board_height = board_height
         self.proc = None
         self.lock = threading.Lock()
         self._buffer = bytearray()
@@ -263,10 +263,7 @@ class AlphaGomokuEngine:
                 
                 self._drain_output()
                 
-                # Gửi STOP để hủy ponder đang chạy (nếu có) trước khi gửi TURN/BOARD
-                self._send("STOP")
-                time.sleep(0.05)
-                self._drain_output()
+                # (Không gửi STOP — Embryo không hỗ trợ, trả UNKNOWN STOP)
                 
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
                 self._send(f"INFO time_left {AG_MATCH_TIMEOUT}")
@@ -300,7 +297,7 @@ class AlphaGomokuEngine:
                             except ValueError:
                                 continue
                             # Kiểm tra nước đi hợp lệ: phải trong bàn
-                            if not (0 <= mx < self.board_size and 0 <= my < self.board_size):
+                            if not (0 <= mx < self.board_width and 0 <= my < self.board_height):
                                 log.warning(f"[AG] Bỏ qua nước ngoài bàn: {mx},{my}")
                                 continue
                             move_count += 1
@@ -555,7 +552,7 @@ class CaroBot:
             self.ag_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_size=15)
+            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_width=15, board_height=19)
             self.ag.binary = binary
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
