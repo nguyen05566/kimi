@@ -924,6 +924,22 @@ class CaroBot:
             self.ag_available = False
             return False
 
+    def _hard_reset_engine(self, reason: str = ""):
+        """
+        Kill hẳn process wine + xóa tham chiếu, để lượt sau init_ag() tạo lại
+        process mới hoàn toàn sạch. Dùng khi fallback xảy ra để tránh tái dùng
+        process hỏng/treo ngầm dẫn tới fallback lặp vô hạn.
+        """
+        try:
+            if self.ag is not None:
+                self.ag.stop()
+        except Exception as e:
+            log.warning(f"[AG] _hard_reset_engine stop error: {e}")
+        finally:
+            self.ag = None
+            self.ag_available = False
+        log.warning(f"[AG] HARD-RESET engine (reason={reason}) → lượt sau sẽ init_ag() lại")
+
     @property
     def running(self) -> bool: return self._running
 
@@ -1052,23 +1068,19 @@ class CaroBot:
                                 lx, ly = 7, 9
                             x, y = self.board.get_empty_near(lx, ly)
                             self.ag_fallback_count += 1
+                            # HARD-RESET: fallback → kill engine để lượt sau tạo process mới sạch
+                            self._hard_reset_engine("soft-retry fail")
                 except Exception as e:
                     self.ag_errors += 1
                     log.warning(f"[AG] Error: {e}")
-                    # Chỉ kill engine khi exception nặng (crash process)
-                    try:
-                        if self.ag and (self.ag.proc is None or self.ag.proc.poll() is not None):
-                            self.ag.stop()
-                            self.ag = None
-                            self.ag_available = False
-                    except Exception:
-                        pass
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
                         lx, ly = 7, 9
                     x, y = self.board.get_empty_near(lx, ly)
                     self.ag_fallback_count += 1
+                    # HARD-RESET: bất kỳ lỗi nào (kể cả treo ngầm) → kill engine, tái tạo sạch
+                    self._hard_reset_engine("exception")
             else:
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
