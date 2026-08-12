@@ -68,6 +68,7 @@ AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
 AG_RULE = 8
 AG_TIMEOUT = 4000           # ms / nước (4s)
 AG_MATCH_TIMEOUT = 1800000  # ms / ván = 30 phút (khớp BOT_MATCH_DURATION)
+AG_MOVE_TIMEOUT = 12.0      # giây – timeout cứng cho toàn bộ khâu tính nước
 
 # Alias giữ tương thích tên cũ trong file
 KG_BINARY_PRIMARY = AG_BINARY_PRIMARY
@@ -888,6 +889,8 @@ class CaroBot:
         self.ag = None; self.ag_available = False
         self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
         self._moving = False; self._last_move_xy = None
+        self._ag_reinit_attempts = 0
+        self._ag_reinit_cooldown_until = 0.0
         
         self.table_id = None
         self.player_slot_by_id = {}
@@ -939,6 +942,34 @@ class CaroBot:
             self.ag = None
             self.ag_available = False
         log.warning(f"[AG] HARD-RESET engine (reason={reason}) → lượt sau sẽ init_ag() lại")
+
+    def _try_reinit_ag(self) -> bool:
+        """
+        Tái khởi tạo engine NGAY TRONG VÁN khi ag_available == False.
+        Có giới hạn số lần thử (MAX_REINIT) và cooldown giữa các lần để tránh
+        bão restart khi wine chưa kịp sẵn sàng.
+        """
+        MAX_REINIT = 3
+        COOLDOWN = 15.0  # giây
+        now = time.time()
+        if now < self._ag_reinit_cooldown_until:
+            return False
+        if self._ag_reinit_attempts >= MAX_REINIT:
+            log.warning(
+                f"[AG] Đã thử reinit {self._ag_reinit_attempts}x, tạm ngưng."
+                f" Sẽ thử lại ở trận sau.")
+            return False
+        self._ag_reinit_attempts += 1
+        self._ag_reinit_cooldown_until = now + COOLDOWN
+        log.warning(
+            f"[AG] Thử tái khởi tạo engine ngay trong ván "
+            f"(lần {self._ag_reinit_attempts}/{MAX_REINIT})...")
+        self._hard_reset_engine("reinit-mid-match")
+        ok = self.init_ag()
+        if ok:
+            log.info("[AG] Engine đã phục hồi ngay trong ván")
+            self._ag_reinit_attempts = 0
+        return ok
 
     @property
     def running(self) -> bool: return self._running
@@ -1025,13 +1056,19 @@ class CaroBot:
             x, y = -1, -1
             history = list(self.board.history)
 
+            # Nếu engine đang tắt, thử khôi phục ngay trong ván trước khi fallback
+            if not self.ag_available:
+                self._try_reinit_ag()
+
             if self.ag_available:
                 try:
-                    # Engine tự xử lý region window + retry nội bộ (tối đa 3 lần)
-                    # Không hard-reset / fallback ngay khi nước ngoài khung
-                    move = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: self.ag.get_move(history, self.my_symbol)
+                    # HARD TIMEOUT: nếu engine/wine treo, không để bot đứng hình
+                    move = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: self.ag.get_move(history, self.my_symbol)
+                        ),
+                        timeout=AG_MOVE_TIMEOUT
                     )
 
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
@@ -1039,8 +1076,6 @@ class CaroBot:
                         x, y = move
                         self.ag_moves += 1
                     else:
-                        # Engine đã thử dịch khung nội bộ nhưng vẫn fail
-                        # → soft restart (RESTART) rồi thử 1 lần nữa, chưa fallback
                         self.ag_errors += 1
                         log.warning(
                             f"[AG] Nước chưa hợp lệ sau region-retry: {move}. "
@@ -1048,9 +1083,12 @@ class CaroBot:
                         )
                         try:
                             self.ag.restart_game()
-                            move2 = await asyncio.get_event_loop().run_in_executor(
-                                None,
-                                lambda: self.ag.get_move(history, self.my_symbol)
+                            move2 = await asyncio.wait_for(
+                                asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: self.ag.get_move(history, self.my_symbol)
+                                ),
+                                timeout=AG_MOVE_TIMEOUT
                             )
                             if (move2 and 0 <= move2[0] < self.board.width
                                     and 0 <= move2[1] < self.board.height
@@ -1068,8 +1106,21 @@ class CaroBot:
                                 lx, ly = 7, 9
                             x, y = self.board.get_empty_near(lx, ly)
                             self.ag_fallback_count += 1
-                            # HARD-RESET: fallback → kill engine để lượt sau tạo process mới sạch
+                            # HARD-RESET: fallback → kill engine; thử phục hồi ngay trong ván
                             self._hard_reset_engine("soft-retry fail")
+                            self._try_reinit_ag()
+                except asyncio.TimeoutError:
+                    # Wine/engine treo -> buộc kill, thử phục hồi ngay trong ván
+                    self.ag_errors += 1
+                    log.warning(f"[AG] TIMEOUT nước >{AG_MOVE_TIMEOUT}s → engine treo, reset")
+                    self._hard_reset_engine("timeout")
+                    self._try_reinit_ag()
+                    if history:
+                        lx, ly = history[-1][0], history[-1][1]
+                    else:
+                        lx, ly = 7, 9
+                    x, y = self.board.get_empty_near(lx, ly)
+                    self.ag_fallback_count += 1
                 except Exception as e:
                     self.ag_errors += 1
                     log.warning(f"[AG] Error: {e}")
@@ -1081,6 +1132,7 @@ class CaroBot:
                     self.ag_fallback_count += 1
                     # HARD-RESET: bất kỳ lỗi nào (kể cả treo ngầm) → kill engine, tái tạo sạch
                     self._hard_reset_engine("exception")
+                    self._try_reinit_ag()
             else:
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
@@ -1241,6 +1293,9 @@ class CaroBot:
         self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
         self._moving = False; self._last_move_xy = None
         self.opponent_gone_at = None
+        # Reset bộ đếm reinit cho mỗi trận mới
+        self._ag_reinit_attempts = 0
+        self._ag_reinit_cooldown_until = 0.0
         
         player_count = r.u8()
         for i in range(player_count):
