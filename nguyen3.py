@@ -60,10 +60,10 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo26_c5.exe"
+AG_BINARY = "pbrain-embryo23_c5.exe"
 AG_VERSION = "2023"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-# AG_RULE bỏ - pbrain-embryo26_c5.exe đã viết riêng cho caro c5, không cần INFO rule
+AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO23.zip"
+# AG_RULE bỏ - pbrain-embryo23_c5.exe đã viết riêng cho caro c5, không cần INFO rule
 AG_TIMEOUT = 3000  # 3 giây
 AG_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION='1800'
 
@@ -78,7 +78,7 @@ def auto_download_alphagomoku() -> Optional[str]:
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/embryo26.zip")
+        archive = Path("/tmp/embryo23.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -98,13 +98,13 @@ def auto_download_alphagomoku() -> Optional[str]:
 def detect_ag_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     # Embryo 2025: Windows exe chạy qua wine
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
+    for f in ENGINE_DIR.glob("pbrain-embryo23_c5.exe"):
         try: f.chmod(0o644)
         except Exception: pass
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
+    for f in ENGINE_DIR.glob("pbrain-embryo23_c5*"):
         return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
+    for f in ENGINE_DIR.glob("pbrain-embryo23*.exe"):
         return str(f)
     return None
 
@@ -560,7 +560,7 @@ class CaroBot:
             ok = self.ag.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.ag_available = True
-                log.info(f"[AG] Embryo v{AG_VERSION} OK! (pbrain-embryo26_c5.exe - caro c5)")
+                log.info(f"[AG] Embryo v{AG_VERSION} OK! (pbrain-embryo23_c5.exe - caro c5)")
             else:
                 self.ag_available = False
                 log.warning("[AG] Start failed!")
