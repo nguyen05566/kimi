@@ -61,7 +61,7 @@ except NameError:
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 AG_BINARY = "pbrain-embryo26_c5.exe"
-AG_VERSION = "2026"
+AG_VERSION = "2023"
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
 # AG_RULE bỏ - pbrain-embryo26_c5.exe đã viết riêng cho caro c5, không cần INFO rule
 AG_TIMEOUT = 3000  # 3 giây
