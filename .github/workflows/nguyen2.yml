@@ -32,14 +32,21 @@ jobs:
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wine wine32 wine64 xvfb 2>/dev/null || echo "Wine partial install, continuing..."
-          wine --version || echo "Wine not found but continuing"
+          sudo apt-get install -y -qq wine wine32 wine64 xvfb
+          wine --version
+
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
 
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
       - name: Run Caro Bot (loop until timeout)
         env:
+          DISPLAY: ":99"
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
         run: |
           echo "Starting nguyen2.py loop - will auto-restart on exit until job timeout (6h)"
