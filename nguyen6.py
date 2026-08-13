@@ -3,7 +3,7 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║  BOT CARO ALPHAGOMOKU (MK) - FULL NAME + AVATAR v5.0             ║
 ║  Engine: AlphaGomoku MK 2026 – #1 Caro Gomocup                   ║
-║  Luật: INFO rule 9 (caro (rule 8))                            ║
+║  Luật: INFO rule 8 = CARO6                            ║
 ║  Bàn server 15x19 → khung 15x15 region-first                     ║
 ║  Pipeline: đọc bàn → region → RESTART → BOARD map → nhận nước    ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -64,7 +64,7 @@ AG_BINARY_NAMES = [
 ]
 # Gomocup 2026 – #1 Caro
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
-# INFO rule 8 = caro; timeout 4s/nước; match server 1800s
+# INFO rule 8 = CARO6 (caro); rule 9 = CARO5; timeout 4s/nước; match server 1800s
 AG_RULE = 8
 AG_TIMEOUT = 4000           # ms / nước (4s)
 AG_MATCH_TIMEOUT = 1800000  # ms / ván = 30 phút (khớp BOT_MATCH_DURATION)
@@ -192,7 +192,7 @@ class AlphaGomokuEngine:
       5. Nhận nước → map ngược bàn thật
       6. Lỗi → thử origin khác + RESTART (không fallback liền)
 
-    Luật: INFO rule 9 = caro (rule 8) (chuẩn Gomocup Caro).
+    Luật: INFO rule 8 = CARO6 (chuẩn Gomocup Caro; rule 9 = CARO5).
     """
     ENGINE_SIZE = 15
 
@@ -225,7 +225,7 @@ class AlphaGomokuEngine:
         self._committed_ox = None
         self._committed_oy = None
         self._engine_has_board = False
-        self.rule = AG_RULE  # 8 = caro
+        self.rule = AG_RULE  # 8 = CARO6 (rule 9 = CARO5)
 
     def _send_time_infos(self):
         """Gửi timeout_turn / timeout_match / time_left cho engine."""
@@ -498,7 +498,7 @@ class AlphaGomokuEngine:
                 self._match_start_mono = time.monotonic()
                 self._send_time_infos()
                 self._send("INFO ponder 1")
-                # rule 9 = exactly-5 (1) + caro (8) – chuẩn Gomocup Caro
+                # rule 8 = CARO6, rule 9 = CARO5 – chuẩn Gomocup Caro
                 self._send(f"INFO rule {self.rule}")
                 time.sleep(0.2)
                 self._drain_output()
@@ -1685,7 +1685,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT CARO ALPHAGOMOKU (MK) v5.0 – rule 9 Caro, region-first")
+        log.info("BOT CARO ALPHAGOMOKU (MK) v5.0 – rule 8 = CARO6, region-first")
         log.info(f"{'='*50}")
         
         retry_count = 0
@@ -1739,7 +1739,7 @@ def main():
     bin_path = auto_download_alphagomoku()
     if bin_path:
         print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
-        print(f"[SETUP] Rule={AG_RULE} (caro (rule 8)), board window 15x15 on 15x19")
+        print(f"[SETUP] Rule={AG_RULE} (CARO6), board window 15x15 on 15x19")
     else:
         print("[SETUP] Không tìm thấy AlphaGomoku binary – bot sẽ chơi gần trung tâm")
         print(f"[SETUP] Tải: {AG_DOWNLOAD_URL}")
