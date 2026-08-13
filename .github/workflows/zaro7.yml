@@ -1,0 +1,49 @@
+name: zaro7
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.9'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-gamevh-account
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Wine (for AlphaGomoku Windows exe)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wine wine32 wine64 xvfb
+          wine --version
+
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Install Python dependencies
+        run: pip install websockets requests --break-system-packages
+
+      - name: Run Caro Bot
+        env:
+          DISPLAY: ":99"
+          CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
+        run: python3 zaro7.py
