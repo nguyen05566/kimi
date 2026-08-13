@@ -7,9 +7,27 @@ REGISTER STANDALONE - Đăng ký tài khoản GameVH qua WebSocket (như APK)
 Đã test: tạo thành công test91874 / Pass661343! (clientId 18490563) với captcha t8fd
 Cập nhật 2025-08-10: Thêm chế độ giải captcha tự động qua ddddocr (chính xác ~95%)
 """
-import asyncio, websockets, struct, os, random, sys, pathlib, time
+import asyncio, websockets, struct, os, random, sys, pathlib, time, re
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
+
+
+def split_name_number(name):
+    """Tách tên đầy đủ có số (vd 'nguyen7') -> (prefix='nguyen', num=7)."""
+    m = re.search(r'^(.*?)(\d+)$', name)
+    if m:
+        return m.group(1), int(m.group(2))
+    return name, None
+
+
+def build_usernames(name, count=10):
+    """Từ 1 tên (vd 'nguyen7') sinh danh sách count tên tăng dần: nguyen7..nguyen16."""
+    prefix, num = split_name_number(name)
+    if num is None:
+        return [f"{prefix}{i}" for i in range(1, count + 1)]
+    return [f"{prefix}{num + i}" for i in range(count)]
+
+
 
 class Writer:
     def __init__(self): self.parts=[]
@@ -29,7 +47,7 @@ def gen_user():
     return f"{prefix}{random.randint(10000,99999)}"
 
 def gen_pass():
-    return f"Pass{random.randint(100000,999999)}!"
+    return "nhat123456"  # mật khẩu cố định
 
 def solve_captcha_auto(image_path):
     """Thử giải captcha tự động: ddddocr -> pytesseract -> None"""
@@ -113,107 +131,113 @@ async def register_once(ws, user, pwd, captcha, clientId, provider="PS_VH", imei
     print(f"[REGISTER] lạ {raw.hex()[:500]}")
     return False, "unknown"
 
-async def main():
-    user = sys.argv[1] if len(sys.argv)>1 else os.environ.get("REGISTER_USER") or gen_user()
-    pwd = sys.argv[2] if len(sys.argv)>2 else os.environ.get("REGISTER_PASS") or gen_pass()
-    captcha_arg = sys.argv[3] if len(sys.argv)>3 else os.environ.get("REGISTER_CAPTCHA")
-
-    print(f"=== REGISTER STANDALONE (auto captcha) ===")
-    print(f"User: {user}  Pass: {pwd}")
-
-    # Nếu đã có captcha + clientId từ trước, thử luôn
+async def register_single(user, pwd, captcha_arg=None, max_attempts=5):
+    """Đăng ký 1 tài khoản, trả về (ok: bool, msg: str)."""
+    # Nếu có captcha + clientId cũ, thử ngay
     if captcha_arg and os.path.exists("/tmp/captcha_clientId2.txt"):
         try:
-            clientId=int(open("/tmp/captcha_clientId2.txt").read().strip())
-            print(f"Dùng clientId cũ {clientId} + captcha {captcha_arg}")
-            ws=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
-            ok,msg=await register_once(ws, user, pwd, captcha_arg, clientId)
+            clientId = int(open("/tmp/captcha_clientId2.txt").read().strip())
+            ws = await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
+            ok, msg = await register_once(ws, user, pwd, captcha_arg, clientId)
             await ws.close()
-            print(f"Kết quả: {ok} {msg}")
             if ok:
-                open("/tmp/new_account.txt","w").write(f"{user}\n{pwd}\n")
-                print(f"Đã ghi /tmp/new_account.txt")
-                return
+                return True, ""
         except Exception as e:
             print(f"Thử captcha cũ fail: {e}")
 
-    # Vòng thử đăng ký với captcha tự động (tối đa 5 lần)
-    for attempt in range(1,6):
-        print(f"\n--- Lần thử {attempt}/5 ---")
-        ws=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
+    for attempt in range(1, max_attempts + 1):
+        print(f"\n  --- {user}: lần thử {attempt}/{max_attempts} ---")
+        ws = await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
         try:
             img, clientId = await get_captcha(ws)
             await ws.close()
         except Exception as e:
-            print(f"Lấy captcha fail: {e}")
-            await ws.close()
+            print(f"  Lấy captcha fail: {e}")
+            try: await ws.close()
+            except: pass
             continue
 
-        # Lưu ảnh
-        cap_path="/home/user/captcha_register.jpg" if os.path.exists("/home/user") else "/tmp/captcha_register.jpg"
+        cap_path = "/home/user/captcha_register.jpg" if os.path.exists("/home/user") else "/tmp/captcha_register.jpg"
         for p in [cap_path, "/tmp/captcha_register.jpg"]:
-            try: open(p,"wb").write(img)
+            try: open(p, "wb").write(img)
             except: pass
-        print(f"Đã lưu captcha {cap_path} (160x50, {len(img)} bytes, clientId={clientId})")
-        open("/tmp/captcha_clientId2.txt","w").write(str(clientId))
+        open("/tmp/captcha_clientId2.txt", "w").write(str(clientId))
 
-        # Giải captcha
-        captcha=captcha_arg
+        captcha = captcha_arg
         if not captcha:
-            captcha=solve_captcha_auto(cap_path)
+            captcha = solve_captcha_auto(cap_path)
             if captcha:
-                print(f"[AUTO] Giải captcha tự động: {captcha!r}")
+                print(f"  [AUTO] captcha: {captcha!r}")
             else:
-                print(f"[AUTO] Không giải được, đợi nhập tay 60s...")
-                # Đợi file answer hoặc env
+                print(f"  [AUTO] không giải được, đợi nhập tay 60s...")
                 for _ in range(60):
                     if os.path.exists("/tmp/captcha_answer.txt"):
-                        captcha=open("/tmp/captcha_answer.txt").read().strip()
+                        captcha = open("/tmp/captcha_answer.txt").read().strip()
                         if captcha: break
-                    captcha=os.environ.get("REGISTER_CAPTCHA")
+                    captcha = os.environ.get("REGISTER_CAPTCHA")
                     if captcha: break
                     await asyncio.sleep(1)
+                if not captcha and not os.environ.get("GITHUB_ACTIONS"):
+                    try:
+                        captcha = input(f"  Nhập captcha trong {cap_path}: ").strip()
+                    except: pass
                 if not captcha:
-                    # Hỏi trực tiếp nếu chạy local
-                    if not os.environ.get("GITHUB_ACTIONS"):
-                        try:
-                            captcha=input(f"Nhập captcha bạn thấy trong {cap_path}: ").strip()
-                        except: pass
-                if not captcha:
-                    print("Chưa có captcha, thử OCR lại hoặc lấy captcha mới")
+                    print("  Chưa có captcha")
                     continue
 
-        print(f"Dùng captcha={captcha!r} clientId={clientId}")
-        # Gửi REGISTER trên kết nối mới (theo APK, mỗi REGISTER là kết nối mới sau khi đóng captcha)
-        ws2=await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
-        ok,msg=await register_once(ws2, user, pwd, captcha, clientId)
+        ws2 = await websockets.connect(WS_URL, additional_headers={"Origin":"https://gamevh.net","User-Agent":"Mozilla/5.0"}, max_size=2**20, ping_interval=None)
+        ok, msg = await register_once(ws2, user, pwd, captcha, clientId)
         await ws2.close()
         if ok:
-            print(f"\n=== THÀNH CÔNG ===")
-            print(f"User: {user}")
-            print(f"Pass: {pwd}")
-            print(f"Đã lưu /tmp/new_account.txt")
-            open("/tmp/new_account.txt","w").write(f"{user}\n{pwd}\n")
-            # Verify login
-            try:
-                import requests, re
-                s=requests.Session()
-                s.get('https://gamevh.net/login.jsp', timeout=10)
-                r=s.post('https://gamevh.net/login.jsp', timeout=10, data={'redirect':'/','USER_NAME':user,'PASSWORD':pwd,'AUTO_LOGIN':'true','LOGIN':'Đăng nhập'}, allow_redirects=True)
-                print(f"Verify login: {r.url} {'OK' if 'login.jsp' not in r.url else 'FAIL'}")
-            except Exception as e:
-                print(f"Verify fail {e}")
-            return
+            return True, ""
+        print(f"  Thất bại: {msg}, thử captcha mới")
+        try: os.remove("/tmp/captcha_answer.txt")
+        except: pass
+        captcha_arg = None
+
+    return False, "hết số lần thử"
+
+
+async def main():
+    # Tham số: tên cơ sở (vd nguyen7), số lượng (mặc định 10), mật khẩu cố định nhat123456
+    base_name = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("REGISTER_USER") or gen_user()
+    count = int(sys.argv[2]) if len(sys.argv) > 2 else int(os.environ.get("REGISTER_COUNT", "10"))
+    pwd = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("REGISTER_PASS") or gen_pass()
+    captcha_arg = sys.argv[4] if len(sys.argv) > 4 else os.environ.get("REGISTER_CAPTCHA")
+
+    usernames = build_usernames(base_name, count)
+
+    print("=" * 50)
+    print(f"ĐĂNG KÝ {count} TÀI KHOẢN LIÊN TIẾP")
+    print(f"Tên cơ sở : {base_name}")
+    print(f"Danh sách : {', '.join(usernames)}")
+    print(f"Mật khẩu  : {pwd}")
+    print("=" * 50)
+
+    created = []
+    for i, user in enumerate(usernames, 1):
+        print(f"\n[{i}/{count}] Đang đăng ký {user} ...")
+        ok, _ = await register_single(user, pwd, captcha_arg)
+        if ok:
+            print(f"[{i}/{count}] THÀNH CÔNG: {user}")
+            created.append((user, pwd))
+            captcha_arg = None  # captcha chỉ dùng 1 lần
         else:
-            print(f"Thất bại: {msg}, thử lại với captcha mới")
-            # Xóa file answer để lần sau lấy mới
-            try: os.remove("/tmp/captcha_answer.txt")
-            except: pass
-            # Nếu captcha do người nhập sai, cho phép nhập lại
-            captcha_arg=None
+            print(f"[{i}/{count}] THẤT BẠI: {user} (bỏ qua, tiếp tục)")
+        await asyncio.sleep(1)  # tránh spam server
 
-    print(f"\n=== THẤT BẠI SAU 5 LẦN ===")
+    print("\n" + "=" * 50)
+    print(f"TỔNG KẾT: {len(created)}/{count} tài khoản thành công")
+    for u, p in created:
+        print(f"  {u} / {p}")
+    if created:
+        with open("/tmp/new_accounts.txt", "w") as f:
+            for u, p in created:
+                f.write(f"{u}\n{p}\n")
+        print(f"Đã ghi /tmp/new_accounts.txt ({len(created)} dòng)")
+    print("=" * 50)
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
