@@ -66,7 +66,7 @@ AG_BINARY_NAMES = [
 AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
 # INFO rule 8 = CARO6 (caro); rule 9 = CARO5; timeout 4s/nước; match server 1800s
 AG_RULE = 8
-AG_TIMEOUT = 4000           # ms / nước (4s)
+AG_TIMEOUT = 2000           # ms / nước (2s)
 AG_MATCH_TIMEOUT = 1800000  # ms / ván = 30 phút (khớp BOT_MATCH_DURATION)
 AG_MOVE_TIMEOUT = 12.0      # giây – timeout cứng cho toàn bộ khâu tính nước
 
