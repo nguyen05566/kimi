@@ -53,34 +53,34 @@ NOUNS = ["Caro", "Gomoku", "Master", "Storm", "Wolf", "Dragon", "Tiger", "Phoeni
 def generate_random_full_name() -> str:
     return f"{random.choice(ADJECTIVES)}{random.choice(NOUNS)}{random.randint(10, 999)}"
 
-# ======================== ALPHA GOMOKU CONFIG ========================
+# ======================== EMBRYO CONFIG ========================
 try:
     _BASE_DIR = Path(__file__).parent
 except NameError:
     _BASE_DIR = Path.cwd()
 
-ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
-AG_BINARY = "pbrain-embryo23_c5.exe"
-AG_VERSION = "2023"
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO23.zip"
-# AG_RULE bỏ - pbrain-embryo23_c5.exe đã viết riêng cho caro c5, không cần INFO rule
-AG_TIMEOUT = 3000  # 3 giây
-AG_MOVE_TIMEOUT = 12.0  # giây – timeout cứng cho toàn bộ khâu tính nước (chống treo wine)
-AG_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION='1800'
+ENGINE_DIR = _BASE_DIR / "embryo-engine"
+EMBRYO_BINARY = "pbrain-embryo23_c5.exe"
+EMBRYO_VERSION = "2023"
+EMBRYO_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO23.zip"
+# EMBRYO_RULE bỏ - pbrain-embryo23_c5.exe đã viết riêng cho caro c5, không cần INFO rule
+EMBRYO_TIMEOUT = 3000  # 3 giây
+EMBRYO_MOVE_TIMEOUT = 12.0  # giây – timeout cứng cho toàn bộ khâu tính nước (chống treo wine)
+EMBRYO_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION='1800'
 
-def auto_download_alphagomoku() -> Optional[str]:
-    binary_path = ENGINE_DIR / AG_BINARY
+def auto_download_embryo() -> Optional[str]:
+    binary_path = ENGINE_DIR / EMBRYO_BINARY
     if binary_path.exists():
         try:
             binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    log.info(f"[AG] Downloading Embryo {AG_VERSION}...")
+    log.info(f"[Embryo] Downloading Embryo {EMBRYO_VERSION}...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
         archive = Path("/tmp/embryo23.zip")
-        req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
+        req = urllib.request.Request(EMBRYO_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
         with urllib.request.urlopen(req, timeout=120) as resp:
@@ -93,10 +93,10 @@ def auto_download_alphagomoku() -> Optional[str]:
         except Exception: pass
         return str(binary_path)
     except Exception as e:
-        log.error(f"[AG] Download failed: {e}")
+        log.error(f"[Embryo] Download failed: {e}")
         return None
 
-def detect_ag_binary() -> Optional[str]:
+def detect_embryo_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
     # Embryo 2025: Windows exe chạy qua wine
     for f in ENGINE_DIR.glob("pbrain-embryo23_c5.exe"):
@@ -110,9 +110,9 @@ def detect_ag_binary() -> Optional[str]:
     return None
 
 # ======================== ENGINE WRAPPER ========================
-class AlphaGomokuEngine:
+class EmbryoEngine:
     def __init__(self, timeout_turn=3000, board_width=15, board_height=19):
-        self.binary = detect_ag_binary()
+        self.binary = detect_embryo_binary()
         self.timeout_turn = timeout_turn
         self.board_width = board_width; self.board_height = board_height
         self.proc = None
@@ -129,7 +129,7 @@ class AlphaGomokuEngine:
                 self._selector = selectors.DefaultSelector()
                 self._selector.register(self.proc.stdout, selectors.EVENT_READ)
             except Exception as e:
-                log.warning(f"[AG] Selector register error: {e}")
+                log.warning(f"[Embryo] Selector register error: {e}")
                 self._selector = None
 
     def _close_selector(self):
@@ -187,9 +187,9 @@ class AlphaGomokuEngine:
                 break
             # Log ponder/debug output thay vì bỏ im
             if line.startswith(('MESSAGE', 'DEBUG', 'ERROR')):
-                log.debug(f'[AG] drain: {line}')
+                log.debug(f'[Embryo] drain: {line}')
             else:
-                log.warning(f'[AG] drain unexpected: {line}')
+                log.warning(f'[Embryo] drain unexpected: {line}')
 
     def start_game(self, my_symbol=1) -> bool:
         with self.lock:
@@ -238,7 +238,7 @@ class AlphaGomokuEngine:
                 self._initialized = True
                 return True
             except Exception as e:
-                log.error(f"[AG] Start error: {e}")
+                log.error(f"[Embryo] Start error: {e}")
                 self._initialized = False
                 return False
 
@@ -253,7 +253,7 @@ class AlphaGomokuEngine:
                     break
             self._send(f"INFO timeout_turn {self.timeout_turn}")
             self._send("INFO ponder 1")
-            log.info("[AG] RESTART + ponder OK")
+            log.info("[Embryo] RESTART + ponder OK")
             return True
 
     def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
@@ -267,7 +267,7 @@ class AlphaGomokuEngine:
                 # (Không gửi STOP — Embryo không hỗ trợ, trả UNKNOWN STOP)
                 
                 self._send(f"INFO timeout_turn {self.timeout_turn}")
-                self._send(f"INFO time_left {AG_MATCH_TIMEOUT}")
+                self._send(f"INFO time_left {EMBRYO_MATCH_TIMEOUT}")
                 
                 can_use_turn = getattr(self, "_synced", False) and len(board_history) == getattr(self, "_expected_history_len", -1) + 1
                 
@@ -296,18 +296,18 @@ class AlphaGomokuEngine:
                         mx, my = int(match.group(1)), int(match.group(2))
                         # Kiểm tra nước đi hợp lệ: phải trong bàn
                         if not (0 <= mx < self.board_width and 0 <= my < self.board_height):
-                            log.warning(f"[AG] Bỏ qua nước ngoài bàn: {mx},{my}")
+                            log.warning(f"[Embryo] Bỏ qua nước ngoài bàn: {mx},{my}")
                             continue
                         move_count += 1
                         if move_count > 1:
-                            log.warning(f"[AG] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
+                            log.warning(f"[Embryo] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
                         self._synced = True
                         self._expected_history_len = len(board_history) + 1
                         return mx, my
-                log.warning("[AG] Timeout — engine không trả kết quả")
+                log.warning("[Embryo] Timeout — engine không trả kết quả")
                 return None
             except Exception as e:
-                log.warning(f"[AG] get_move error: {e}")
+                log.warning(f"[Embryo] get_move error: {e}")
                 self._synced = False
                 return None
 
@@ -526,11 +526,11 @@ class CaroBot:
         self.bet_amts = []; self._resolved_bet_id = None
         self._bet_amts_loaded = False; self._joining_table = False
         
-        self.ag = None; self.ag_available = False
-        self.ag_moves = 0; self.ag_errors = 0; self.ag_fallback_count = 0
+        self.engine = None; self.embryo_available = False
+        self.embryo_moves = 0; self.embryo_errors = 0; self.embryo_fallback_count = 0
         self._moving = False; self._last_move_xy = None
-        self._ag_reinit_attempts = 0
-        self._ag_reinit_cooldown_until = 0.0
+        self._embryo_reinit_attempts = 0
+        self._embryo_reinit_cooldown_until = 0.0
         
         self.table_id = None
         self.player_slot_by_id = {}
@@ -542,29 +542,29 @@ class CaroBot:
         self._identity_attempted = False
         self.identity_result = {}
 
-    def init_ag(self):
-        if self.ag is not None: return self.ag_available
-        binary = detect_ag_binary()
+    def init_engine(self):
+        if self.engine is not None: return self.embryo_available
+        binary = detect_embryo_binary()
         if not binary:
-            binary = auto_download_alphagomoku()
+            binary = auto_download_embryo()
         if not binary:
-            log.warning("[AG] No binary found!")
-            self.ag_available = False
+            log.warning("[Embryo] No binary found!")
+            self.embryo_available = False
             return False
         try:
-            self.ag = AlphaGomokuEngine(timeout_turn=AG_TIMEOUT, board_width=15, board_height=19)
-            self.ag.binary = binary
-            ok = self.ag.start_game(my_symbol=self.my_symbol)
+            self.engine = EmbryoEngine(timeout_turn=EMBRYO_TIMEOUT, board_width=15, board_height=19)
+            self.engine.binary = binary
+            ok = self.engine.start_game(my_symbol=self.my_symbol)
             if ok:
-                self.ag_available = True
-                log.info(f"[AG] Embryo v{AG_VERSION} OK! (pbrain-embryo23_c5.exe - caro c5)")
+                self.embryo_available = True
+                log.info(f"[Embryo] Embryo v{EMBRYO_VERSION} OK! (pbrain-embryo23_c5.exe - caro c5)")
             else:
-                self.ag_available = False
-                log.warning("[AG] Start failed!")
-            return self.ag_available
+                self.embryo_available = False
+                log.warning("[Embryo] Start failed!")
+            return self.embryo_available
         except Exception as e:
-            log.error(f"[AG] Init error: {e}")
-            self.ag_available = False
+            log.error(f"[Embryo] Init error: {e}")
+            self.embryo_available = False
             return False
 
     @property
@@ -572,38 +572,38 @@ class CaroBot:
 
     def stop(self):
         self._running = False
-        if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
+        if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
 
     def _hard_reset_engine(self, reason: str = ""):
         """Kill hẳn process wine + xóa tham chiếu để tạo lại process sạch."""
         try:
-            if self.ag is not None:
-                self.ag.stop()
+            if self.engine is not None:
+                self.engine.stop()
         except Exception as e:
-            log.warning(f"[AG] _hard_reset_engine stop error: {e}")
+            log.warning(f"[Embryo] _hard_reset_engine stop error: {e}")
         finally:
-            self.ag = None
-            self.ag_available = False
-        log.warning(f"[AG] HARD-RESET engine (reason={reason}) → lượt sau sẽ init_ag() lại")
+            self.engine = None
+            self.embryo_available = False
+        log.warning(f"[Embryo] HARD-RESET engine (reason={reason}) → lượt sau sẽ init_engine() lại")
 
-    def _try_reinit_ag(self) -> bool:
-        """Tái khởi tạo engine NGAY TRONG VÁN khi ag_available == False."""
+    def _try_reinit_engine(self) -> bool:
+        """Tái khởi tạo engine NGAY TRONG VÁN khi embryo_available == False."""
         MAX_REINIT = 3
         COOLDOWN = 15.0
         now = time.time()
-        if now < self._ag_reinit_cooldown_until:
+        if now < self._embryo_reinit_cooldown_until:
             return False
-        if self._ag_reinit_attempts >= MAX_REINIT:
-            log.warning(f"[AG] Đã thử reinit {self._ag_reinit_attempts}x, tạm ngưng. Sẽ thử lại trận sau.")
+        if self._embryo_reinit_attempts >= MAX_REINIT:
+            log.warning(f"[Embryo] Đã thử reinit {self._embryo_reinit_attempts}x, tạm ngưng. Sẽ thử lại trận sau.")
             return False
-        self._ag_reinit_attempts += 1
-        self._ag_reinit_cooldown_until = now + COOLDOWN
-        log.warning(f"[AG] Thử tái khởi tạo engine ngay trong ván (lần {self._ag_reinit_attempts}/{MAX_REINIT})...")
+        self._embryo_reinit_attempts += 1
+        self._embryo_reinit_cooldown_until = now + COOLDOWN
+        log.warning(f"[Embryo] Thử tái khởi tạo engine ngay trong ván (lần {self._embryo_reinit_attempts}/{MAX_REINIT})...")
         self._hard_reset_engine("reinit-mid-match")
-        ok = self.init_ag()
+        ok = self.init_engine()
         if ok:
-            log.info("[AG] Engine đã phục hồi ngay trong ván")
-            self._ag_reinit_attempts = 0
+            log.info("[Embryo] Engine đã phục hồi ngay trong ván")
+            self._embryo_reinit_attempts = 0
         return ok
 
     def save_stats(self):
@@ -685,18 +685,18 @@ class CaroBot:
             history = list(self.board.history)
 
             # Nếu engine tắt, thử phục hồi ngay trong ván trước khi fallback
-            if not self.ag_available:
-                self._try_reinit_ag()
+            if not self.embryo_available:
+                self._try_reinit_engine()
 
-            if self.ag_available:
+            if self.embryo_available:
                 try:
                     # HARD TIMEOUT: chống treo wine/engine kéo chết bot
                     move = await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: self.ag.get_move(history, self.my_symbol)
+                            lambda: self.engine.get_move(history, self.my_symbol)
                         ),
-                        timeout=AG_MOVE_TIMEOUT
+                        timeout=EMBRYO_MOVE_TIMEOUT
                     )
 
                     if not self.is_playing or not self.running:
@@ -705,39 +705,39 @@ class CaroBot:
 
                     if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
                         and self.board.get(*move) == EMPTY):
-                        x, y = move; self.ag_moves += 1
+                        x, y = move; self.embryo_moves += 1
                     else:
-                        self.ag_errors += 1
-                        log.warning(f"[AG] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
+                        self.embryo_errors += 1
+                        log.warning(f"[Embryo] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
                         if history:
                             lx, ly = history[-1][0], history[-1][1]
                         else:
                             lx, ly = 7, 9
                         x, y = self.board.get_empty_near(lx, ly)
-                        self.ag_fallback_count += 1
+                        self.embryo_fallback_count += 1
                         self._hard_reset_engine("invalid-move")
-                        self._try_reinit_ag()
+                        self._try_reinit_engine()
                 except asyncio.TimeoutError:
-                    self.ag_errors += 1
-                    log.warning(f"[AG] TIMEOUT nước >{AG_MOVE_TIMEOUT}s → engine treo, reset")
+                    self.embryo_errors += 1
+                    log.warning(f"[Embryo] TIMEOUT nước >{EMBRYO_MOVE_TIMEOUT}s → engine treo, reset")
                     self._hard_reset_engine("timeout")
-                    self._try_reinit_ag()
+                    self._try_reinit_engine()
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
                         lx, ly = 7, 9
                     x, y = self.board.get_empty_near(lx, ly)
-                    self.ag_fallback_count += 1
+                    self.embryo_fallback_count += 1
                 except Exception as e:
-                    self.ag_errors += 1; log.warning(f"[AG] Error: {e}")
+                    self.embryo_errors += 1; log.warning(f"[Embryo] Error: {e}")
                     self._hard_reset_engine("exception")
-                    self._try_reinit_ag()
+                    self._try_reinit_engine()
                     if history:
                         lx, ly = history[-1][0], history[-1][1]
                     else:
                         lx, ly = 7, 9
                     x, y = self.board.get_empty_near(lx, ly)
-                    self.ag_fallback_count += 1
+                    self.embryo_fallback_count += 1
             else:
                 if history:
                     lx, ly = history[-1][0], history[-1][1]
@@ -747,7 +747,7 @@ class CaroBot:
 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [AG]")
+            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [Embryo]")
             await self.send(self.make_play(pos))
             self._last_move_xy = (x, y)
             self.board.put(x, y, self.my_symbol)
@@ -903,8 +903,8 @@ class CaroBot:
         self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
         self._moving = False; self._last_move_xy = None
         self.opponent_gone_at = None
-        self._ag_reinit_attempts = 0
-        self._ag_reinit_cooldown_until = 0.0
+        self._embryo_reinit_attempts = 0
+        self._embryo_reinit_cooldown_until = 0.0
         
         player_count = r.u8()
         for i in range(player_count):
@@ -915,10 +915,10 @@ class CaroBot:
         
         log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
         
-        if self.ag is None:
-            self.init_ag()
+        if self.engine is None:
+            self.init_engine()
         else:
-            self.ag.start_game(my_symbol=self.my_symbol)
+            self.engine.start_game(my_symbol=self.my_symbol)
         
         if self.slot < 0:
             await asyncio.sleep(0.5); await self.send(self.make_get_table())
@@ -1324,7 +1324,7 @@ class CaroBot:
             self._bet_amts_loaded = False; self._joining_table = False
             self.opponent_gone_at = None; self._table_lost_at = None
             
-            if self.ag: self.ag.stop(); self.ag = None; self.ag_available = False
+            if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
             
             # Một lần đăng nhập mỗi chu kỳ để tránh giới hạn/brute-force.
             login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
@@ -1358,12 +1358,12 @@ class CaroBot:
                 self.table_id = None
             
             self.save_stats()
-            if self.ag: self.ag.stop(); self.ag = None
+            if self.engine: self.engine.stop(); self.engine = None
 
 def main():
-    bin_path = auto_download_alphagomoku()
-    if bin_path: print(f"[SETUP] AlphaGomoku ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No AlphaGomoku - bot plays center only")
+    bin_path = auto_download_embryo()
+    if bin_path: print(f"[SETUP] Embryo ready: {os.path.basename(bin_path)}")
+    else: print("[SETUP] No Embryo - bot plays center only")
     
     try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
     except RuntimeError: asyncio.run(_run_bot())
