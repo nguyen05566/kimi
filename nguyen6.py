@@ -70,6 +70,44 @@ AG_TIMEOUT = 2000           # ms / nước (2s)
 AG_MATCH_TIMEOUT = 1800000  # ms / ván = 30 phút (khớp BOT_MATCH_DURATION)
 AG_MOVE_TIMEOUT = 12.0      # giây – timeout cứng cho toàn bộ khâu tính nước
 
+# ======================== NN REGION (THỬ NGHIỆM - chưa đánh tiền) ========================
+# Bật/tắt qua env để bot cũ (zaro*) KHÔNG bị ảnh hưởng. Chỉ dùng khi test nguyen6.py.
+NN_REGION_ENABLED = os.environ.get("CARO_NN_REGION", "0") == "1"
+NN_REGION_COLLECT = os.environ.get("CARO_NN_COLLECT", "0") == "1"
+_NN_DATA_PATH = _BASE_DIR / "nn_real_games.jsonl"
+_NN_PREDICTOR = None
+_NN_PREDICTOR_ERR = None
+
+def _get_nn_predictor():
+    """Lazy load mô hình chọn vùng. Trả None nếu thiếu file/import lỗi."""
+    global _NN_PREDICTOR, _NN_PREDICTOR_ERR
+    if _NN_PREDICTOR is None and _NN_PREDICTOR_ERR is None:
+        try:
+            from region_predictor import RegionPredictor
+            _NN_PREDICTOR = RegionPredictor(str(_BASE_DIR / "region_net.npz"))
+            log.info("[NN] Region predictor loaded (region_net.npz)")
+        except Exception as e:
+            _NN_PREDICTOR_ERR = str(e)
+            log.warning(f"[NN] Không load được predictor: {e}")
+    return _NN_PREDICTOR
+
+def _collect_nn_sample(board_history, my_symbol, oy_rule, oy_nn, cy_nn):
+    """Ghi 1 mẫu ván thật ra file JSONL để train lại mô hình."""
+    try:
+        import json as _json
+        row = {
+            "board": [[x, y, sym] for x, y, sym in board_history],
+            "my_symbol": my_symbol,
+            "oy_rule": oy_rule,
+            "oy_nn": oy_nn,
+            "cy_nn": cy_nn,
+            "t": time.time(),
+        }
+        with open(_NN_DATA_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(row) + "\n")
+    except Exception as e:
+        log.warning(f"[NN] collect sample lỗi: {e}")
+
 # Alias giữ tương thích tên cũ trong file
 KG_BINARY_PRIMARY = AG_BINARY_PRIMARY
 KG_BINARY_NAMES = AG_BINARY_NAMES
@@ -296,19 +334,30 @@ class AlphaGomokuEngine:
             pass
 
     # ---------- Region analysis (KHÔNG đụng engine) ----------
-    def _compute_origin(self, board_history: list) -> Tuple[int, int]:
-        """
-        Chỉ đọc history → chọn origin. Không gửi gì cho engine.
-        width=15 → ox=0; height=19 → oy ∈ [0,4].
-        """
+    def _compute_origin_nn(self, board_history: list) -> Tuple[int, int]:
+        """Dùng mạng nơ-ron chọn vùng đối thủ -> quyết định khung (oy). Trả (0, oy) hoặc None."""
+        pred = _get_nn_predictor()
+        if pred is None:
+            return None
+        try:
+            from region_predictor import board_history_to_matrix
+            mat = board_history_to_matrix(board_history, self.my_side,
+                                          width=self.board_width,
+                                          height=self.board_height)
+            ox, oy = pred.compute_origin(mat)
+            return int(ox), int(oy)
+        except Exception as e:
+            log.warning(f"[NN] compute origin lỗi: {e}")
+            return None
+
+    def _compute_origin_rb(self, board_history: list) -> int:
+        """Logic rule-based gốc, trả về oy (0..4). Giữ nguyên hành vi cũ."""
         es = self.ENGINE_SIZE
         max_oy = max(0, self.board_height - es)
-        max_ox = max(0, self.board_width - es)
 
         if not board_history:
-            return 0, max_oy // 2
+            return max_oy // 2
 
-        xs = [x for x, y, s in board_history]
         ys = [y for x, y, s in board_history]
         min_y, max_y = min(ys), max(ys)
         cy = (min_y + max_y) / 2.0
@@ -324,11 +373,36 @@ class AlphaGomokuEngine:
             oy = max(0, min(oy, max_oy))
 
         # Ưu tiên bao nước cuối cùng
-        last_x, last_y = board_history[-1][0], board_history[-1][1]
+        last_y = board_history[-1][1]
         if not (0 <= last_y - oy < es):
             oy = max(0, min(last_y - es // 2, max_oy))
 
-        return 0, oy  # ox luôn 0
+        return oy
+
+    def _compute_origin(self, board_history: list) -> Tuple[int, int]:
+        """
+        Chỉ đọc history → chọn origin. Không gửi gì cho engine.
+        width=15 → ox=0; height=19 → oy ∈ [0,4].
+        """
+        # ---- THỬ NGHIỆM: dùng NN chọn vùng (chỉ khi bật CARO_NN_REGION=1) ----
+        if NN_REGION_ENABLED and board_history:
+            nn_origin = self._compute_origin_nn(board_history)
+            if nn_origin is not None:
+                nn_ox, nn_oy = nn_origin
+                rule_oy = self._compute_origin_rb(board_history)
+                if NN_REGION_COLLECT:
+                    _collect_nn_sample(board_history, self.my_side,
+                                       rule_oy, nn_oy, None)
+                log.info(
+                    f"[NN] region oy_rule={rule_oy} oy_nn={nn_oy} "
+                    f"(chênh lệch {rule_oy - nn_oy})"
+                )
+                return nn_ox, nn_oy
+            else:
+                log.warning("[NN] predictor unavailable → fallback rule-based")
+        # -------------------------------------------------------------------
+
+        return 0, self._compute_origin_rb(board_history)  # ox luôn 0
 
     def _count_outside(self, board_history: list, ox: int, oy: int) -> int:
         es = self.ENGINE_SIZE
