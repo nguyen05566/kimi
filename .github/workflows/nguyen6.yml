@@ -31,10 +31,9 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot (Linux native engine, no wine)
+      - name: Run Caro Bot (smart adaptive sliding window)
         env:
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
           CARO_USER1: ${{ secrets.CARO_USER1 || secrets.CARO_USER }}
           CARO_PASSWD1: ${{ secrets.CARO_PASSWD1 || secrets.CARO_PASSWD }}
-        run: python3 nguyen6.py
-
+        run: python3 nguyen6_smart_region.py
