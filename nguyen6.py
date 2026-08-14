@@ -52,8 +52,14 @@ except NameError:
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 # Binary AlphaGomoku MK (pbrain)
-AG_BINARY_PRIMARY = "pbrain-AlphaGomoku.exe"
+AG_BINARY_PRIMARY = "pbrain-AlphaGomoku"
 AG_BINARY_NAMES = [
+    # Bản Linux native (ưu tiên, không cần wine)
+    "pbrain-AlphaGomoku",
+    "pbrain-AlphaGomoku_opencl",
+    "pbrain-AlphaGomoku_cuda",
+    "pbrain-alphagomoku",
+    # Fallback: bản Windows .exe (chạy qua wine)
     "pbrain-AlphaGomoku.exe",
     "pbrain-alphagomoku.exe",
     "pbrain-AlphaGomoku*.exe",
@@ -63,7 +69,7 @@ AG_BINARY_NAMES = [
     "pbrain-*.exe",
 ]
 # Gomocup 2026 – #1 Caro
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
+AG_DOWNLOAD_URL = "https://github.com/MaciejKozarzewski/AlphaGomoku/releases/download/v5.9.3/AlphaGomoku_linux.zip"
 # INFO rule 8 = CARO6 (caro); rule 9 = CARO5; timeout 4s/nước; match server 1800s
 AG_RULE = 8
 AG_TIMEOUT = 2000           # ms / nước (2s)
@@ -102,7 +108,7 @@ def _find_file(directory: Path, names: List[str]) -> Optional[Path]:
     return None
 
 def auto_download_alphagomoku() -> Optional[str]:
-    """Tải ALPHAGOMOKU.MK26.zip từ Gomocup nếu chưa có binary."""
+    """Tải AlphaGomoku Linux (native) từ GitHub nếu chưa có binary."""
     primary = ENGINE_DIR / AG_BINARY_PRIMARY
     if primary.exists():
         try:
@@ -121,11 +127,11 @@ def auto_download_alphagomoku() -> Optional[str]:
         log.info(f"[AG] Binary đã có: {binary}")
         return str(binary)
 
-    log.info("[AG] Đang tải AlphaGomoku MK26 từ Gomocup...")
+    log.info("[AG] Đang tải AlphaGomoku Linux (native) từ GitHub release...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/alphagomoku26.zip")
+        archive = Path("/tmp/alphagomoku_linux.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -144,13 +150,15 @@ def auto_download_alphagomoku() -> Optional[str]:
             log.info(f"[AG] Tải thành công: {binary}")
             return str(binary)
 
-        for f in ENGINE_DIR.rglob("*.exe"):
-            try:
-                f.chmod(0o755)
-            except Exception:
-                pass
-            log.info(f"[AG] Tìm thấy exe: {f}")
-            return str(f)
+        for pat in ("pbrain-AlphaGomoku", "*.exe"):
+            for f in ENGINE_DIR.rglob(pat):
+                if f.is_file():
+                    try:
+                        f.chmod(0o755)
+                    except Exception:
+                        pass
+                    log.info(f"[AG] Tìm thấy binary: {f}")
+                    return str(f)
         log.warning("[AG] Giải nén xong nhưng không tìm thấy binary")
         return None
     except Exception as e:
@@ -165,6 +173,9 @@ def detect_ag_binary() -> Optional[str]:
     if p:
         return str(p)
     if ENGINE_DIR.exists():
+        # Ưu tiên binary Linux native (không đuôi .exe)
+        for f in ENGINE_DIR.rglob("pbrain-AlphaGomoku"):
+            return str(f)
         for f in ENGINE_DIR.rglob("*AlphaGomoku*.exe"):
             return str(f)
         for f in ENGINE_DIR.rglob("*alphagomoku*.exe"):

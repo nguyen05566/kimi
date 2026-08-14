@@ -26,24 +26,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Wine (for Embryo 2025 Windows exe)
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wine wine32 wine64 xvfb
-          wine --version
-
-      - name: Start Xvfb
-        run: |
-          Xvfb :99 -screen 0 1024x768x24 &
-          sleep 2
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot
+      - name: Run Caro Bot (Linux native engine, no wine)
         env:
-          DISPLAY: ":99"
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
         run: python3 nguyen6.py
