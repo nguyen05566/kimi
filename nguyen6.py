@@ -352,117 +352,41 @@ class AlphaGomokuEngine:
 
     # ---------- Region analysis (KHÔNG đụng engine) ----------
     def _compute_origin(self, board_history: list) -> Tuple[int, int]:
-        """Choose a 15x15 window with tactical/threat awareness.
-
-        The old implementation followed only the last eight moves.  That can
-        move the window away from an older four/near-five threat.  Here every
-        possible 5-cell tactical segment is scored first; recent activity is
-        used only as a secondary signal.  A candidate that cuts a critical
-        segment is heavily penalised and a candidate that contains a critical
-        segment is strongly preferred.
         """
-        return self._best_region(board_history)[0:2]
-
-    def _critical_segments(self, board_history: list) -> list:
-        """Return important tactical segments that a window should preserve.
-
-        A segment is a 5- or 6-cell tactical line containing >=4 stones of
-        one side and no opponent stone.  Six-cell lines are included because
-        this bot uses the CARO6 rule.  We also preserve strong 3-stone patterns
-        with both ends open.  This is deliberately lightweight: it is a window
-        selector, not a replacement for AlphaGomoku's search.
+        Chọn khung 15x15 dựa trên các nước gần đây.
+        Không phân tích threat/pattern và không can thiệp vào việc đánh giá
+        hay tính nước của AlphaGomoku.
         """
-        if not board_history:
-            return []
-        board = {(x, y): sym for x, y, sym in board_history}
-        w, h = self.board_width, self.board_height
-        segs = []
-        dirs = ((1, 0), (0, 1), (1, 1), (1, -1))
-        for x in range(w):
-            for y in range(h):
-                for dx, dy in dirs:
-                    for length in (5, 6):
-                        ex, ey = x + dx * (length - 1), y + dy * (length - 1)
-                        if not (0 <= ex < w and 0 <= ey < h):
-                            continue
-                        cells = [(x + dx*i, y + dy*i) for i in range(length)]
-                        vals = [board.get(c) for c in cells]
-                        for sym in (1, 2):
-                            own = sum(v == sym for v in vals)
-                            opp = sum(v is not None and v != sym for v in vals)
-                            empty = vals.count(None)
-                            if opp == 0 and ((length == 5 and own >= 4) or
-                                             (length == 6 and own >= 5)):
-                                score = 1000 + own * 100 + (100 if length == 6 else 0)
-                                segs.append((score, tuple(cells)))
-                            elif length == 5 and opp == 0 and own >= 3 and empty == 2:
-                                before = (x-dx, y-dy)
-                                after = (ex+dx, ey+dy)
-                                open_ends = int(0 <= before[0] < w and 0 <= before[1] < h and before not in board)
-                                open_ends += int(0 <= after[0] < w and 0 <= after[1] < h and after not in board)
-                                if open_ends == 2:
-                                    segs.append((300 + own * 40, tuple(cells)))
-        # Deduplicate geometrically; keep strongest score.
-        best = {}
-        for score, cells in segs:
-            key = tuple(sorted(cells))
-            best[key] = max(score, best.get(key, 0))
-        return [(score, cells) for cells, score in best.items()]
-
-    def _window_score(self, board_history: list, oy: int, critical=None) -> float:
-        """Score a candidate window; higher is better."""
-        es = self.ENGINE_SIZE
-        y0, y1 = oy, oy + es
-        inside = 0
-        recent_score = 0.0
-        for i, (x, y, _sym) in enumerate(board_history):
-            if 0 <= x < self.board_width and y0 <= y < y1:
-                inside += 1
-                if i >= max(0, len(board_history) - 10):
-                    recent_score += 1.0 + (i / max(1, len(board_history)))
-
-        score = inside * 2.0 + recent_score
-        critical = critical if critical is not None else self._critical_segments(board_history)
-        for weight, cells in critical:
-            ys = [c[1] for c in cells]
-            contained = all(y0 <= y < y1 for y in ys)
-            if contained:
-                score += weight
-            else:
-                # Cutting a tactical segment is much worse than losing an old
-                # quiet stone from the engine's view.
-                score -= weight * 3.0
-
-        # Prefer a little breathing room around the newest move, but don't let
-        # recency override tactical safety.
-        if board_history:
-            ly = board_history[-1][1]
-            rel = ly - oy
-            if 2 <= rel <= es - 3:
-                score += 8.0
-            else:
-                score -= 4.0
-        return score
-
-    def _best_region(self, board_history: list) -> Tuple[int, int, float, list]:
         max_oy = max(0, self.board_height - self.ENGINE_SIZE)
-        critical = self._critical_segments(board_history)
-        scored = [(self._window_score(board_history, oy, critical), oy) for oy in range(max_oy + 1)]
-        scored.sort(reverse=True)
+        if not board_history:
+            return 0, max_oy // 2
 
-        best_score, best_oy = scored[0] if scored else (0.0, max_oy // 2)
-        # Hysteresis: keep the committed window unless the new one is clearly
-        # better.  A tactical cut is the exception and forces movement.
+        recent = board_history[-8:]
+        total_w = 0.0
+        weighted_y = 0.0
+        for i, (_x, y, _sym) in enumerate(recent):
+            w = 1.8 ** i
+            weighted_y += y * w
+            total_w += w
+
+        center_y = weighted_y / total_w if total_w else board_history[-1][1]
+        oy = int(round(center_y - self.ENGINE_SIZE / 2))
+        oy = max(0, min(max_oy, oy))
+
+        last_y = board_history[-1][1]
+        if last_y <= 2:
+            oy = 0
+        elif last_y >= self.board_height - 3:
+            oy = max_oy
+
+        # Hysteresis: chỉ đổi khung khi thật sự cần.
         current = self._committed_oy
         if current is not None and 0 <= current <= max_oy:
-            current_score = self._window_score(board_history, current, critical)
-            current_cuts = any(not all(current <= y < current + self.ENGINE_SIZE for x, y in cells)
-                               for _weight, cells in critical)
-            margin = 90.0
-            if not current_cuts and current_score + margin >= best_score:
-                best_oy, best_score = current, current_score
+            last_rel = last_y - current
+            if 2 <= last_rel <= self.ENGINE_SIZE - 3:
+                oy = current
 
-        return 0, best_oy, best_score, critical
+        return 0, oy
 
     def _count_outside(self, board_history: list, ox: int, oy: int) -> int:
         es = self.ENGINE_SIZE
@@ -696,16 +620,18 @@ class AlphaGomokuEngine:
                 f"— khung bám mặt trận gần nhất"
             )
 
-        # Candidate windows are ranked by the same tactical scorer.  This makes
-        # retry useful even when the first engine answer is legal but poor.
+        # Candidate windows chỉ dựa trên vị trí, không chấm threat/pattern.
         max_oy = max(0, self.board_height - self.ENGINE_SIZE)
-        critical = self._critical_segments(board_history)
-        ranked = sorted(
-            ((self._window_score(board_history, coy, critical), (0, coy))
-             for coy in range(max_oy + 1)),
-            reverse=True,
-        )
-        candidate_origins = [pair for _score, pair in ranked[:4]]
+        candidate_origins = [(ox, oy)]
+
+        if board_history:
+            last_y = board_history[-1][1]
+            follow_oy = max(0, min(max_oy, last_y - self.ENGINE_SIZE // 2))
+            candidate_origins.append((0, follow_oy))
+
+        candidate_origins.extend([(0, 0), (0, max_oy)])
+        candidate_origins = list(dict.fromkeys(candidate_origins))
+
         for attempt, (cox, coy) in enumerate(candidate_origins):
             # --- Bước 3: commit region + RESTART nếu khung đổi ---
             self._commit_region(cox, coy, need_restart=False)
