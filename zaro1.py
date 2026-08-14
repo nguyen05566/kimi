@@ -52,8 +52,14 @@ except NameError:
 
 ENGINE_DIR = _BASE_DIR / "alphagomoku-engine"
 # Binary AlphaGomoku MK (pbrain)
-AG_BINARY_PRIMARY = "pbrain-AlphaGomoku.exe"
+AG_BINARY_PRIMARY = "pbrain-AlphaGomoku"
 AG_BINARY_NAMES = [
+    # Bản Linux native (ưu tiên, không cần wine)
+    "pbrain-AlphaGomoku",
+    "pbrain-AlphaGomoku_opencl",
+    "pbrain-AlphaGomoku_cuda",
+    "pbrain-alphagomoku",
+    # Fallback: bản Windows .exe (chạy qua wine)
     "pbrain-AlphaGomoku.exe",
     "pbrain-alphagomoku.exe",
     "pbrain-AlphaGomoku*.exe",
@@ -63,7 +69,7 @@ AG_BINARY_NAMES = [
     "pbrain-*.exe",
 ]
 # Gomocup 2026 – #1 Caro
-AG_DOWNLOAD_URL = "http://download.gomocup.com/ai/ALPHAGOMOKU.MK26.zip"
+AG_DOWNLOAD_URL = "https://github.com/MaciejKozarzewski/AlphaGomoku/releases/download/v5.9.3/AlphaGomoku_linux.zip"
 # INFO rule 8 = CARO6 (caro); rule 9 = CARO5; timeout 4s/nước; match server 1800s
 AG_RULE = 8
 AG_TIMEOUT = 2000           # ms / nước (2s)
@@ -101,14 +107,48 @@ def _find_file(directory: Path, names: List[str]) -> Optional[Path]:
                         return p
     return None
 
+def optimize_alphagomoku_config():
+    """Tự động tối ưu config.json cho AlphaGomoku trên môi trường 2 vCPU (GitHub Actions)."""
+    config_file = ENGINE_DIR / "config.json"
+    if not config_file.exists():
+        return
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        # 1. Tận dụng tối đa 2 vCPU
+        cfg["search_threads"] = 2
+
+        # 2. Tăng độ rộng MCTS tối ưu (64)
+        if "search_config" in cfg and "mcts_config" in cfg["search_config"]:
+            cfg["search_config"]["mcts_config"]["max_children"] = 64
+
+        # 3. Mở rộng bộ nhớ Threat Space Search (TSS) & Hash table
+        if "search_config" in cfg and "tss_config" in cfg["search_config"]:
+            cfg["search_config"]["tss_config"]["max_positions"] = 500
+            cfg["search_config"]["tss_config"]["hash_table_size"] = 8388608
+
+        # 4. Tăng bộ nhớ Node Cache
+        if "search_config" in cfg and "tree_config" in cfg["search_config"]:
+            cfg["search_config"]["tree_config"]["initial_node_cache_size"] = 131072
+            cfg["search_config"]["tree_config"]["edge_bucket_size"] = 400000
+            cfg["search_config"]["tree_config"]["node_bucket_size"] = 20000
+
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        log.info("[AG] Đã tối ưu hóa config.json thành công (threads=2, max_children=64, max_positions=500, hash_table=8MB)")
+    except Exception as e:
+        log.warning(f"[AG] Không thể tối ưu config.json: {e}")
+
 def auto_download_alphagomoku() -> Optional[str]:
-    """Tải ALPHAGOMOKU.MK26.zip từ Gomocup nếu chưa có binary."""
+    """Tải AlphaGomoku Linux (native) từ GitHub nếu chưa có binary."""
     primary = ENGINE_DIR / AG_BINARY_PRIMARY
     if primary.exists():
         try:
             primary.chmod(0o755)
         except Exception:
             pass
+        optimize_alphagomoku_config()
         log.info(f"[AG] Binary đã có: {primary}")
         return str(primary)
 
@@ -118,14 +158,15 @@ def auto_download_alphagomoku() -> Optional[str]:
             binary.chmod(0o755)
         except Exception:
             pass
+        optimize_alphagomoku_config()
         log.info(f"[AG] Binary đã có: {binary}")
         return str(binary)
 
-    log.info("[AG] Đang tải AlphaGomoku MK26 từ Gomocup...")
+    log.info("[AG] Đang tải AlphaGomoku Linux (native) từ GitHub release...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
         import zipfile
-        archive = Path("/tmp/alphagomoku26.zip")
+        archive = Path("/tmp/alphagomoku_linux.zip")
         req = urllib.request.Request(AG_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
@@ -134,6 +175,8 @@ def auto_download_alphagomoku() -> Optional[str]:
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
+
+        optimize_alphagomoku_config()
 
         binary = _find_file(ENGINE_DIR, AG_BINARY_NAMES)
         if binary:
@@ -144,13 +187,15 @@ def auto_download_alphagomoku() -> Optional[str]:
             log.info(f"[AG] Tải thành công: {binary}")
             return str(binary)
 
-        for f in ENGINE_DIR.rglob("*.exe"):
-            try:
-                f.chmod(0o755)
-            except Exception:
-                pass
-            log.info(f"[AG] Tìm thấy exe: {f}")
-            return str(f)
+        for pat in ("pbrain-AlphaGomoku", "*.exe"):
+            for f in ENGINE_DIR.rglob(pat):
+                if f.is_file():
+                    try:
+                        f.chmod(0o755)
+                    except Exception:
+                        pass
+                    log.info(f"[AG] Tìm thấy binary: {f}")
+                    return str(f)
         log.warning("[AG] Giải nén xong nhưng không tìm thấy binary")
         return None
     except Exception as e:
@@ -158,21 +203,31 @@ def auto_download_alphagomoku() -> Optional[str]:
         return None
 
 def detect_ag_binary() -> Optional[str]:
+    def _make_exec(path_str):
+        try:
+            os.chmod(path_str, 0o755)
+        except Exception:
+            pass
+        return path_str
+
     primary = ENGINE_DIR / AG_BINARY_PRIMARY
     if primary.exists():
-        return str(primary)
+        return _make_exec(str(primary))
     p = _find_file(ENGINE_DIR, AG_BINARY_NAMES)
     if p:
-        return str(p)
+        return _make_exec(str(p))
     if ENGINE_DIR.exists():
+        # Ưu tiên binary Linux native (không đuôi .exe)
+        for f in ENGINE_DIR.rglob("pbrain-AlphaGomoku"):
+            return _make_exec(str(f))
         for f in ENGINE_DIR.rglob("*AlphaGomoku*.exe"):
-            return str(f)
+            return _make_exec(str(f))
         for f in ENGINE_DIR.rglob("*alphagomoku*.exe"):
-            return str(f)
+            return _make_exec(str(f))
         for f in ENGINE_DIR.rglob("pbrain-*.exe"):
-            return str(f)
+            return _make_exec(str(f))
         for f in ENGINE_DIR.rglob("*.exe"):
-            return str(f)
+            return _make_exec(str(f))
     return None
 
 # Alias tương thích
@@ -300,33 +355,40 @@ class AlphaGomokuEngine:
         """
         Chỉ đọc history → chọn origin. Không gửi gì cho engine.
         width=15 → ox=0; height=19 → oy ∈ [0,4].
+        Tập trung theo mặt trận đang đánh (các nước gần nhất), hướng ra không gian thoáng (ít quân).
         """
         es = self.ENGINE_SIZE
-        max_oy = max(0, self.board_height - es)
+        max_oy = max(0, self.board_height - es)  # 4
         max_ox = max(0, self.board_width - es)
 
         if not board_history:
             return 0, max_oy // 2
 
-        xs = [x for x, y, s in board_history]
-        ys = [y for x, y, s in board_history]
-        min_y, max_y = min(ys), max(ys)
-        cy = (min_y + max_y) / 2.0
-        oy = int(round(cy - es / 2.0))
-        oy = max(0, min(oy, max_oy))
+        # 1. Tập trung vào K nước gần nhất (mặt trận đang giao tranh thực tế)
+        k = min(len(board_history), 8)
+        recent = board_history[-k:]
 
-        # Bbox cao hơn 15 → bám nửa nước gần nhất (mặt trận)
-        if max_y - min_y + 1 > es:
-            recent = board_history[-(max(3, len(board_history) // 2)):]
-            rys = [y for x, y, s in recent]
-            cy = sum(rys) / len(rys)
-            oy = int(round(cy - es / 2.0))
-            oy = max(0, min(oy, max_oy))
+        # 2. Trọng số tăng dần theo độ mới (nước vừa đánh có trọng số cao nhất)
+        weights = [1.8 ** i for i in range(k)]
+        total_w = sum(weights)
+        cy = sum(move[1] * w for move, w in zip(recent, weights)) / total_w
 
-        # Ưu tiên bao nước cuối cùng
-        last_x, last_y = board_history[-1][0], board_history[-1][1]
-        if not (0 <= last_y - oy < es):
-            oy = max(0, min(last_y - es // 2, max_oy))
+        # 3. Tính toán oy để đưa mặt trận đang đánh vào trung tâm khung 15x15
+        target_oy = int(round(cy - es / 2.0))
+        oy = max(0, min(target_oy, max_oy))
+
+        # 4. Đảm bảo nước đi mới nhất luôn có đủ không gian phát triển (không bị ép sát mép bàn cờ)
+        last_y = board_history[-1][1]
+        if last_y >= 13:
+            oy = max_oy  # Mở rộng tối đa nửa dưới bàn cờ (y=4..18)
+        elif last_y <= 5:
+            oy = 0       # Mở rộng tối đa nửa trên bàn cờ (y=0..14)
+        else:
+            rel_y = last_y - oy
+            if rel_y < 2:
+                oy = max(0, min(last_y - 2, max_oy))
+            elif rel_y > es - 3:
+                oy = max(0, min(last_y - (es - 3), max_oy))
 
         return 0, oy  # ox luôn 0
 
@@ -459,6 +521,7 @@ class AlphaGomokuEngine:
                 log.warning("[AG] Không tìm thấy binary AlphaGomoku")
                 return False
 
+            optimize_alphagomoku_config()
             try:
                 is_exe = self.binary.lower().endswith(".exe")
                 cmd = self._wine_cmd(self.binary) if is_exe else [self.binary]
@@ -869,6 +932,117 @@ class Board:
                             return (x, y)
         return self.get_empty_near_center()
 
+    def get_strategic_empty_move(self, my_symbol: int, opponent_symbol: int) -> Tuple[int, int]:
+        """
+        Chọn nước đi chiến thuật thông minh khi fallback:
+        - Ưu tiên bắt đòn 4 thắng ngay hoặc chặn đối thủ 4.
+        - Mở đòn 3 / chặn 3.
+        - Ưu tiên vùng thoáng ít quân (tránh bị kẹt trong đám đông quân chết).
+        - Gần mặt trận đang đánh.
+        """
+        if not self.history:
+            return self.get_empty_near_center()
+
+        last_x, last_y = self.history[-1][0], self.history[-1][1]
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+
+        # Tìm các ô trống quanh các nước gần nhất (bán kính 1..3)
+        k = min(len(self.history), 8)
+        recent_stones = [(x, y) for x, y, _ in self.history[-k:]]
+
+        candidates = set()
+        for sx, sy in recent_stones:
+            for dx in range(-3, 4):
+                for dy in range(-3, 4):
+                    nx, ny = sx + dx, sy + dy
+                    if 0 <= nx < self.width and 0 <= ny < self.height and self.grid[ny][nx] == EMPTY:
+                        candidates.add((nx, ny))
+
+        if not candidates:
+            return self.get_empty_near(last_x, last_y)
+
+        best_score = -float('inf')
+        best_move = (last_x, last_y)
+
+        for x, y in candidates:
+            score = 0
+
+            # Khoảng cách tới nước vừa đánh
+            dist_last = max(abs(x - last_x), abs(y - last_y))
+            score -= dist_last * 12
+
+            # Đếm số ô trống xung quanh (độ thoáng / ít quân)
+            open_count = 0
+            crowded_count = 0
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < self.width and 0 <= ny < self.height:
+                        if self.grid[ny][nx] == EMPTY:
+                            open_count += 1
+                        else:
+                            crowded_count += 1
+            # Thưởng điểm cho vùng thoáng ít quân
+            score += open_count * 20
+            # Phạt nặng nếu chui vào ổ đông quân đã bị bít kín
+            if crowded_count >= 6:
+                score -= 150
+
+            # Đánh giá thế cờ các hướng
+            for dx, dy in directions:
+                f_count, f_open = self._count_consecutive(x, y, dx, dy, my_symbol)
+                o_count, o_open = self._count_consecutive(x, y, dx, dy, opponent_symbol)
+
+                # Thắng ngay (5 con)
+                if f_count >= 4:
+                    score += 1000000
+                # Chặn đối thủ thắng (4 con)
+                elif o_count >= 4:
+                    score += 600000
+                # Đòn 3 thoáng (sắp thành 4)
+                elif f_count == 3 and f_open >= 1:
+                    score += 50000
+                # Chặn đối thủ đòn 3
+                elif o_count == 3 and o_open >= 1:
+                    score += 40000
+                # Nước 2 thoáng
+                elif f_count == 2 and f_open == 2:
+                    score += 5000
+                elif o_count == 2 and o_open == 2:
+                    score += 3000
+
+            if score > best_score:
+                best_score = score
+                best_move = (x, y)
+
+        return best_move
+
+    def _count_consecutive(self, x: int, y: int, dx: int, dy: int, sym: int) -> Tuple[int, int]:
+        count = 0
+        open_ends = 0
+
+        # Tiến
+        nx, ny = x + dx, y + dy
+        while 0 <= nx < self.width and 0 <= ny < self.height and self.grid[ny][nx] == sym:
+            count += 1
+            nx += dx
+            ny += dy
+        if 0 <= nx < self.width and 0 <= ny < self.height and self.grid[ny][nx] == EMPTY:
+            open_ends += 1
+
+        # Lùi
+        nx, ny = x - dx, y - dy
+        while 0 <= nx < self.width and 0 <= ny < self.height and self.grid[ny][nx] == sym:
+            count += 1
+            nx -= dx
+            ny -= dy
+        if 0 <= nx < self.width and 0 <= ny < self.height and self.grid[ny][nx] == EMPTY:
+            open_ends += 1
+
+        return count, open_ends
+
 # ======================== BOT ========================
 class CaroBot:
     def __init__(self):
@@ -1096,12 +1270,8 @@ class CaroBot:
                             else:
                                 raise RuntimeError(f"retry still invalid: {move2}")
                         except Exception as e2:
-                            log.warning(f"[AG] Soft retry fail ({e2}) → fallback gần nước cuối")
-                            if history:
-                                lx, ly = history[-1][0], history[-1][1]
-                            else:
-                                lx, ly = 7, 9
-                            x, y = self.board.get_empty_near(lx, ly)
+                            log.warning(f"[AG] Soft retry fail ({e2}) → fallback chiến thuật thoáng quân")
+                            x, y = self.board.get_strategic_empty_move(self.my_symbol, self.opponent_symbol)
                             self.ag_fallback_count += 1
                             # HARD-RESET: fallback → kill engine; thử phục hồi ngay trong ván
                             self._hard_reset_engine("soft-retry fail")
@@ -1112,30 +1282,18 @@ class CaroBot:
                     log.warning(f"[AG] TIMEOUT nước >{AG_MOVE_TIMEOUT}s → engine treo, reset")
                     self._hard_reset_engine("timeout")
                     self._try_reinit_ag()
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
-                    x, y = self.board.get_empty_near(lx, ly)
+                    x, y = self.board.get_strategic_empty_move(self.my_symbol, self.opponent_symbol)
                     self.ag_fallback_count += 1
                 except Exception as e:
                     self.ag_errors += 1
                     log.warning(f"[AG] Error: {e}")
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
-                    x, y = self.board.get_empty_near(lx, ly)
+                    x, y = self.board.get_strategic_empty_move(self.my_symbol, self.opponent_symbol)
                     self.ag_fallback_count += 1
                     # HARD-RESET: bất kỳ lỗi nào (kể cả treo ngầm) → kill engine, tái tạo sạch
                     self._hard_reset_engine("exception")
                     self._try_reinit_ag()
             else:
-                if history:
-                    lx, ly = history[-1][0], history[-1][1]
-                else:
-                    lx, ly = 7, 9
-                x, y = self.board.get_empty_near(lx, ly)
+                x, y = self.board.get_strategic_empty_move(self.my_symbol, self.opponent_symbol)
 
             elapsed = time.time() - start
             pos = self.board.xy_to_pos(x, y)
@@ -1685,7 +1843,7 @@ class CaroBot:
     async def run(self):
         self.start_time = time.time(); self._running = True
         log.info(f"{'='*50}")
-        log.info("BOT ZARO1 ALPHAGOMOKU (MK) v5.0 – rule 8 = CARO6, region-first")
+        log.info("BOT CARO ALPHAGOMOKU (MK) v5.0 – rule 8 = CARO6, region-first")
         log.info(f"{'='*50}")
         
         retry_count = 0

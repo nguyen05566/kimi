@@ -8,6 +8,8 @@ on:
         required: false
         default: '5.9'
         type: string
+  # schedule:
+  #   - cron: '0 */6 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-gamevh-account
@@ -26,24 +28,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Wine (for AlphaGomoku Windows exe)
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wine wine32 wine64 xvfb
-          wine --version
-
-      - name: Start Xvfb
-        run: |
-          Xvfb :99 -screen 0 1024x768x24 &
-          sleep 2
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot
+      - name: Run Caro Bot (Linux native engine, no wine)
         env:
-          DISPLAY: ":99"
           CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
+          CARO_USER1: ${{ secrets.CARO_USER1 || secrets.CARO_USER }}
+          CARO_PASSWD1: ${{ secrets.CARO_PASSWD1 || secrets.CARO_PASSWD }}
         run: python3 zaro1.py
