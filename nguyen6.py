@@ -107,6 +107,39 @@ def _find_file(directory: Path, names: List[str]) -> Optional[Path]:
                         return p
     return None
 
+def optimize_alphagomoku_config():
+    """Tự động tối ưu config.json cho AlphaGomoku trên môi trường 2 vCPU (GitHub Actions)."""
+    config_file = ENGINE_DIR / "config.json"
+    if not config_file.exists():
+        return
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        # 1. Tận dụng tối đa 2 vCPU
+        cfg["search_threads"] = 2
+
+        # 2. Tăng độ rộng MCTS tối ưu (64)
+        if "search_config" in cfg and "mcts_config" in cfg["search_config"]:
+            cfg["search_config"]["mcts_config"]["max_children"] = 64
+
+        # 3. Mở rộng bộ nhớ Threat Space Search (TSS) & Hash table
+        if "search_config" in cfg and "tss_config" in cfg["search_config"]:
+            cfg["search_config"]["tss_config"]["max_positions"] = 500
+            cfg["search_config"]["tss_config"]["hash_table_size"] = 8388608
+
+        # 4. Tăng bộ nhớ Node Cache
+        if "search_config" in cfg and "tree_config" in cfg["search_config"]:
+            cfg["search_config"]["tree_config"]["initial_node_cache_size"] = 131072
+            cfg["search_config"]["tree_config"]["edge_bucket_size"] = 400000
+            cfg["search_config"]["tree_config"]["node_bucket_size"] = 20000
+
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        log.info("[AG] Đã tối ưu hóa config.json thành công (threads=2, max_children=64, max_positions=500, hash_table=8MB)")
+    except Exception as e:
+        log.warning(f"[AG] Không thể tối ưu config.json: {e}")
+
 def auto_download_alphagomoku() -> Optional[str]:
     """Tải AlphaGomoku Linux (native) từ GitHub nếu chưa có binary."""
     primary = ENGINE_DIR / AG_BINARY_PRIMARY
@@ -115,6 +148,7 @@ def auto_download_alphagomoku() -> Optional[str]:
             primary.chmod(0o755)
         except Exception:
             pass
+        optimize_alphagomoku_config()
         log.info(f"[AG] Binary đã có: {primary}")
         return str(primary)
 
@@ -124,6 +158,7 @@ def auto_download_alphagomoku() -> Optional[str]:
             binary.chmod(0o755)
         except Exception:
             pass
+        optimize_alphagomoku_config()
         log.info(f"[AG] Binary đã có: {binary}")
         return str(binary)
 
@@ -140,6 +175,8 @@ def auto_download_alphagomoku() -> Optional[str]:
         with zipfile.ZipFile(archive, "r") as zf:
             zf.extractall(str(ENGINE_DIR))
         archive.unlink(missing_ok=True)
+
+        optimize_alphagomoku_config()
 
         binary = _find_file(ENGINE_DIR, AG_BINARY_NAMES)
         if binary:
@@ -470,6 +507,7 @@ class AlphaGomokuEngine:
                 log.warning("[AG] Không tìm thấy binary AlphaGomoku")
                 return False
 
+            optimize_alphagomoku_config()
             try:
                 is_exe = self.binary.lower().endswith(".exe")
                 cmd = self._wine_cmd(self.binary) if is_exe else [self.binary]
