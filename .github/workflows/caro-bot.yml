@@ -3,17 +3,25 @@ name: Caro Bot
 on:
   workflow_dispatch:
     inputs:
-      runtime_seconds:
-        description: 'Thời gian chạy bot (giây)'
-        required: true
-        default: '300'
+      runtime_hours:
+        description: 'Thời gian chạy bot (giờ)'
+        required: false
+        default: '5.7'
+        type: string
   schedule:
     - cron: '0 */6 * * *'   # chạy mỗi 6 giờ
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-gamevh-account
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 355
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,9 +36,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Caro Bot
+      - name: Run Caro Bot (Linux native engine)
         env:
           GAMEVH_USER: ${{ secrets.GAMEVH_USER }}
           GAMEVH_PASS: ${{ secrets.GAMEVH_PASS }}
-          BOT_RUNTIME_SECONDS: ${{ github.event.inputs.runtime_seconds || '300' }}
-        run: python3 embryo_caro_bot.py
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          echo "Starting embryo_caro_bot.py; auto-restart until job timeout (6h)"
+          while true; do
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting embryo_caro_bot.py ==="
+            python3 embryo_caro_bot.py || echo "embryo_caro_bot.py exited with code $?"
+            echo "Restarting embryo_caro_bot.py in 10 seconds"
+            sleep 10
+          done

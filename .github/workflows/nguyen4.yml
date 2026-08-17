@@ -31,31 +31,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Wine (for Embryo 2025 Windows exe)
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wine wine32 wine64 xvfb
-          wine --version
-
-      - name: Start Xvfb
-        run: |
-          Xvfb :99 -screen 0 1024x768x24 &
-          sleep 2
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot (loop until timeout)
+      - name: Run Caro Bot (Linux native engine, no wine)
         env:
-          DISPLAY: ":99"
           CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
         run: |
-          echo "Starting nguyen4.py loop - will auto-restart on exit until job timeout (6h)"
+          echo "Starting nguyen4.py; it will auto-restart until job timeout (6h)"
           while true; do
-            echo "=== $(date) Starting nguyen4.py ==="
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting nguyen4.py ==="
             python3 nguyen4.py || echo "nguyen4.py exited with code $?"
-            echo "=== $(date) nguyen4.py finished, restarting in 10s ==="
+            echo "Restarting nguyen4.py in 10 seconds"
             sleep 10
           done
