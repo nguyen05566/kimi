@@ -1,0 +1,61 @@
+name: nguyen1
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.7'
+        type: string
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-gamevh-account
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Wine (for Embryo 2025 Windows exe)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wine wine32 wine64 xvfb
+          wine --version
+
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Install Python dependencies
+        run: pip install websockets requests --break-system-packages
+
+      - name: Run Caro Bot (loop until timeout)
+        env:
+          DISPLAY: ":99"
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          echo "Starting nguyen1.py loop - will auto-restart on exit until job timeout (6h)"
+          while true; do
+            echo "=== $(date) Starting nguyen1.py ==="
+            python3 nguyen1.py || echo "nguyen1.py exited with code $?"
+            echo "=== $(date) nguyen1.py finished, restarting in 10s ==="
+            sleep 10
+          done

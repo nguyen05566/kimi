@@ -1,0 +1,34 @@
+name: Caro Bot v5 (AlphaGomoku + Embryo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Runtime (hours)'
+        required: false
+        default: '5.9'
+        type: string
+  schedule:
+    - cron: '0 1 * * *'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install websockets requests --break-system-packages
+
+      - name: Run Caro Bot v5
+        env:
+          CARO_USER: ${{ secrets.CARO_USER }}
+          CARO_PASSWD: ${{ secrets.CARO_PASSWD }}
+          CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
+        run: python3 bot5.py

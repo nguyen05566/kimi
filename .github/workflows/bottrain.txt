@@ -1,0 +1,9 @@
+# DEPRECATED - replaced by bottrain-train.yml and bottrain-play.yml
+name: BOTTRAIN (old)
+on:
+  workflow_dispatch:
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Use bottrain-train.yml or bottrain-play.yml instead"
