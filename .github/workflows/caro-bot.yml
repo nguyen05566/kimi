@@ -1,0 +1,36 @@
+name: Caro Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_seconds:
+        description: 'Thời gian chạy bot (giây)'
+        required: true
+        default: '300'
+  schedule:
+    - cron: '0 */6 * * *'   # chạy mỗi 6 giờ
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Caro Bot
+        env:
+          GAMEVH_USER: ${{ secrets.GAMEVH_USER }}
+          GAMEVH_PASS: ${{ secrets.GAMEVH_PASS }}
+          BOT_RUNTIME_SECONDS: ${{ github.event.inputs.runtime_seconds || '300' }}
+        run: python3 embryo_caro_bot.py
