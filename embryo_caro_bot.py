@@ -462,24 +462,44 @@ class BinaryReader:
         v = self.data[self.pos]; self.pos += 1; return v
     def i8(self) -> int:
         if self.pos >= len(self.data): return 0
-        v = struct.unpack_from('>b', self.data, self.pos)[0]; self.pos += 1; return v
+        try:
+            v = struct.unpack_from('>b', self.data, self.pos)[0]
+        except Exception:
+            return 0
+        self.pos += 1; return v
     def i16(self) -> int:
         if self.pos + 2 > len(self.data): return 0
-        v = struct.unpack_from('>h', self.data, self.pos)[0]; self.pos += 2; return v
+        try:
+            v = struct.unpack_from('>h', self.data, self.pos)[0]
+        except Exception:
+            return 0
+        self.pos += 2; return v
     def u16(self) -> int:
         if self.pos + 2 > len(self.data): return 0
-        v = struct.unpack_from('>H', self.data, self.pos)[0]; self.pos += 2; return v
+        try:
+            v = struct.unpack_from('>H', self.data, self.pos)[0]
+        except Exception:
+            return 0
+        self.pos += 2; return v
     def i32(self) -> int:
         if self.pos + 4 > len(self.data): return 0
-        v = struct.unpack_from('>i', self.data, self.pos)[0]; self.pos += 4; return v
+        try:
+            v = struct.unpack_from('>i', self.data, self.pos)[0]
+        except Exception:
+            return 0
+        self.pos += 4; return v
     def i64(self) -> int:
         if self.pos + 8 > len(self.data): return 0
-        hi = struct.unpack_from('>i', self.data, self.pos)[0]
-        lo = struct.unpack_from('>I', self.data, self.pos + 4)[0]
+        try:
+            hi = struct.unpack_from('>i', self.data, self.pos)[0]
+            lo = struct.unpack_from('>I', self.data, self.pos + 4)[0]
+        except Exception:
+            return 0
         self.pos += 8; return (hi << 32) | lo
     def read_ascii(self) -> str:
         if self.pos >= len(self.data): return ""
         n = self.u8()
+        if n < 0: n = 0
         if self.pos + n > len(self.data): n = len(self.data) - self.pos
         s = self.data[self.pos:self.pos + n].decode('ascii', 'replace')
         self.pos += n; return s
@@ -488,12 +508,14 @@ class BinaryReader:
         n = self.i16()
         if n <= 0: return ""
         byte_len = n * 2
+        if byte_len < 0: byte_len = 0
         if self.pos + byte_len > len(self.data): byte_len = len(self.data) - self.pos
         s = self.data[self.pos:self.pos + byte_len].decode('utf-16-be', 'replace')
         self.pos += byte_len; return s
     def read_bytes(self) -> List[int]:
         if self.pos + 2 > len(self.data): return []
         n = self.i16()
+        if n < 0: n = 0
         if self.pos + n > len(self.data): n = len(self.data) - self.pos
         result = list(self.data[self.pos:self.pos + n])
         self.pos += n; return result
