@@ -641,7 +641,6 @@ class CaroBot:
         self.opponent_gone_at = None
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
-        self._last_create_ts = 0.0  # chống tạo bàn liên tục (cooldown)
 
         # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
         self._identity_attempted = False
@@ -779,7 +778,6 @@ class CaroBot:
             self._bet_amts_loaded = False
             await self.send(self.make_list_bet_amt())
         else:
-            self._last_create_ts = time.time()
             await self.send(self.make_create_rule())
 
     async def do_move(self):
@@ -938,7 +936,6 @@ class CaroBot:
         self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
-        self._last_create_ts = time.time()
         await self.send(self.make_create_rule())
 
     async def handle_create_rule(self, r: BinaryReader):
@@ -946,7 +943,6 @@ class CaroBot:
         if status == 0:
             table_id = r.read_ascii()
             self.table_id = table_id; self._rejoin_attempts = 0
-            self.in_table = True  # đã tạo bàn thành công, ngăn watchdog tạo lại
             log.info(f"[CREATE_RULE] Bàn mới! id={table_id}")
             await asyncio.sleep(0.5); self._joining_table = False
             await self.send(self.make_get_table())
@@ -1224,9 +1220,7 @@ class CaroBot:
                     await self.create_new_table()
                 
                 if (not self.is_playing and not self.in_table and not self._joining_table
-                    and not self._rejoining and self._bet_amts_loaded
-                    and time.time() - self._last_create_ts > 60):
-                    self._last_create_ts = time.time()
+                    and not self._rejoining and self._bet_amts_loaded):
                     await self.send(self.make_create_rule())
             except Exception: pass
 
