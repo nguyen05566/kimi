@@ -8,17 +8,20 @@ on:
         required: false
         default: '5.9'
         type: string
-  # schedule:
-  #   - cron: '0 */6 * * *'
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-gamevh-account
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 355
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,9 +34,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install websockets requests --break-system-packages
 
-      - name: Run Caro Bot (Linux native engine, no wine)
+      - name: Run Caro Bot (Embryo Caro6, Linux native)
         env:
-          CARO_RUNTIME_HOURS: ${{ github.event.inputs.runtime_hours || '5.9' }}
-          CARO_USER1: ${{ secrets.CARO_USER1 || secrets.CARO_USER }}
-          CARO_PASSWD1: ${{ secrets.CARO_PASSWD1 || secrets.CARO_PASSWD }}
-        run: python3 zaro2.py
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
+        run: |
+          echo "Starting zaro2.py; it will auto-restart until job timeout (6h)"
+          while true; do
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro2.py ==="
+            python3 zaro2.py || echo "zaro2.py exited with code $?"
+            echo "Restarting zaro2.py in 10 seconds"
+            sleep 10
+          done
