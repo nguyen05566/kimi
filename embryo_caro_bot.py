@@ -44,7 +44,7 @@ EMBRYO_DOWNLOAD_URL = (
     "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/"
     "Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 )
-EMBRYO_TURN_TIME = 10000     # ms - thời gian suy nghĩ mỗi nước (10s, đủ cho Caro6)
+EMBRYO_TURN_TIME = 2000      # ms - thời gian suy nghĩ mỗi nước (2s, đánh nhanh)
 EMBRYO_MATCH_TIME = 120000   # ms - thời gian tổng cả ván
 
 logging.basicConfig(level=logging.INFO,
