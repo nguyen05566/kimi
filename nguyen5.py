@@ -85,12 +85,15 @@ except NameError:
     _BASE_DIR = Path.cwd()
 
 ENGINE_DIR = _BASE_DIR / "embryo-engine"
-EMBRYO_BINARY = "pbrain-embryo26_c5.exe"
-EMBRYO_VERSION = "2026"
-EMBRYO_DOWNLOAD_URL = "http://download.gomocup.com/ai/EMBRYO26.zip"
-# EMBRYO_RULE bỏ - pbrain-embryo26_c5.exe đã viết riêng cho caro c5, không cần INFO rule
+EMBRYO_BINARY = "pbrain-embryo"
+EMBRYO_VERSION = "1.2.0-c6"
+EMBRYO_DOWNLOAD_URL = (
+    "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/"
+    "Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
+)
+# EMBRYO_RULE bỏ - Caro6 đã viết riêng cho Caro, không cần INFO rule
 EMBRYO_TIMEOUT = 2000  # 2 giây (trần tối đa 2s/nước)
-EMBRYO_MOVE_TIMEOUT = 15.0  # giây – timeout cứng cho toàn bộ khâu tính nước (chống treo wine)
+EMBRYO_MOVE_TIMEOUT = 15.0  # giây – timeout cứng cho toàn bộ khâu tính nước (chống treo engine)
 EMBRYO_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION = '1800'
 
 def auto_download_embryo() -> Optional[str]:
@@ -100,19 +103,22 @@ def auto_download_embryo() -> Optional[str]:
             binary_path.chmod(0o755)
         except Exception: pass
         return str(binary_path)
-    log.info(f"[Embryo] Downloading Embryo {EMBRYO_VERSION}...")
+    log.info(f"[Embryo] Downloading Embryo (Linux Caro6) ...")
     ENGINE_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        import zipfile
-        archive = Path("/tmp/embryo26.zip")
+        import bz2
+        bz2_path = str(binary_path) + ".bz2"
         req = urllib.request.Request(EMBRYO_DOWNLOAD_URL, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
         })
         with urllib.request.urlopen(req, timeout=120) as resp:
-            archive.write_bytes(resp.read())
-        with zipfile.ZipFile(archive, "r") as zf:
-            zf.extractall(str(ENGINE_DIR))
-        archive.unlink(missing_ok=True)
+            with open(bz2_path, "wb") as out:
+                out.write(resp.read())
+        with open(bz2_path, "rb") as src_bz2, open(binary_path, "wb") as dst:
+            dst.write(bz2.decompress(src_bz2.read()))
+        try:
+            os.remove(bz2_path)
+        except Exception: pass
         try:
             binary_path.chmod(0o755)
         except Exception: pass
@@ -123,14 +129,13 @@ def auto_download_embryo() -> Optional[str]:
 
 def detect_embryo_binary() -> Optional[str]:
     if not ENGINE_DIR.exists(): return None
-    # Embryo 2025: Windows exe chạy qua wine
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5.exe"):
-        try: f.chmod(0o644)
+    # Embryo Caro6 Linux native
+    b = ENGINE_DIR / EMBRYO_BINARY
+    if b.exists():
+        try: b.chmod(0o755)
         except Exception: pass
-        return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26_c5*"):
-        return str(f)
-    for f in ENGINE_DIR.glob("pbrain-embryo26*.exe"):
+        return str(b)
+    for f in ENGINE_DIR.glob("pbrain-embryo*"):
         return str(f)
     return None
 
@@ -260,12 +265,8 @@ class EmbryoEngine:
             if not self.binary:
                 return False
             try:
-                # Embryo 2025 là Windows exe → chạy qua Wine
-                is_exe = self.binary.lower().endswith(".exe")
-                if is_exe:
-                    cmd = ["wine", self.binary]
-                else:
-                    cmd = [self.binary]
+                # Embryo Caro6 Linux native binary
+                cmd = [self.binary]
                 self.proc = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
@@ -638,7 +639,7 @@ class CaroBot:
             ok = self.engine.start_game(my_symbol=self.my_symbol)
             if ok:
                 self.embryo_available = True
-                log.info(f"[Embryo] Embryo v{EMBRYO_VERSION} OK! (pbrain-embryo26_c5.exe - caro c5)")
+                log.info(f"[Embryo] Embryo v{EMBRYO_VERSION} OK! (pbrain-embryo Linux - caro6)")
             else:
                 self.embryo_available = False
                 log.warning("[Embryo] Start failed!")
@@ -656,7 +657,7 @@ class CaroBot:
         if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
 
     def _hard_reset_engine(self, reason: str = ""):
-        """Kill hẳn process wine + xóa tham chiếu để tạo lại process sạch."""
+        """Kill hẳn process engine + xóa tham chiếu để tạo lại process sạch."""
         try:
             if self.engine is not None:
                 self.engine.stop()
@@ -782,7 +783,7 @@ class CaroBot:
 
             if self.embryo_available:
                 try:
-                    # HARD TIMEOUT: chống treo wine/engine kéo chết bot
+                    # HARD TIMEOUT: chống treo engine kéo chết bot
                     move = await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(
                             None,
