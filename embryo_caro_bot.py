@@ -44,8 +44,7 @@ EMBRYO_DOWNLOAD_URL = (
     "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/"
     "Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
 )
-EMBRYO_TURN_TIME = 2000      # ms - thời gian suy nghĩ mỗi nước (2s, đánh nhanh)
-EMBRYO_MATCH_TIME = 120000   # ms - thời gian tổng cả ván
+EMBRYO_MATCH_TIME = 200000   # ms - thời gian tổng cả ván (200s, engine tự phân bổ)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(message)s",
@@ -249,6 +248,7 @@ class EmbryoEngine:
         self._output_queue = queue.Queue()
         self._reader_thread = None
         self._board_size = 15
+        self._match_start = None
 
     def _ensure_binary(self):
         if os.path.isfile(EMBRYO_BIN):
@@ -334,8 +334,8 @@ class EmbryoEngine:
             size = 19
         self._board_size = size
 
-        self._send_cmd(f"INFO timeout_turn {EMBRYO_TURN_TIME}")
         self._send_cmd(f"INFO timeout_match {EMBRYO_MATCH_TIME}")
+        self._match_start = time.time()
 
         self._send_cmd(f"START {size}")
         found = self._drain_until("OK", timeout=10)
@@ -348,16 +348,24 @@ class EmbryoEngine:
     def my_turn(self) -> Optional[Tuple[int, int]]:
         if not self.process or not self._game_active:
             return None
-        self._send_cmd(f"INFO time_left {EMBRYO_MATCH_TIME}")
+        self._send_cmd(f"INFO time_left {self._remaining_ms()}")
         self._send_cmd("BEGIN")
         return self._wait_for_move()
 
     def opponent_move(self, x: int, y: int) -> Optional[Tuple[int, int]]:
         if not self.process or not self._game_active:
             return None
-        self._send_cmd(f"INFO time_left {EMBRYO_MATCH_TIME}")
+        self._send_cmd(f"INFO time_left {self._remaining_ms()}")
         self._send_cmd(f"TURN {x},{y}")
         return self._wait_for_move()
+
+    def _remaining_ms(self) -> int:
+        """Thời gian còn lại của ván (ms), giảm dần theo thời gian thực."""
+        if self._match_start is None:
+            return EMBRYO_MATCH_TIME
+        elapsed = (time.time() - self._match_start) * 1000
+        remain = int(EMBRYO_MATCH_TIME - elapsed)
+        return max(remain, 0)
 
     def _send_cmd(self, cmd: str):
         if self.process and self.process.stdin:
