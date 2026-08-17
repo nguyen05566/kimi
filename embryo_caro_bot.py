@@ -298,9 +298,9 @@ class EmbryoEngine:
             self._output_queue = queue.Queue()
             self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
             self._reader_thread.start()
-            self._drain_until("OK", timeout=15)
+            self._drain_until("OK", timeout=2)
             self._send_cmd("ABOUT")
-            self._drain_until("variant", timeout=5)
+            self._drain_until("variant", timeout=1)
             log.info("[EMBRYO] Engine started")
         except Exception as e:
             log.error(f"[EMBRYO] Failed to start: {e}")
@@ -310,7 +310,7 @@ class EmbryoEngine:
         if self.process:
             try:
                 self._send_cmd("END")
-                self.process.wait(timeout=3)
+                self.process.wait(timeout=1)
             except Exception:
                 try:
                     self.process.kill()
