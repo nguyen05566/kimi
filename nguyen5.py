@@ -1186,9 +1186,10 @@ class CaroBot:
         
         if slot is not None and slot == self.slot:
             if self.is_playing:
-                self.in_table = False; self._table_lost_at = time.time()
+                self.in_table = False; self.table_id = None; self._table_lost_at = time.time()
             else:
-                self.in_table = False; await asyncio.sleep(1); await self.create_new_table()
+                self.in_table = False; self.table_id = None
+                await asyncio.sleep(1); await self.create_new_table()
         elif self.is_playing:
             if self.opponent_gone_at is None:
                 self.opponent_gone_at = time.time()
