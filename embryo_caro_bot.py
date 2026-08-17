@@ -32,8 +32,8 @@ except ImportError:
 WS_URL = "wss://gamevh.net/ws/gameServer"
 GAME_URL = "https://gamevh.net/play/caro/0"
 # Đọc tài khoản từ biến môi trường (không hardcode mật khẩu vào code, vì repo có thể public)
-USER = os.environ.get("GAMEVH_USER", "ngan2")
-PASSWD = os.environ.get("GAMEVH_PASS", "nhat123456")
+USER = os.environ.get("GAMEVH_USER") or "ngan2"
+PASSWD = os.environ.get("GAMEVH_PASS") or "nhat123456"
 VERSION = "5.0.2"
 GAME_ID = "caro"
 RUNTIME = int(os.environ.get("BOT_RUNTIME_SECONDS", str(5 * 60)))
