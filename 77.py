@@ -13,16 +13,21 @@ import re
 import subprocess
 import signal
 
-# ==================== COOKIE MẶC ĐỊNH ====================
-COOKIE = (
-    "_ga=GA1.2.1268277570.1781579079; "
-    "memberName=4F0D0D2A316B7A1688ED292DEE05CCD9; "
-    "memberPassword=E71A8D5F227140577E4376EA88F92797; "
-    "_gid=GA1.2.1353156256.1781717134; "
-    "JSESSIONID=node0zvjox1rf5xidsuavo0720sp048677678.node0; "
-    "clientIp=F31E20F28AD2B3BEE29105588C4DC2296D05851A73515915FD86406FA485B8B4; "
-    "_gat=1"
-)
+# ==================== TÀI KHOẢN (KHÔNG CẦN COOKIE) ====================
+# Đăng nhập trực tiếp bằng username/password giống các bot nguyen1..nguyen6
+CARO_USER_DIRECT = "nguyen19"
+CARO_PASSWD_DIRECT = "nhat123456"
+
+def _clean_env(val, default):
+    if val and str(val).strip():
+        return str(val).strip()
+    return default
+
+USER = _clean_env(os.environ.get("CARO_USER19") or os.environ.get("CARO_USER"), CARO_USER_DIRECT)
+PASSWD = _clean_env(os.environ.get("CARO_PASSWD19") or os.environ.get("CARO_PASSWD"), CARO_PASSWD_DIRECT)
+
+# Cookie sẽ được tạo tự động sau khi đăng nhập (không hardcode nữa)
+COOKIE = ""
 
 _venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv', 'lib')
 for _py_ver in ['python3.12', 'python3.13', 'python3.11']:
@@ -32,9 +37,11 @@ for _py_ver in ['python3.12', 'python3.13', 'python3.11']:
         break
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
-CURRENT_PLAYER_NICKNAME = 'nguyen19'
-CURRENT_PLAYER_ID = 65692430
-TOKEN = 1238338868
+LOGIN_URL = "https://gamevh.net/login.jsp"
+GAME_URL = "https://gamevh.net/play/xiangqi/0"
+CURRENT_PLAYER_NICKNAME = USER
+CURRENT_PLAYER_ID = 0
+TOKEN = 0
 GAME_ID = 'xiangqi'
 PLACE_PATH = 'Lobby.xiangqi.0'
 
@@ -46,39 +53,66 @@ BOT_ACC_DURATION = '0'
 BOT_BLOCK_SOFTWARE = '0'
 
 def fetch_session_info():
-    global COOKIE, TOKEN, CURRENT_PLAYER_NICKNAME, CURRENT_PLAYER_ID
+    """Đăng nhập bằng USER/PASSWD (không dùng cookie hardcode) và lấy token/nickname/playerId."""
+    global COOKIE, TOKEN, CURRENT_PLAYER_NICKNAME, CURRENT_PLAYER_ID, PLACE_PATH
     try:
-        cookies = {}
-        for item in COOKIE.split("; "):
-            if not item.strip(): continue
-            key, val = item.split("=", 1)
-            cookies[key.strip()] = val.strip()
-
         session = requests.Session()
-        session.cookies.update(cookies)
-        r = session.get("https://gamevh.net/play/xiangqi/0", headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }, timeout=5)
+        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+        session.headers.update({
+            "User-Agent": ua,
+            "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.7",
+        })
 
-        patterns = {
-            'token': r'token\s*=\s*(-?\d+)',
-            'currentPlayerId': r'currentPlayerId\s*=\s*(\d+)',
-            'currentPlayerNickName': r'currentPlayerNickName\s*=\s*["\']?([^"\';\n]+)',
-        }
-        for key, pattern in patterns.items():
-            m = re.search(pattern, r.text)
-            if m:
-                if key == 'token': TOKEN = int(m.group(1))
-                elif key == 'currentPlayerId': CURRENT_PLAYER_ID = int(m.group(1))
-                elif key == 'currentPlayerNickName': CURRENT_PLAYER_NICKNAME = m.group(1).strip()
+        # B1: mở trang login để lấy JSESSIONID
+        session.get(LOGIN_URL, timeout=10)
 
-        for cookie in session.cookies:
-            if cookie.name == 'JSESSIONID':
-                COOKIE = re.sub(r'JSESSIONID=[^;]+', f'JSESSIONID={cookie.value}', COOKIE)
-        print(f"[SESSION] Token: {TOKEN} | NickName: {CURRENT_PLAYER_NICKNAME} | PlayerID: {CURRENT_PLAYER_ID}")
+        # B2: POST đăng nhập
+        resp = session.post(
+            LOGIN_URL, timeout=10,
+            data={"redirect": "/", "USER_NAME": USER, "PASSWORD": PASSWD,
+                  "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
+            headers={"Origin": "https://gamevh.net",
+                     "Referer": LOGIN_URL,
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            allow_redirects=True)
+        if "login.jsp" in resp.url:
+            print(f"[SESSION] Đăng nhập thất bại (sai tài khoản/mật khẩu?): {resp.url}")
+            return False
+
+        # B3: vào trang game để lấy token / nickname / playerId
+        game_resp = session.get(GAME_URL, timeout=10)
+        page_html = game_resp.text
+
+        tm = re.search(r"var\s+token\s*=\s*(-?\d+)", page_html)
+        if not tm:
+            print("[SESSION] Không tìm thấy token")
+            return False
+        TOKEN = int(tm.group(1))
+
+        nm = re.search(r"var\s+currentPlayerNickName\s*=\s*[\"']([^\"']+)[\"']", page_html)
+        if not nm:
+            print("[SESSION] Không tìm thấy currentPlayerNickName")
+            return False
+        CURRENT_PLAYER_NICKNAME = nm.group(1).strip()
+
+        pid = re.search(r"var\s+currentPlayerId\s*=\s*(\d+)", page_html)
+        if pid:
+            CURRENT_PLAYER_ID = int(pid.group(1))
+
+        pm = re.search(r"var\s+placePath\s*=\s*[\"']([^\"']+)[\"']", page_html)
+        if pm:
+            PLACE_PATH = pm.group(1)
+
+        # B4: dựng cookie từ session vừa đăng nhập
+        COOKIE = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
+
+        if CURRENT_PLAYER_NICKNAME != USER:
+            print(f"[SESSION] Cảnh báo: nickname server={CURRENT_PLAYER_NICKNAME!r} khác USER={USER!r}")
+        print(f"[SESSION] Login OK | Token: {TOKEN} | NickName: {CURRENT_PLAYER_NICKNAME} | PlayerID: {CURRENT_PLAYER_ID}")
         return True
     except Exception as e:
-        print(f"[SESSION] Lỗi: {e}")
+        print(f"[SESSION] Lỗi đăng nhập: {e}")
         return False
 
 CMD_NAMES = {
@@ -467,9 +501,9 @@ class PikafishBot:
         data.extend(self.conn.pack_byte(1))
         self.send_message("LOGIN", bytes(data))
 
-    def send_enter_place(self, path=PLACE_PATH, mode=1):
+    def send_enter_place(self, path=None, mode=1):
         data = bytearray()
-        data.extend(self.conn.pack_ascii(path))
+        data.extend(self.conn.pack_ascii(path or PLACE_PATH))
         data.extend(self.conn.pack_string(""))
         data.extend(self.conn.pack_byte(mode))
         self.send_message("ENTER_PLACE", bytes(data))
