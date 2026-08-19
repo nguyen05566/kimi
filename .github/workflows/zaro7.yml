@@ -45,39 +45,48 @@ jobs:
 
       - name: Download Pikafish engine + NNUE
         if: steps.cache-pikafish.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        env:
+          PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
         run: |
           set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq p7zip-full
-          PK_URL="https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z"
-          curl -sL -o /tmp/pikafish.7z "$PK_URL"
-          7z x -y -o/tmp/pikafish /tmp/pikafish.7z > /dev/null
+          # KHÔNG dùng apt nữa: "apt-get update/install p7zip-full" từng treo >7 phút
+          # trên runner mới boot (chờ lock dpkg) khiến bot không bao giờ chạy.
+          # Dùng py7zr qua pip - nhanh, không đụng tới apt.
+          python3 -m pip install --quiet py7zr
 
-          # Chọn binary phù hợp với CPU của runner
+          curl -fL --retry 4 --retry-delay 5 --retry-all-errors --max-time 420 \
+               -o /tmp/pikafish.7z "$PK_URL"
+          ls -lh /tmp/pikafish.7z
+
           if grep -q avx512vnni /proc/cpuinfo; then BIN=pikafish-vnni512
           elif grep -q avx512f /proc/cpuinfo;  then BIN=pikafish-avx512
           elif grep -q bmi2 /proc/cpuinfo;     then BIN=pikafish-bmi2
           elif grep -q avx2 /proc/cpuinfo;     then BIN=pikafish-avx2
           else BIN=pikafish-sse41-popcnt; fi
-          echo "[ENGINE] Chọn $BIN"
+          echo "[ENGINE] CPU hợp với $BIN"
 
-          cp "/tmp/pikafish/Linux/$BIN" "$HOME/pikafish"
-          chmod +x "$HOME/pikafish"
-          if [ -f /tmp/pikafish/pikafish.nnue ]; then
-            cp /tmp/pikafish/pikafish.nnue "$HOME/pikafish.nnue"
-          else
-            curl -sL -o "$HOME/pikafish.nnue" \
-              https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue
-          fi
+          python3 - "$BIN" <<'PY'
+          import os, shutil, sys, py7zr
+          binname = sys.argv[1]
+          targets = {f"Linux/{binname}", "Linux/pikafish-sse41-popcnt", "pikafish.nnue"}
+          with py7zr.SevenZipFile("/tmp/pikafish.7z") as z:
+              z.extract(path="/tmp/pikafish", targets=sorted(targets))
+          home = os.path.expanduser("~")
+          shutil.copy(f"/tmp/pikafish/Linux/{binname}", f"{home}/pikafish")
+          shutil.copy("/tmp/pikafish/pikafish.nnue", f"{home}/pikafish.nnue")
+          os.chmod(f"{home}/pikafish", 0o755)
+          print(f"[ENGINE] Đã cài {binname} + NNUE vào {home}")
+          PY
 
-          # Nếu binary chọn sai (CPU không hỗ trợ) thì hạ cấp dần
           if ! echo -e "uci\nquit" | "$HOME/pikafish" > /dev/null 2>&1; then
-            echo "[ENGINE] $BIN không chạy được, fallback sse41-popcnt"
+            echo "[ENGINE] $BIN không chạy được -> fallback sse41-popcnt"
             cp /tmp/pikafish/Linux/pikafish-sse41-popcnt "$HOME/pikafish"
             chmod +x "$HOME/pikafish"
           fi
 
       - name: Verify engine
+        timeout-minutes: 3
         run: |
           chmod +x "$HOME/pikafish"
           ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
