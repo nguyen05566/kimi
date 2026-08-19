@@ -1,717 +1,549 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════════╗
-║  BOT CARO EMBRYO (zaro) - FULL NAME + AVATAR v3.0                     ║
-║  Engine: Embryo Caro6 v1.2.3 (Linux Native)                    ║
-║  FIX: Chỉ Ready khi đối thủ ngồi vào ghế, hủy khi đối thủ rời   ║
-║  FIX: Cập nhật động khi có người vào/ra phòng xem             ║
-║  FIX: Chạy bất đồng bộ http_login tránh nghẽn luồng WebSocket    ║
-║  FIX: Sửa lỗi xung đột bộ đệm tiến trình con của AI            ║
-╚══════════════════════════════════════════════════════════════════╝
+zaro12 - Xiangqi Bot (gamevh.net) - engine Pikafish
+Chuyển từ caro sang cờ tướng, dùng chung mã nguồn với 77.py.
+Tài khoản: nguyen12
 """
-import subprocess, sys, os, importlib, urllib.request, json, time, struct
-import re, logging, asyncio, random, threading, shutil, selectors, html as html_lib
-from typing import List, Tuple, Dict, Optional
-from pathlib import Path
-from urllib.parse import urljoin
 
-# ======================== LOGGING ========================
-log = logging.getLogger("caro")
-log.setLevel(logging.INFO)
-if not log.handlers:
-    h = logging.StreamHandler(sys.stdout)
-    h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
-    log.addHandler(h)
+import struct
+import threading
+import time
+import sys
+import os
+import requests
+import re
+import subprocess
+import signal
+import atexit
+import tempfile
 
-# ======================== SETUP & IMPORTS ========================
-REQUIRED = ["websockets", "requests"]
-for pkg in REQUIRED:
-    try:
-        importlib.import_module(pkg)
-    except ImportError:
-        print(f"[SETUP] Installing {pkg}...")
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"], stderr=subprocess.DEVNULL, check=True)
-            importlib.import_module(pkg)
-        except Exception:
-            try:
-                subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q"], stderr=subprocess.DEVNULL, check=True)
-                importlib.import_module(pkg)
-            except Exception as e:
-                print(f"[SETUP] Failed to install {pkg}: {e}")
-
-import websockets, requests
-
-# ======================== SAFE IDENTITY CONFIG ========================
-VN_TEN_DAU = [
-    "Tuấn", "Minh", "Đức", "Hoàng", "Huy", "Hùng", "Dũng", "Cường", "Long", "Nam",
-    "Sơn", "Hải", "Phong", "Thắng", "Trung", "Kiên", "Quân", "Thành", "Đạt", "Khoa",
-    "Phúc", "Nghĩa", "Trọng", "Quang", "Bảo", "Khánh", "Hiếu", "Lâm", "Trí", "Thịnh",
-    "Lộc", "Phát", "Tiến", "Việt", "Duy", "Vinh", "Phước", "Bình", "Đăng", "Tùng",
-    "Vũ", "An", "Bách", "Công", "Đại", "Hiệp", "Hòa", "Hưng", "Khải", "Khang",
-    "Khôi", "Mạnh", "Nhật", "Phi", "Phú", "Sang", "Tài", "Tâm", "Thái", "Thuận",
-    "Toàn", "Triết", "Tú", "Linh", "Trang", "Lan", "Mai", "Hương", "Ngọc", "Thảo",
-    "Vy", "Hân", "Châu", "Nhi", "Yến", "Quỳnh", "Ngân", "Trâm", "Phương", "Huyền",
-    "Thúy", "Hằng", "Nga", "Tuyết", "Loan", "Oanh", "Bích", "Diễm", "Kiều", "Liên",
-    "Giang", "Quyên", "Như", "Hà", "Xuân", "Mỹ", "Thu", "Ánh", "Dung", "Hiền",
-    "Hoa", "Huệ", "Ly", "Nhung", "Thư", "Thương", "Thùy", "Tiên", "Trinh", "Trúc", "Uyên", "Vân"
-]
-
-VN_TEN_KHONG_DAU = [
-    "Tuan", "Minh", "Duc", "Hoang", "Huy", "Hung", "Dung", "Cuong", "Long", "Nam",
-    "Son", "Hai", "Phong", "Thang", "Trung", "Kien", "Quan", "Thanh", "Dat", "Khoa",
-    "Phuc", "Nghia", "Trong", "Quang", "Bao", "Khanh", "Hieu", "Lam", "Tri", "Thinh",
-    "Loc", "Phat", "Tien", "Viet", "Duy", "Vinh", "Phuoc", "Binh", "Dang", "Tung",
-    "Vu", "An", "Bach", "Cong", "Dai", "Hiep", "Hoa", "Hung", "Khai", "Khang",
-    "Khoi", "Manh", "Nhat", "Phi", "Phu", "Sang", "Tai", "Tam", "Thai", "Thuan",
-    "Toan", "Triet", "Tu", "Linh", "Trang", "Lan", "Mai", "Huong", "Ngoc", "Thao",
-    "Vy", "Han", "Chau", "Nhi", "Yen", "Quynh", "Ngan", "Tram", "Phuong", "Huyen",
-    "Thuy", "Hang", "Nga", "Tuyet", "Loan", "Oanh", "Bich", "Diem", "Kieu", "Lien",
-    "Giang", "Quyen", "Nhu", "Ha", "Xuan", "My", "Thu", "Anh", "Dung", "Hien",
-    "Hoa", "Hue", "Ly", "Nhung", "Thu", "Thuong", "Thuy", "Tien", "Trinh", "Truc", "Uyen", "Van"
-]
-
-def generate_random_full_name() -> str:
-    """Tạo tên người Việt Nam tự nhiên (chỉ gồm 1 từ: tên có dấu hoặc không dấu), không họ/đệm, không số."""
-    has_accent = random.choice([True, False])
-    name_list = VN_TEN_DAU if has_accent else VN_TEN_KHONG_DAU
-    return random.choice(name_list)
-
-
-# ======================== EMBRYO CONFIG ========================
-try:
-    _BASE_DIR = Path(__file__).parent
-except NameError:
-    _BASE_DIR = Path.cwd()
-
-ENGINE_DIR = _BASE_DIR / "embryo-engine"
-EMBRYO_BINARY = "pbrain-embryo"
-EMBRYO_VERSION = "1.2.0-c6"
-EMBRYO_DOWNLOAD_URL = (
-    "https://raw.githubusercontent.com/Hexik/Embryo_engine/master/"
-    "Caro6/Linux/pbrain-embryo-1.2.0-6f650fab-c6.bz2"
-)
-# EMBRYO_RULE bỏ - Caro6 đã viết riêng cho Caro, không cần INFO rule
-EMBRYO_TIMEOUT = 2000  # 2 giây (trần tối đa 2s/nước)
-EMBRYO_MOVE_TIMEOUT = 15.0  # giây – timeout cứng cho toàn bộ khâu tính nước (chống treo engine)
-EMBRYO_MATCH_TIMEOUT = 1800000  # 1800s = 30 phút - theo BOT_MATCH_DURATION = '1800'
-
-def auto_download_embryo() -> Optional[str]:
-    binary_path = ENGINE_DIR / EMBRYO_BINARY
-    if binary_path.exists():
-        try:
-            binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
-    log.info(f"[Embryo] Downloading Embryo (Linux Caro6) ...")
-    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        import bz2
-        bz2_path = str(binary_path) + ".bz2"
-        req = urllib.request.Request(EMBRYO_DOWNLOAD_URL, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-        })
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            with open(bz2_path, "wb") as out:
-                out.write(resp.read())
-        with open(bz2_path, "rb") as src_bz2, open(binary_path, "wb") as dst:
-            dst.write(bz2.decompress(src_bz2.read()))
-        try:
-            os.remove(bz2_path)
-        except Exception: pass
-        try:
-            binary_path.chmod(0o755)
-        except Exception: pass
-        return str(binary_path)
-    except Exception as e:
-        log.error(f"[Embryo] Download failed: {e}")
-        return None
-
-def detect_embryo_binary() -> Optional[str]:
-    if not ENGINE_DIR.exists(): return None
-    # Embryo Caro6 Linux native
-    b = ENGINE_DIR / EMBRYO_BINARY
-    if b.exists():
-        try: b.chmod(0o755)
-        except Exception: pass
-        return str(b)
-    for f in ENGINE_DIR.glob("pbrain-embryo*"):
-        return str(f)
-    return None
-
-# ======================== ENGINE WRAPPER ========================
-class EmbryoEngine:
-    def __init__(self, timeout_turn=5000, board_width=15, board_height=19, match_timeout_ms=1800000):
-        self.binary = detect_embryo_binary()
-        self.timeout_turn = timeout_turn  # Trần thời gian tối đa mỗi nước (10s)
-        self.match_timeout_ms = match_timeout_ms  # Tổng thời gian ván 30 phút (1.800.000ms)
-        self.time_left_ms = self.match_timeout_ms
-        self._match_start_mono = None
-        self.board_width = board_width; self.board_height = board_height
-        self.proc = None
-        self.lock = threading.Lock()
-        self._buffer = bytearray()
-        self.my_side = 1
-        self._initialized = False
-        self._selector = None
-        self._rectstart_sent = False  # Chỉ gửi RECTSTART 1 lần cho mỗi process sống
-
-    def _init_selector(self):
-        self._close_selector()
-        if self.proc and self.proc.stdout:
-            try:
-                self._selector = selectors.DefaultSelector()
-                self._selector.register(self.proc.stdout, selectors.EVENT_READ)
-            except Exception as e:
-                log.warning(f"[Embryo] Selector register error: {e}")
-                self._selector = None
-
-    def _close_selector(self):
-        if self._selector:
-            try:
-                self._selector.close()
-            except Exception:
-                pass
-            self._selector = None
-
-    def _send_time_infos(self):
-        """Gửi trần thời gian tối đa 10s và thời gian còn lại động cho Embryo."""
-        left = max(self.time_left_ms, self.timeout_turn)
-        self._send(f"INFO timeout_turn {self.timeout_turn}")
-        self._send(f"INFO timeout_match {self.match_timeout_ms}")
-        self._send(f"INFO time_left {left}")
-
-    def _send(self, cmd: str):
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.stdin.write((cmd + "\n").encode("utf-8"))
-                self.proc.stdin.flush()
-            except Exception:
-                pass
-
-    def _read_line(self, timeout=10.0) -> str:
-        if not self.proc or self.proc.poll() is not None:
-            return ""
-        deadline = time.monotonic() + timeout
-        while True:
-            idx = self._buffer.find(b"\n")
-            if idx >= 0:
-                line_bytes = bytes(self._buffer[:idx]).strip()
-                del self._buffer[:idx + 1]
-                return line_bytes.decode("utf-8", errors="replace")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return ""
-            try:
-                if self._selector:
-                    ready = self._selector.select(timeout=min(remaining, 0.1))
-                else:
-                    sel = selectors.DefaultSelector()
-                    sel.register(self.proc.stdout, selectors.EVENT_READ)
-                    ready = sel.select(timeout=min(remaining, 0.1))
-                    sel.close()
-                if ready:
-                    chunk = os.read(self.proc.stdout.fileno(), 4096)
-                    if not chunk:
-                        return ""
-                    self._buffer.extend(chunk)
-            except Exception:
-                return ""
-
-    def _drain_output(self):
-        """Drain engine output thoroughly — quan trọng để tránh ponder output nhiễm buffer."""
-        deadline = time.monotonic() + 0.3
-        while time.monotonic() < deadline:
-            line = self._read_line(timeout=0.05)
-            if not line:
-                # Không còn dòng nào sẵn trong buffer → thoát
-                break
-            # Log ponder/debug output thay vì bỏ im
-            if line.startswith(('MESSAGE', 'DEBUG', 'ERROR')):
-                log.debug(f'[Embryo] drain: {line}')
-            else:
-                log.warning(f'[Embryo] drain unexpected: {line}')
-
-    def start_game(self, my_symbol=1) -> bool:
-        with self.lock:
-            self._match_start_mono = time.monotonic()
-            self.time_left_ms = self.match_timeout_ms
-            if self.proc and self.proc.poll() is None:
-                # RESTART + RECTSTART: kích hoạt opening book cho Caro C5 15x19
-                self._send("RESTART")
-                for _ in range(5):
-                    line = self._read_line(timeout=0.5)
-                    log.info(f"[Embryo] RESTART response: '{line}'")
-                    if line.upper() == "OK":
-                        break
-                self._send("RECTSTART 15,19")
-                for _ in range(5):
-                    line = self._read_line(timeout=0.5)
-                    log.info(f"[Embryo] RECTSTART response: '{line}'")
-                    if line.upper() == "OK":
-                        break
-                self._synced = False
-                self._send_time_infos()
-                self._send("INFO ponder 1")
-                self.my_side = my_symbol
-                self._initialized = True
-                log.info("[Embryo] RESTART + RECTSTART (opening book active)")
-                return True
-
-            # Process chưa có → tạo mới
-            self._synced = False
-            self._rectstart_sent = False
-            self._stop_unlocked()
-            if not self.binary:
-                return False
-            try:
-                # Embryo Caro6 Linux native binary
-                cmd = [self.binary]
-                self.proc = subprocess.Popen(
-                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, cwd=str(ENGINE_DIR)
-                )
-                self._buffer = bytearray()
-                self._init_selector()
-                self.my_side = my_symbol
-                self._send("RECTSTART 15,19")
-                self._rectstart_sent = True
-                for _ in range(10):
-                    line = self._read_line(timeout=1.0)
-                    if line.upper() == "OK":
-                        break
-                self._send_time_infos()
-                self._send("INFO ponder 1")
-                time.sleep(0.2)
-                self._drain_output()
-                self._initialized = True
-                return True
-            except Exception as e:
-                log.error(f"[Embryo] Start error: {e}")
-                self._initialized = False
-                return False
-
-    def restart_game(self) -> bool:
-        with self.lock:
-            if not self._initialized or not self.proc or self.proc.poll() is not None:
-                return False
-            self._match_start_mono = time.monotonic()
-            self.time_left_ms = self.match_timeout_ms
-            self._send("RESTART")
-            for _ in range(5):
-                line = self._read_line(timeout=2.0)
-                if line.upper() == "OK":
-                    break
-            self._send("RECTSTART 15,19")
-            for _ in range(5):
-                line = self._read_line(timeout=2.0)
-                if line.upper() == "OK":
-                    break
-            # KHÔNG gửi lại RECTSTART — engine đã nhớ board size
-            self._synced = False  # Reset cho ván mới, nước đầu dùng BOARD
-            self._send_time_infos()
-            self._send("INFO ponder 1")
-            log.info("[Embryo] RESTART + ponder OK (opening book active)")
-            return True
-
-    def get_move(self, board_history: list, my_side: int) -> Optional[Tuple[int, int]]:
-        with self.lock:
-            try:
-                if not self._initialized or not self.proc or self.proc.poll() is not None:
-                    return None
-                
-                # KHÔNG drain output ở đây — giữ kết quả ponder trong buffer!
-                # Nếu engine đã ponder ra nước đi, nó sẽ nằm sẵn trong buffer
-                # và được đọc ở vòng while bên dưới → think ≈ 0ms
-                
-                # Cập nhật time_left theo đồng hồ ván thực tế
-                if self._match_start_mono is not None:
-                    elapsed_ms = int((time.monotonic() - self._match_start_mono) * 1000)
-                    self.time_left_ms = max(self.match_timeout_ms - elapsed_ms, self.timeout_turn)
-                else:
-                    self._match_start_mono = time.monotonic()
-                
-                self._send_time_infos()
-                t0 = time.monotonic()
-                
-                _sync_state = getattr(self, "_synced", False)
-                _hist_len = len(board_history)
-                _exp_len = getattr(self, "_expected_history_len", -1)
-                can_use_turn = _sync_state and _hist_len == _exp_len + 1
-                if not can_use_turn:
-                    log.info(f"[Embryo] sync debug: synced={_sync_state} hist={_hist_len} exp={_exp_len} can_turn={can_use_turn}")
-                
-                if can_use_turn:
-                    last_x, last_y, _ = board_history[-1]
-                    self._send(f"TURN {last_x},{last_y}")
-                else:
-                    self._send("BOARD")
-                    for (x, y, sym) in board_history:
-                        c = 1 if sym == self.my_side else 2
-                        self._send(f"{x},{y},{c}")
-                    self._send("DONE")
-                
-                # Timeout tối đa (10s trần + 2s bù trừ I/O)
-                deadline = time.monotonic() + (self.timeout_turn / 1000.0) + 2.0
-                move_count = 0
-                while time.monotonic() < deadline:
-                    rem_time = deadline - time.monotonic()
-                    # Polling 0.1s để nhận nước đi ngay tức thì khi engine tính xong sớm
-                    line = self._read_line(timeout=min(0.1, rem_time))
-                    if not line:
-                        continue
-                    if line.startswith(("MESSAGE", "ERROR", "DEBUG")):
-                        log.info(f"[Embryo] engine msg: {line}")
-                        continue
-                    # Regex lọc: chỉ chấp nhận dòng chứa duy nhất "X,Y"
-                    match = re.match(r"^\s*(\d+)\s*,\s*(\d+)\s*$", line)
-                    if match:
-                        mx, my = int(match.group(1)), int(match.group(2))
-                        if not (0 <= mx < self.board_width and 0 <= my < self.board_height):
-                            log.warning(f"[Embryo] Bỏ qua nước ngoài bàn: {mx},{my}")
-                            continue
-                        think_ms = int((time.monotonic() - t0) * 1000)
-                        move_count += 1
-                        if move_count > 1:
-                            log.warning(f"[Embryo] Nhận {move_count} nước, dùng nước cuối: {mx},{my}")
-                        self._synced = True
-                        self._expected_history_len = len(board_history) + 1  # +1 cho nước engine vừa trả lời
-                        self.time_left_ms = max(self.time_left_ms - think_ms, self.timeout_turn)
-                        log.info(f"[Embryo] Move=({mx},{my}) think={think_ms}ms (max 5s) [sync={'T' if can_use_turn else 'F'}]")
-                        return mx, my
-                log.warning("[Embryo] Timeout — engine không trả kết quả")
-                return None
-            except Exception as e:
-                log.warning(f"[Embryo] get_move error: {e}")
-                self._synced = False
-                return None
-
-    def _stop_unlocked(self):
-        if self.proc:
-            try:
-                self._send("END")
-            except Exception:
-                pass
-            try:
-                self.proc.terminate()
-                self.proc.wait(3)
-            except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-            self.proc = None
-            self._initialized = False
-        self._close_selector()
-
-    def stop(self):
-        with self.lock:
-            self._stop_unlocked()
-
-# ======================== CONSTANTS & CONFIG ========================
-WS_URL = "wss://gamevh.net/ws/gameServer"
-GAME_URL = "https://gamevh.net/play/caro/0"
-# === CẤU HÌNH TRỰC TIẾP - KHÔNG CẦN SECRETS ===
-# Đã hardcode theo yêu cầu - ai xem repo sẽ thấy mật khẩu
+# ==================== TÀI KHOẢN (KHÔNG CẦN COOKIE) ====================
+# Đăng nhập trực tiếp bằng username/password giống các bot nguyen1..nguyen6
 CARO_USER_DIRECT = "nguyen12"
 CARO_PASSWD_DIRECT = "nhat123456"
-# Ưu tiên Secrets nếu có, fallback về hardcode
-def _clean_env(val: Optional[str], default: str) -> str:
-    if val and str(val).strip(): return str(val).strip()
+
+def _clean_env(val, default):
+    if val and str(val).strip():
+        return str(val).strip()
     return default
 
-USER = CARO_USER_DIRECT
-PASSWD = CARO_PASSWD_DIRECT
-# Nếu muốn chỉ dùng hardcode:
-# USER = "nguyen3"
-# PASSWD = "nhat123456"
+USER = _clean_env(os.environ.get("ZARO12_USER"), CARO_USER_DIRECT)
+PASSWD = _clean_env(os.environ.get("ZARO12_PASSWD"), CARO_PASSWD_DIRECT)
 
-VERSION = "5.0.2"
-GAME_ID = "caro"
-RUNTIME = int(os.environ.get("CARO_RUNTIME_SECONDS") or
-              float(os.environ.get("CARO_RUNTIME_HOURS", "5.9")) * 3600)
-AUTO_IDENTITY = os.environ.get("CARO_AUTO_IDENTITY", "1") == "1"
-IDENTITY_TEST_ONLY = os.environ.get("CARO_IDENTITY_TEST_ONLY", "0") == "1"
-BOT_BET_XU = 1000
-BOT_MATCH_DURATION = '1800'  # 1800s trên server GameVH
-BOT_TURN_DURATION = '60'     # 60s/nước trên server
-EMPTY = -1
-CIRCLE = 0
-CROSS = 1
+# Cookie sẽ được tạo tự động sau khi đăng nhập (không hardcode nữa)
+COOKIE = ""
 
-CMD_MAP = {
-    300: "PONG", 301: "PING", 302: "LOGIN", 303: "ALERT", 304: "RIBBON_MESSAGE",
-    311: "BROADCAST", 312: "INVITE", 314: "SET_CLIENT_MODE", 315: "CONFIG",
-    401: "ENTER_PLACE", 402: "ENTER_CHILD_PLACE", 405: "CREATE_RULE",
-    406: "PLAYER_ENTERED", 407: "PLAYER_EXITED", 410: "KICK_PLAYER",
-    413: "LIST_BET_AMT", 414: "GET_TABLE_DATA", 417: "START_MATCH",
-    418: "GAMEOVER", 419: "ENTER_STATE", 420: "SET_TURN",
-    421: "SET_PLAYER_STATUS", 422: "SET_PLAYER_POINT", 423: "SET_PLAYER_ATTR",
-    431: "BALANCE_CHANGED", 432: "OWNER_CHANGED", 433: "GET_TABLE_DATA_EX",
-    434: "SET_READY", 501: "BET", 502: "PLAY", 505: "CHAT", 518: "HIGHLIGHT",
-    529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 535: "RETREAT",
+_venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv', 'lib')
+for _py_ver in ['python3.12', 'python3.13', 'python3.11']:
+    _candidate = os.path.join(_venv_path, _py_ver, 'site-packages')
+    if os.path.isdir(_candidate):
+        sys.path.insert(0, _candidate)
+        break
+
+WS_URL = "wss://gamevh.net/ws/gameServer"
+LOGIN_URL = "https://gamevh.net/login.jsp"
+GAME_URL = "https://gamevh.net/play/xiangqi/0"
+CURRENT_PLAYER_NICKNAME = USER
+CURRENT_PLAYER_ID = 0
+TOKEN = 0
+GAME_ID = 'xiangqi'
+PLACE_PATH = 'Lobby.xiangqi.0'
+
+BOT_BET_XU = 5000
+BOT_USE_CREATE_TABLE = True
+BOT_MATCH_DURATION = '10'
+BOT_TURN_DURATION = '60'
+BOT_ACC_DURATION = '0'
+BOT_BLOCK_SOFTWARE = '0'
+
+def fetch_session_info():
+    """Đăng nhập bằng USER/PASSWD (không dùng cookie hardcode) và lấy token/nickname/playerId."""
+    global COOKIE, TOKEN, CURRENT_PLAYER_NICKNAME, CURRENT_PLAYER_ID, PLACE_PATH
+    try:
+        session = requests.Session()
+        ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
+        session.headers.update({
+            "User-Agent": ua,
+            "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.7",
+        })
+
+        # B1: mở trang login để lấy JSESSIONID
+        session.get(LOGIN_URL, timeout=20)
+
+        # B2: POST đăng nhập
+        resp = session.post(
+            LOGIN_URL, timeout=20,
+            data={"redirect": "/", "USER_NAME": USER, "PASSWORD": PASSWD,
+                  "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
+            headers={"Origin": "https://gamevh.net",
+                     "Referer": LOGIN_URL,
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            allow_redirects=True)
+        if "login.jsp" in resp.url:
+            print(f"[SESSION] Đăng nhập thất bại (sai tài khoản/mật khẩu?): {resp.url}")
+            return False
+
+        # B3: vào trang game để lấy token / nickname / playerId
+        game_resp = session.get(GAME_URL, timeout=20)
+        page_html = game_resp.text
+
+        tm = re.search(r"var\s+token\s*=\s*(-?\d+)", page_html)
+        if not tm:
+            print("[SESSION] Không tìm thấy token")
+            return False
+        TOKEN = int(tm.group(1))
+
+        nm = re.search(r"var\s+currentPlayerNickName\s*=\s*[\"']([^\"']+)[\"']", page_html)
+        if not nm:
+            print("[SESSION] Không tìm thấy currentPlayerNickName")
+            return False
+        CURRENT_PLAYER_NICKNAME = nm.group(1).strip()
+
+        pid = re.search(r"var\s+currentPlayerId\s*=\s*(\d+)", page_html)
+        if pid:
+            CURRENT_PLAYER_ID = int(pid.group(1))
+
+        pm = re.search(r"var\s+placePath\s*=\s*[\"']([^\"']+)[\"']", page_html)
+        if pm:
+            PLACE_PATH = pm.group(1)
+
+        # B4: dựng cookie từ session vừa đăng nhập
+        COOKIE = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
+
+        if CURRENT_PLAYER_NICKNAME != USER:
+            print(f"[SESSION] Cảnh báo: nickname server={CURRENT_PLAYER_NICKNAME!r} khác USER={USER!r}")
+        print(f"[SESSION] Login OK | Token: {TOKEN} | NickName: {CURRENT_PLAYER_NICKNAME} | PlayerID: {CURRENT_PLAYER_ID}")
+        return True
+    except Exception as e:
+        print(f"[SESSION] Lỗi đăng nhập: {e}")
+        return False
+
+CMD_NAMES = {
+    300: "PONG", 301: "PING", 302: "LOGIN", 303: "ALERT",
+    311: "BROADCAST", 314: "SET_CLIENT_MODE", 315: "CONFIG",
+    331: "CHAT.SEND", 335: "CHAT.MSG",
+    401: "ENTER_PLACE", 405: "CREATE_RULE", 406: "PLAYER_ENTERED", 407: "PLAYER_EXITED",
+    408: "QUICK_PLAY", 412: "LIST_ZONE_ROOM", 413: "LIST_BET_AMT",
+    414: "GET_TABLE_DATA", 416: "SLOT_IN_TABLE_CHANGED",
+    417: "START_MATCH", 418: "GAMEOVER", 419: "ENTER_STATE",
+    420: "SET_TURN", 434: "SET_READY",
+    502: "PLAY", 529: "MOVE", 533: "ASK_DRAW", 534: "SURRENDER", 601: "LOGIN_EX",
 }
 
-# ======================== BINARY PROTOCOL ========================
-class BinaryReader:
-    def __init__(self, data: bytes):
-        self.data = data; self.pos = 0
-    def remaining(self) -> int: return len(self.data) - self.pos
-    def u8(self) -> int:
-        if self.pos >= len(self.data): return 0
-        v = self.data[self.pos]; self.pos += 1; return v
-    def i8(self) -> int:
-        if self.pos >= len(self.data): return 0
-        v = struct.unpack_from('>b', self.data, self.pos)[0]; self.pos += 1; return v
-    def i16(self) -> int:
-        if self.pos + 2 > len(self.data): return 0
-        v = struct.unpack_from('>h', self.data, self.pos)[0]; self.pos += 2; return v
-    def u16(self) -> int:
-        if self.pos + 2 > len(self.data): return 0
-        v = struct.unpack_from('>H', self.data, self.pos)[0]; self.pos += 2; return v
-    def i32(self) -> int:
-        if self.pos + 4 > len(self.data): return 0
-        v = struct.unpack_from('>i', self.data, self.pos)[0]; self.pos += 4; return v
-    def i64(self) -> int:
-        if self.pos + 8 > len(self.data): return 0
-        hi = struct.unpack_from('>i', self.data, self.pos)[0]
-        lo = struct.unpack_from('>I', self.data, self.pos + 4)[0]
-        self.pos += 8; return (hi << 32) | lo
-    def read_ascii(self) -> str:
-        if self.pos >= len(self.data): return ""
-        n = self.u8()
-        if self.pos + n > len(self.data): n = len(self.data) - self.pos
-        s = self.data[self.pos:self.pos + n].decode('ascii', 'replace')
-        self.pos += n; return s
-    def read_utf(self) -> str:
-        if self.pos + 2 > len(self.data): return ""
-        n = self.i16()
-        if n <= 0: return ""
-        byte_len = n * 2
-        if self.pos + byte_len > len(self.data): byte_len = len(self.data) - self.pos
-        s = self.data[self.pos:self.pos + byte_len].decode('utf-16-be', 'replace')
-        self.pos += byte_len; return s
-    def read_bytes(self) -> List[int]:
-        if self.pos + 2 > len(self.data): return []
-        n = self.i16()
-        if self.pos + n > len(self.data): n = len(self.data) - self.pos
-        result = list(self.data[self.pos:self.pos + n])
-        self.pos += n; return result
-    def read_command(self) -> str:
-        first = self.i8()
-        if first < 0:
-            n = -first
-            if self.pos + n > len(self.data): n = len(self.data) - self.pos
-            s = self.data[self.pos:self.pos + n].decode('ascii', 'replace')
-            self.pos += n; return s
-        second = self.u8()
-        cmd_id = (first << 8) | second
-        return CMD_MAP.get(cmd_id, f"CMD_{cmd_id}")
+class Conn:
+    def pack(self, cmd, data=b''):
+        result = bytearray()
+        if isinstance(cmd, str):
+            cmd_bytes = cmd.encode('ascii')
+            result.append((-len(cmd_bytes)) & 0xFF)
+            result.extend(cmd_bytes)
+        elif isinstance(cmd, int):
+            result.extend(struct.pack('>H', cmd))
+        result.extend(data)
+        return bytes(result)
+    def pack_byte(self, value): return struct.pack('>b', value)
+    def pack_int(self, value): return struct.pack('>i', value)
+    def pack_ascii(self, value):
+        encoded = value.encode('ascii')[:255]
+        return struct.pack('>b', len(encoded)) + encoded
+    def pack_string(self, value):
+        encoded = value.encode('utf-16-be')
+        return struct.pack('>h', len(encoded) // 2) + encoded
 
-class BinaryWriter:
-    def __init__(self): self.parts = []
-    def u8(self, v: int): self.parts.append(struct.pack('>B', v))
-    def i8(self, v: int): self.parts.append(struct.pack('>b', v))
-    def i16(self, v: int): self.parts.append(struct.pack('>h', v))
-    def i32(self, v: int): self.parts.append(struct.pack('>i', v))
-    def i64(self, v: int): self.parts.append(struct.pack('>q', v))
-    def write_ascii(self, s: str):
-        encoded = s.encode('ascii', 'replace'); self.u8(len(encoded)); self.parts.append(encoded)
-    def write_utf(self, s: str):
-        encoded = s.encode('utf-16-be'); self.i16(len(encoded) // 2); self.parts.append(encoded)
-    def write_command(self, cmd: str):
-        cmd_id = next((k for k, v in CMD_MAP.items() if v == cmd), None)
-        if cmd_id: self.parts.append(struct.pack('>H', cmd_id))
+class InboundMessage:
+    def __init__(self, data):
+        self.data = bytes(data)
+        self.offset = 0
+        self.command = self._parse_command()
+    def _parse_command(self):
+        length = self.read_byte()
+        if length < 0:
+            cmd = self.data[self.offset:self.offset + (-length)].decode('ascii', errors='replace')
+            self.offset += (-length)
+            return cmd
         else:
-            b = cmd.encode('ascii'); self.i8(-len(b)); self.parts.append(b)
-    def build(self) -> bytes: return b''.join(self.parts)
+            next_byte = self.data[self.offset] & 0xFF
+            self.offset += 1
+            return CMD_NAMES.get((length << 8) | next_byte, str((length << 8) | next_byte))
+    def read_byte(self):
+        val = struct.unpack_from('>b', self.data, self.offset)[0]
+        self.offset += 1
+        return val
+    def read_short(self):
+        val = struct.unpack_from('>h', self.data, self.offset)[0]
+        self.offset += 2
+        return val
+    def read_int(self):
+        val = struct.unpack_from('>i', self.data, self.offset)[0]
+        self.offset += 4
+        return val
+    def read_long(self):
+        val = struct.unpack_from('>q', self.data, self.offset)[0]
+        self.offset += 8
+        return val
+    def read_ascii(self):
+        length = self.read_byte()
+        if length < 0: length += 256
+        s = self.data[self.offset:self.offset + length].decode('ascii', errors='replace')
+        self.offset += length
+        return s
+    def read_string(self):
+        char_count = self.read_short()
+        s = self.data[self.offset:self.offset + char_count * 2].decode('utf-16-be', errors='replace')
+        self.offset += char_count * 2
+        return s
 
-# ======================== BOARD ========================
-class Board:
-    def __init__(self, width: int = 15, height: int = 19):
-        self.width = width; self.height = height
-        self.grid = [[EMPTY] * width for _ in range(height)]
-        self.history = []; self.placed = set()
+STANDARD_PAWN_POSITIONS = set()
+for _c in [0, 2, 4, 6, 8]:
+    STANDARD_PAWN_POSITIONS.add(6 * 9 + _c)
+    STANDARD_PAWN_POSITIONS.add(3 * 9 + _c)
 
-    def resize(self, width: int, height: int):
-        self.width = width; self.height = height
-        self.grid = [[EMPTY] * width for _ in range(height)]
-        self.history.clear(); self.placed.clear()
+class XiangqiBoardTracker:
+    INITIAL_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
+    def __init__(self): self.reset()
+    def reset(self):
+        self.fen = self.INITIAL_FEN
+        self.move_history = []
+        self.my_slot_id = -1
+        self.first_turn_slot_id = 0
+        self.is_my_turn = False
+        self.is_playing = False
+        self.is_red = None
+    def pos_to_engine_move(self, source_pos, target_pos):
+        s_col, s_row = source_pos % 9, source_pos // 9
+        t_col, t_row = target_pos % 9, target_pos // 9
+        if not self.is_red:
+            s_row, t_row = 9 - s_row, 9 - t_row
+        return f"{chr(ord('a') + s_col)}{s_row}{chr(ord('a') + t_col)}{t_row}"
+    def engine_move_to_pos(self, engine_move):
+        s_col, s_rank = ord(engine_move[0]) - ord('a'), int(engine_move[1])
+        t_col, t_rank = ord(engine_move[2]) - ord('a'), int(engine_move[3])
+        s_row, t_row = s_rank, t_rank
+        if not self.is_red:
+            s_row, t_row = 9 - s_row, 9 - t_row
+        return s_row * 9 + s_col, t_row * 9 + t_col
+    def get_current_fen(self):
+        side = 'w' if len(self.move_history) % 2 == 0 else 'b'
+        board_fen = self.fen.split(' ')[0] if ' ' in self.fen else self.fen
+        return f"{board_fen} {side}", self.move_history
+    def set_my_slot(self, slot_id, first_turn_slot_id):
+        self.my_slot_id = slot_id
+        self.first_turn_slot_id = first_turn_slot_id
+        self.is_red = (self.my_slot_id == first_turn_slot_id)
 
-    def get(self, x: int, y: int) -> int:
-        if 0 <= x < self.width and 0 <= y < self.height: return self.grid[y][x]
-        return EMPTY
-
-    def put(self, x: int, y: int, symbol: int):
-        if self.get(x, y) == EMPTY and 0 <= x < self.width and 0 <= y < self.height:
-            self.grid[y][x] = symbol; self.history.append((x, y, symbol)); self.placed.add((x, y))
-
-    def undo(self, x: int, y: int):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            self.grid[y][x] = EMPTY
-            if self.history and self.history[-1][:2] == (x, y): self.history.pop()
-            self.placed.discard((x, y))
-
-    def xy_to_pos(self, x: int, y: int) -> int: return y * self.width + x
-    def pos_to_xy(self, pos: int) -> tuple: return pos % self.width, pos // self.width
-
-    def load_rle(self, data: List[int]):
-        self.grid = [[EMPTY] * self.width for _ in range(self.height)]
-        self.history.clear(); self.placed.clear()
-        pos = 0
-        for value in data:
-            symbol = value - 256 if value > 127 else value
-            if symbol >= 0:
-                y, x = pos // self.width, pos % self.width
-                if 0 <= x < self.width and 0 <= y < self.height:
-                    self.grid[y][x] = symbol; self.placed.add((x, y))
-                pos += 1
-            else: pos += -symbol
-        for y in range(self.height):
-            for x in range(self.width):
-                s = self.grid[y][x]
-                if s >= 0: self.history.append((x, y, s))
-
-    def get_empty_near_center(self) -> tuple:
-        cx, cy = self.width // 2, self.height // 2
-        for r in range(max(self.width, self.height)):
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    x, y = cx + dx, cy + dy
-                    if 0 <= x < self.width and 0 <= y < self.height and self.grid[y][x] == EMPTY:
-                        return (x, y)
-        return (0, 0)
-
-    def get_empty_near(self, x0: int, y0: int) -> tuple:
-        for r in range(10):
-            for dx in range(-r, r + 1):
-                for dy in range(-r, r + 1):
-                    x, y = x0 + dx, y0 + dy
-                    if 0 <= x < self.width and 0 <= y < self.height:
-                        if self.grid[y][x] == EMPTY:
-                            return (x, y)
-        return self.get_empty_near_center()
-
-# ======================== BOT ========================
-class CaroBot:
+class TrendAnalyzer:
+    """Bộ não phân tích dữ liệu RAM: Hỗ trợ quét kép Sát cục (Mate) và Điểm số xu hướng (CP)"""
     def __init__(self):
-        self.ws = None; self.board = Board(width=15, height=19)
-        self.slot = -1; self.my_symbol = CROSS; self.opponent_symbol = CIRCLE
-        self.is_playing = False; self.in_table = False; self.ready = False
-        self.players = {}; self.nickname = ""; self.token = 0; self.cookie = ""
-        self.place_path = "Lobby.caro.0"; self.lock_key = ""
-        self.start_time = None; self.last_activity = time.time(); self._running = True
-        self.wins = 0; self.losses = 0; self.draws = 0; self.total_games = 0
-        self.pending_move = False
-        self.bet_amts = []; self._resolved_bet_id = None
-        self._bet_amts_loaded = False; self._joining_table = False
-        
-        self.engine = None; self.embryo_available = False
-        self.embryo_moves = 0; self.embryo_errors = 0; self.embryo_fallback_count = 0
-        self._moving = False; self._last_move_xy = None
-        self._embryo_reinit_attempts = 0
-        self._embryo_reinit_cooldown_until = 0.0
-        self._pending_opponent_moves = []  # Queue nước đối thủ khi bot đang tính
-        
-        self.table_id = None
-        self.player_slot_by_id = {}
-        self._pending_kick_player_id = None
-        self.opponent_gone_at = None
-        self._table_lost_at = None
-        self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
+        self.pv_ram_cache = {}
+        self.info_regex = re.compile(r"info .* score cp (-?\d+) .* pv (.+)")
+        self.mate_regex = re.compile(r"info .* score mate (-?\d+) .* pv (.+)")
 
-        # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
-        self._identity_attempted = False
-        self.identity_result = {}
+    def clear(self):
+        self.pv_ram_cache.clear()
 
-    def init_engine(self):
-        if self.engine is not None: return self.embryo_available
-        binary = detect_embryo_binary()
-        if not binary:
-            binary = auto_download_embryo()
-        if not binary:
-            log.warning("[Embryo] No binary found!")
-            self.embryo_available = False
-            return False
+    def parse_line(self, line_str):
+        # 1. Quét thế trận sát cục (Mate) trước để tránh Bot đi vòng vo khi sắp thắng
+        mate_match = self.mate_regex.search(line_str)
+        if mate_match:
+            mate_score = int(mate_match.group(1))
+            pv_line = mate_match.group(2).split()
+            if pv_line:
+                first_move = pv_line[0]
+                self.pv_ram_cache[first_move] = {
+                    "current_score": 99999 if mate_score > 0 else -99999,
+                    "mate_in": mate_score,
+                    "pv_chain": pv_line
+                }
+                return
+
+        # 2. Nếu không có sát cục, tiến hành phân tích điểm cp thông thường
+        match = self.info_regex.search(line_str)
+        if match:
+            score = int(match.group(1))
+            pv_line = match.group(2).split()
+            if len(pv_line) >= 3:
+                first_move = pv_line[0]
+                self.pv_ram_cache[first_move] = {
+                    "current_score": score,
+                    "mate_in": None,
+                    "pv_chain": pv_line
+                }
+
+    def select_best_trend_move(self):
+        if not self.pv_ram_cache:
+            return None
+
+        # ƯU TIÊN TUYỆT ĐỐI: Có nhánh báo sát cục thắng (mate dương), xuất quân dứt điểm ngay!
+        for move, data in self.pv_ram_cache.items():
+            if data["mate_in"] is not None and data["mate_in"] > 0:
+                print(f"[RAM-MATE] 🔥 Phát hiện nhánh sát cục tuyệt đối! Dứt điểm ngay: {move}")
+                return move
+
+        best_move = None
+        avg_score = sum(d["current_score"] for d in self.pv_ram_cache.values()) / len(self.pv_ram_cache)
+        is_negative = avg_score < 0
+
+        if is_negative:
+            # THẾ YẾU (ĐIỂM ÂM): Chọn nhánh có điểm âm thấp nhất (giảm thiểu suy thoái)
+            max_recovery = -999999
+            for move, data in self.pv_ram_cache.items():
+                recovery_rate = data["current_score"] 
+                if recovery_rate > max_recovery:
+                    max_recovery = recovery_rate
+                    best_move = move
+            print(f"[RAM-LEARN] Đang lép vế ({int(avg_score)}). Ép chọn nước phòng thủ tốt nhất: {best_move}")
+        else:
+            # THẾ MẠNH (ĐIỂM DƯƠNG): Chọn nhánh có tốc độ bứt phá điểm cao nhất
+            max_growth = -999999
+            for move, data in self.pv_ram_cache.items():
+                growth_rate = data["current_score"]
+                if growth_rate > max_growth:
+                    max_growth = growth_rate
+                    best_move = move
+            print(f"[RAM-LEARN] Đang ưu thế (+{int(avg_score)}). Ép chọn nước tăng điểm tốt nhất: {best_move}")
+
+        return best_move
+
+class PikafishBot:
+    def __init__(self):
+        self.conn = Conn()
+        self.board = XiangqiBoardTracker()
+        self.trend_analyzer = TrendAnalyzer()  
+        self.engine = None
+        self.ws = None
+        self.connected = False
+        self.logged_in = False
+        self.in_game = False
+        self._joining_table = False
+        self._last_quick_play_time = 0
+        self._QUICK_PLAY_INTERVAL = 10
+        self.bet_amts = []
+        self._resolved_bet_id = None
+        self._bet_amts_loaded = False
+        self.fixed_pawn_positions = set()
+        self.last_action_timestamp = time.time()
+        self.last_recv_timestamp = time.time()
+        self._table_path = None          # nhớ bàn đang ngồi để quay lại sau khi rớt mạng
+        self._table_path_ts = 0.0
+        self._reconnect_streak = 0       # số lần rớt liên tiếp -> giãn thời gian thử lại
+        self._connected_since = 0.0
+        self._enter_fail_at = 0.0        # lúc ENTER_PLACE bị từ chối (để dò bàn "ma")
+        self._latest_bestmove = None
+        self._mate_status = None
+        self._mate_regex = re.compile(r"score mate (-?\d+)")
+        self._init_engine()
+
+    def _init_engine(self):
+        possible_paths = [
+            os.path.expanduser("~/pikafish"),
+            os.path.expanduser("~/Android/pikafish-armv8"),
+            "/data/data/com.termux/files/home/pikafish",
+            "./pikafish"
+        ]
+        pikafish_path = next((p for p in possible_paths if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+        if not pikafish_path: return
+
         try:
-            self.engine = EmbryoEngine(timeout_turn=EMBRYO_TIMEOUT, board_width=15, board_height=19)
-            self.engine.binary = binary
-            ok = self.engine.start_game(my_symbol=self.my_symbol)
-            if ok:
-                self.embryo_available = True
-                log.info(f"[Embryo] Embryo v{EMBRYO_VERSION} OK! (pbrain-embryo Linux - caro6)")
+            self._engine_proc = subprocess.Popen(
+                [pikafish_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
+            )
+            
+            def consume_stderr(proc):
+                try:
+                    while proc.poll() is None:
+                        if not proc.stderr.readline(): break
+                except: pass
+            threading.Thread(target=consume_stderr, args=(self._engine_proc,), daemon=True).start()
+
+            def consume_stdout_and_filter(proc):
+                try:
+                    while proc.poll() is None:
+                        line = proc.stdout.readline()
+                        if not line: break
+                        line_str = line.strip()
+                        
+                        self.trend_analyzer.parse_line(line_str)
+                        
+                        if "score mate" in line_str:
+                            match = self._mate_regex.search(line_str)
+                            if match:
+                                val = int(match.group(1))
+                                if val > 0: self._mate_status = f"WIN_IN_{val}"
+                                elif val < 0: self._mate_status = f"LOSE_IN_{abs(val)}"
+                        
+                        if line_str.startswith("bestmove"):
+                            self._latest_bestmove = line_str
+                except: pass
+            threading.Thread(target=consume_stdout_and_filter, args=(self._engine_proc,), daemon=True).start()
+
+            self._fsf_cmd("uci")
+            # Chừa ít nhất 1 nhân cho luồng WebSocket, nếu không pong/heartbeat bị trễ
+            # và server cắt kết nối ngay giữa ván.
+            _threads = max(1, min(4, (os.cpu_count() or 2) - 1))
+            self._fsf_cmd(f"setoption name Threads value {_threads}")
+            self._fsf_cmd("setoption name Hash value 256")
+            
+            # Khóa cứng MultiPV = 3 để RAM phản xạ mượt và nhanh hơn 5
+            self._fsf_cmd("setoption name MultiPV value 3")
+            
+            time.sleep(1)
+            
+            nnue_path = os.path.expanduser("~/pikafish.nnue")
+            if not os.path.isfile(nnue_path):
+                nnue_path = os.path.join(os.path.dirname(pikafish_path), "pikafish.nnue")
+            if os.path.isfile(nnue_path):
+                self._fsf_cmd(f"setoption name EvalFile value {nnue_path}")
+                self._fsf_cmd("setoption name UseNNUE value true")
             else:
-                self.embryo_available = False
-                log.warning("[Embryo] Start failed!")
-            return self.embryo_available
+                self._fsf_cmd("setoption name UseNNUE value false")
+            self._fsf_cmd("isready")
+            self.engine = True
+            print(f"[ENGINE] ✅ Sẵn sàng hoạt động với MultiPV=3 nâng cấp bộ não chống ngáo sát cục.")
         except Exception as e:
-            log.error(f"[Embryo] Init error: {e}")
-            self.embryo_available = False
-            return False
+            print(f"[ENGINE] ❌ Lỗi khởi tạo: {e}")
 
-    @property
-    def running(self) -> bool: return self._running
+    def _fsf_cmd(self, text):
+        if getattr(self, '_engine_proc', None) and self._engine_proc.poll() is None:
+            self._engine_proc.stdin.write(text + "\n")
+            self._engine_proc.stdin.flush()
 
-    def stop(self):
-        self._running = False
-        if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
-
-    def _hard_reset_engine(self, reason: str = ""):
-        """Kill hẳn process engine + xóa tham chiếu để tạo lại process sạch."""
+    def get_best_move(self, fen, moves, fixed_positions=None):
         try:
-            if self.engine is not None:
-                self.engine.stop()
-        except Exception as e:
-            log.warning(f"[Embryo] _hard_reset_engine stop error: {e}")
-        finally:
-            self.engine = None
-            self.embryo_available = False
-        log.warning(f"[Embryo] HARD-RESET engine (reason={reason}) → lượt sau sẽ init_engine() lại")
+            if not getattr(self, '_engine_proc', None) or self._engine_proc.poll() is not None: return None
+            self.trend_analyzer.clear() 
+            
+            if fixed_positions: return self._get_move_avoiding_fixed(fen, moves, fixed_positions)
+            pos_cmd = f"position fen {fen}"
+            if moves: pos_cmd += " moves " + " ".join(moves)
+            self._fsf_cmd(pos_cmd)
+            
+            # ÉP THỜI GIAN: Cho Engine chạy đúng 1.2 giây để lấy đủ dữ liệu chuỗi PV
+            self._fsf_cmd("go movetime 3200")
+            # movetime 3200ms mà timeout 3s -> luôn bị "stop" trước khi engine trả lời
+            return self._read_bestmove(timeout=4.2)
+        except Exception as e: print(f"[ENGINE] Lỗi tính toán: {e}")
+        return None
 
-    def _try_reinit_engine(self) -> bool:
-        """Tái khởi tạo engine NGAY TRONG VÁN khi embryo_available == False."""
-        MAX_REINIT = 3
-        COOLDOWN = 15.0
-        now = time.time()
-        if now < self._embryo_reinit_cooldown_until:
-            return False
-        if self._embryo_reinit_attempts >= MAX_REINIT:
-            log.warning(f"[Embryo] Đã thử reinit {self._embryo_reinit_attempts}x, tạm ngưng. Sẽ thử lại trận sau.")
-            return False
-        self._embryo_reinit_attempts += 1
-        self._embryo_reinit_cooldown_until = now + COOLDOWN
-        log.warning(f"[Embryo] Thử tái khởi tạo engine ngay trong ván (lần {self._embryo_reinit_attempts}/{MAX_REINIT})...")
-        self._hard_reset_engine("reinit-mid-match")
-        ok = self.init_engine()
-        if ok:
-            log.info("[Embryo] Engine đã phục hồi ngay trong ván")
-            self._embryo_reinit_attempts = 0
-        return ok
+    def _read_bestmove(self, timeout=3):
+        _go_start = time.time()
+        self._latest_bestmove = None 
+        self._mate_status = None     
+        
+        while True:
+            if self._engine_proc.poll() is not None: return None
+            if self._latest_bestmove:
+                return self._latest_bestmove
+            
+            if time.time() - _go_start > timeout:
+                self._fsf_cmd("stop")
+                time.sleep(0.1)
+                if self._latest_bestmove:
+                    return self._latest_bestmove
+                break
+            time.sleep(0.02) # Phản xạ luồng đọc siêu tốc
+        return None
 
-    def save_stats(self):
-        try:
-            with open("/tmp/caro_ag_stats.json", "w") as f:
-                json.dump({'W': self.wins, 'L': self.losses, 'D': self.draws, 'G': self.total_games}, f)
-        except Exception: pass
+    def _get_move_avoiding_fixed(self, fen, moves, fixed_positions):
+        pos_cmd = f"position fen {fen}"
+        if moves: pos_cmd += " moves " + " ".join(moves)
+        self._fsf_cmd(pos_cmd)
+        
+        self._latest_bestmove = None
+        self._mate_status = None
+        self._fsf_cmd("go movetime 1200")
+        
+        _wait_start = time.time()
+        while time.time() - _wait_start < 2:
+            if self._latest_bestmove: break
+            time.sleep(0.05)
+            
+        self._fsf_cmd("stop")
+        time.sleep(0.1)
+        
+        if self._latest_bestmove:
+            return self._latest_bestmove
+        return None
 
-    def update_symbols(self):
-        self.my_symbol = CIRCLE if self.slot == 0 else CROSS
-        self.opponent_symbol = CROSS if self.my_symbol == CIRCLE else CIRCLE
-        log.info(f"Slot={self.slot} Me={'X' if self.my_symbol == CROSS else 'O'}")
+    def connect(self):
+        import websocket
+        self.connected = False
+        self.ws = websocket.WebSocketApp(
+            WS_URL, cookie=COOKIE,
+            on_open=self._on_open, on_message=self._on_message,
+            on_error=self._on_error, on_close=self._on_close,
+            header={"Origin": "https://gamevh.net"}
+        )
+        # ping_timeout=10 cũ khiến engine ăn hết CPU 3.2s/nước -> pong trả chậm -> tự ngắt
+        # giữa ván. Bỏ pong-timeout, thay bằng kiểm tra liveness theo dữ liệu nhận được.
+        self.ws_thread = threading.Thread(
+            target=lambda: self.ws.run_forever(ping_interval=30, ping_timeout=None),
+            daemon=True)
+        self.ws_thread.start()
+        for _ in range(25):
+            if self.connected: break
+            time.sleep(0.2)
+        return self.connected
 
-    def make_login(self) -> bytes:
-        w = BinaryWriter(); w.write_command("LOGIN"); w.write_ascii(self.nickname)
-        w.i32(self.token); w.write_ascii(VERSION); w.write_ascii(self.lock_key)
-        w.write_ascii(GAME_ID); w.i8(1); return w.build()
+    def _on_open(self, ws):
+        self.connected = True
+        self.last_action_timestamp = time.time()
+        self.last_recv_timestamp = time.time()
+        self._connected_since = time.time()
+        self._send_login()
 
-    def make_enter(self, path: str, pw: str = "", mode: int = 1) -> bytes:
-        w = BinaryWriter(); w.write_command("ENTER_PLACE"); w.write_ascii(path)
-        w.write_utf(pw); w.i8(mode); return w.build()
+    def _on_message(self, ws, message):
+        self.last_recv_timestamp = time.time()
+        if isinstance(message, bytes): self._handle_binary_message(message)
+    def _on_error(self, ws, error):
+        print(f"[WS] ❌ Lỗi kết nối: {type(error).__name__}: {error}")
 
-    def make_list_bet_amt(self) -> bytes:
-        w = BinaryWriter(); w.write_command("LIST_BET_AMT"); return w.build()
+    def _on_close(self, ws, code, msg):
+        if self.board.is_playing:
+            print(f"[WS] ⚠️ MẤT KẾT NỐI GIỮA VÁN (code={code}, msg={msg}) -> mất bàn, sẽ phải tạo bàn mới")
+        else:
+            print(f"[WS] Đóng kết nối (code={code}, msg={msg})")
+        # Nếu vừa kết nối đã đứt ngay (<60s) thì coi là rớt liên tiếp -> cần giãn nhịp,
+        # tránh đăng nhập dồn dập tạo ra hàng loạt phiên/bàn rác trên server.
+        if self._connected_since and time.time() - self._connected_since < 60:
+            self._reconnect_streak += 1
+        else:
+            self._reconnect_streak = 0
+        self.connected = False
+        self.logged_in = False
+        self.in_game = False
+        self._joining_table = False
+        self._bet_amts_loaded = False
+        self._resolved_bet_id = None
+        self.bet_amts = []
+        self.fixed_pawn_positions = set()
+        self.board.reset()
 
-    def resolve_bet_amt_id(self) -> Optional[int]:
+    def send_message(self, cmd, data=b''):
+        if self.ws and self.connected:
+            try: self.ws.send(self.conn.pack(cmd, data), opcode=0x2)
+            except: pass
+
+    def _send_login(self):
+        data = bytearray()
+        data.extend(self.conn.pack_ascii(CURRENT_PLAYER_NICKNAME))
+        data.extend(self.conn.pack_int(TOKEN))
+        data.extend(self.conn.pack_ascii("5.0.2"))
+        data.extend(self.conn.pack_ascii(""))
+        data.extend(self.conn.pack_ascii(GAME_ID))
+        data.extend(self.conn.pack_byte(1))
+        self.send_message("LOGIN", bytes(data))
+
+    def send_enter_place(self, path=None, mode=1):
+        data = bytearray()
+        data.extend(self.conn.pack_ascii(path or PLACE_PATH))
+        data.extend(self.conn.pack_string(""))
+        data.extend(self.conn.pack_byte(mode))
+        self.send_message("ENTER_PLACE", bytes(data))
+
+    def send_list_bet_amt(self): self.send_message("LIST_BET_AMT")
+
+    def resolve_bet_amt_id(self):
         if not self.bet_amts: return None
         for ba in self.bet_amts:
             if ba['value'] == BOT_BET_XU: return ba['id']
@@ -719,809 +551,440 @@ class CaroBot:
         if lower: return max(lower, key=lambda x: x['value'])['id']
         return 0
 
-    def make_create_rule(self) -> bytes:
+    def send_create_table(self):
+        now = time.time()
+        if now - self._last_quick_play_time < self._QUICK_PLAY_INTERVAL: return
+        self._last_quick_play_time = now
         bet_amt_id = self._resolved_bet_id if self._resolved_bet_id is not None else self.resolve_bet_amt_id()
-        if bet_amt_id is None: bet_amt_id = 0
-        args = [("matchDuration", BOT_MATCH_DURATION), ("turnDuration", BOT_TURN_DURATION),
-                ("accDuration", "0"), ("blockSoftware", "0")]
-        w = BinaryWriter(); w.write_command("CREATE_RULE"); w.i8(bet_amt_id); w.i8(len(args))
-        for name, val in args: w.write_ascii(name); w.write_utf(val)
-        return w.build()
+        if bet_amt_id is None: return
+        args = [
+            ("matchDuration", str(BOT_MATCH_DURATION)),
+            ("turnDuration", str(BOT_TURN_DURATION)),
+            ("accDuration", str(BOT_ACC_DURATION)),
+            ("blockSoftware", str(BOT_BLOCK_SOFTWARE)),
+        ]
+        data = bytearray()
+        data.extend(self.conn.pack_byte(bet_amt_id))       
+        data.extend(self.conn.pack_byte(len(args)))        
+        for arg_name, arg_value in args:
+            data.extend(self.conn.pack_ascii(arg_name))    
+            data.extend(self.conn.pack_string(arg_value))  
+        self.send_message("CREATE_RULE", bytes(data))
 
-    def make_get_table(self) -> bytes:
-        w = BinaryWriter(); w.write_command("GET_TABLE_DATA_EX"); w.write_ascii(""); return w.build()
+    def send_quick_play(self, room_id="", bet_amt_id=-1):
+        now = time.time()
+        if now - self._last_quick_play_time < self._QUICK_PLAY_INTERVAL: return
+        self._last_quick_play_time = now
+        data = bytearray()
+        data.extend(self.conn.pack_ascii(room_id))
+        data.extend(self.conn.pack_byte(bet_amt_id))
+        self.send_message("QUICK_PLAY", bytes(data))
 
-    def make_play(self, pos: int) -> bytes:
-        w = BinaryWriter(); w.write_command("PLAY"); w.i16(pos); return w.build()
+    def send_play(self, source_pos, target_pos):
+        data = bytearray()
+        data.extend(self.conn.pack_byte(source_pos))
+        data.extend(self.conn.pack_byte(target_pos))
+        self.send_message("PLAY", bytes(data))
 
-    def make_pong(self) -> bytes:
-        w = BinaryWriter(); w.write_command("PONG"); return w.build()
+    def send_ready(self, is_ready=1):
+        if self.board.is_playing: return
+        print("[GAME] ⏳ Gửi trạng thái READY...")
+        data = bytearray()
+        data.extend(self.conn.pack_byte(is_ready))
+        self.send_message("SET_READY", bytes(data))
 
-    def make_ready(self) -> bytes:
-        if self.is_playing: return b''
-        w = BinaryWriter(); w.write_command("SET_READY"); return w.build()
-
-    def make_kick_player(self, player_id: int) -> bytes:
-        # Web client protocol: command 410 followed by signed int64 playerId.
-        w = BinaryWriter(); w.write_command("KICK_PLAYER"); w.i64(player_id)
-        return w.build()
-
-    async def send(self, data: bytes):
-        if self.ws and data:
-            try: await self.ws.send(data)
-            except Exception: pass
-
-    async def create_new_table(self):
-        if not self._bet_amts_loaded:
-            self._bet_amts_loaded = False
-            await self.send(self.make_list_bet_amt())
-        else:
-            await self.send(self.make_create_rule())
-
-    async def do_move(self):
-        if not self.is_playing or not self.running or self.slot < 0: return
-        if self._moving:
-            log.warning("[BOT] do_move đang chạy -> bỏ qua")
-            return
-        self._moving = True
-        self.pending_move = False
-        self._last_move_xy = None
+    def _handle_binary_message(self, data):
         try:
-            start = time.time()
-            x, y = -1, -1
-            
-            # Flush nước đối thủ bị queue TRƯỚC khi capture history
-            if self._pending_opponent_moves:
-                log.info(f"[Embryo] Flushing {len(self._pending_opponent_moves)} queued opponent moves")
-                self._pending_opponent_moves.clear()
-            
-            history = list(self.board.history)
+            msg = InboundMessage(data)
+            cmd = msg.command
+            if cmd == "PING": self.send_message("PONG")
+            elif cmd == "LOGIN": self._handle_login_response(msg)
+            elif cmd == "ENTER_PLACE": self._handle_enter_place_response(msg)
+            elif cmd == "QUICK_PLAY": self._handle_quick_play_response(msg)
+            elif cmd == "LIST_BET_AMT": self._handle_list_bet_amt_response(msg)
+            elif cmd == "CREATE_RULE": self._handle_create_rule_response(msg)
+            elif cmd == "SLOT_IN_TABLE_CHANGED": self._handle_slot_changed(msg)
+            elif cmd == "START_MATCH": self._handle_start_match(msg)
+            elif cmd == "MOVE": self._handle_move(msg)
+            elif cmd == "PLAY" or cmd == "502": self._handle_play_response(msg)
+            elif cmd == "SET_TURN": self._handle_set_turn(msg)
+            elif cmd == "GAMEOVER": self._handle_gameover(msg)
+            elif cmd == "ALERT":
+                try: print(f"[SERVER] ALERT: {msg.read_string()}")
+                except Exception: pass
+        except Exception as e: print(f"[RECV ERROR] {e}")
 
-            # Nếu engine tắt, thử phục hồi ngay trong ván trước khi fallback
-            if not self.embryo_available:
-                self._try_reinit_engine()
-
-            if self.embryo_available:
-                try:
-                    # HARD TIMEOUT: chống treo engine kéo chết bot
-                    move = await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda: self.engine.get_move(history, self.my_symbol)
-                        ),
-                        timeout=EMBRYO_MOVE_TIMEOUT
-                    )
-
-                    if not self.is_playing or not self.running:
-                        log.info("[BOT] Ván đã kết thúc trong lúc engine tính, bỏ qua nước đi")
-                        return
-
-                    if (move and 0 <= move[0] < self.board.width and 0 <= move[1] < self.board.height
-                        and self.board.get(*move) == EMPTY):
-                        x, y = move; self.embryo_moves += 1
-                    else:
-                        self.embryo_errors += 1
-                        log.warning(f"[Embryo] Nước không hợp lệ: {move}, fallback gần nước cuối + hard reset")
-                        if history:
-                            lx, ly = history[-1][0], history[-1][1]
-                        else:
-                            lx, ly = 7, 9
-                        x, y = self.board.get_empty_near(lx, ly)
-                        self.embryo_fallback_count += 1
-                        self._hard_reset_engine("invalid-move")
-                        self._try_reinit_engine()
-                except asyncio.TimeoutError:
-                    self.embryo_errors += 1
-                    log.warning(f"[Embryo] TIMEOUT nước >{EMBRYO_MOVE_TIMEOUT}s → engine treo, reset")
-                    self._hard_reset_engine("timeout")
-                    self._try_reinit_engine()
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
-                    x, y = self.board.get_empty_near(lx, ly)
-                    self.embryo_fallback_count += 1
-                except Exception as e:
-                    self.embryo_errors += 1; log.warning(f"[Embryo] Error: {e}")
-                    self._hard_reset_engine("exception")
-                    self._try_reinit_engine()
-                    if history:
-                        lx, ly = history[-1][0], history[-1][1]
-                    else:
-                        lx, ly = 7, 9
-                    x, y = self.board.get_empty_near(lx, ly)
-                    self.embryo_fallback_count += 1
-            else:
-                if history:
-                    lx, ly = history[-1][0], history[-1][1]
-                else:
-                    lx, ly = 7, 9
-                x, y = self.board.get_empty_near(lx, ly)
-
-            elapsed = time.time() - start
-            pos = self.board.xy_to_pos(x, y)
-            log.info(f"MOVE ({x},{y}) took {elapsed:.2f}s [Embryo]")
-            await self.send(self.make_play(pos))
-            self._last_move_xy = (x, y)
-            self.board.put(x, y, self.my_symbol)
-        finally:
-            self._moving = False
-
-    async def handle(self, raw: bytes):
-        r = BinaryReader(raw)
-        cmd = r.read_command()
-        if cmd != "PING": log.info(f"RECV {cmd}")
-        self.last_activity = time.time()
-        try:
-            if cmd == "PING": await self.send(self.make_pong())
-            elif cmd == "LOGIN": await self.handle_login(r)
-            elif cmd == "ENTER_PLACE": await self.handle_enter(r)
-            elif cmd == "LIST_BET_AMT": await self.handle_list_bet_amt(r)
-            elif cmd == "CREATE_RULE": await self.handle_create_rule(r)
-            elif cmd == "GET_TABLE_DATA_EX": await self.handle_table(r)
-            elif cmd == "START_MATCH": await self.handle_start(r)
-            elif cmd == "SET_TURN": await self.handle_turn(r)
-            elif cmd == "MOVE": await self.handle_move(r)
-            elif cmd == "GAMEOVER": await self.handle_gameover(r)
-            elif cmd == "PLAY": await self.handle_play(r)
-            elif cmd == "KICK_PLAYER": await self.handle_kick(r)
-            elif cmd == "PLAYER_ENTERED": await self.handle_player_enter(r)
-            elif cmd == "PLAYER_EXITED": await self.handle_player_exit(r)
-        except Exception as e: log.error(f"Error {cmd}: {e}", exc_info=True)
-
-    async def handle_login(self, r: BinaryReader):
-        status = r.i8()
-        if status == 0:
-            path = r.read_utf()
-            if path == "REFRESH":
-                login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
-                if login_ok: await self.send(self.make_login())
+    def _handle_login_response(self, msg):
+        if msg.read_byte() == 0:
+            self.logged_in = True
+            path = msg.read_string()
+            if path == 'REFRESH':
+                fetch_session_info()
+                self._send_login()
                 return
-            if r.remaining() > 0: self.lock_key = r.read_ascii()
-            await self.send(self.make_enter(self.place_path))
-        else:
-            log.error(f"LOGIN failed")
+            self.send_enter_place()
 
-    async def handle_enter(self, r: BinaryReader):
-        status = r.i8()
-        if status == 0:
+    def _handle_enter_place_response(self, msg):
+        status = msg.read_byte()
+        if status != 0:
+            # Chỉ coi là "vào bàn lỗi" khi CHÍNH bot đang xin vào bàn; các gói 401 khác
+            # (server đẩy về khi người khác ra/vào) thì bỏ qua, tuyệt đối không đụng
+            # vào in_game kẻo bot đang ngồi bàn lại tưởng mình đã ra ngoài.
             if self._joining_table:
-                self._joining_table = False; self._rejoining = False
-                self.in_table = True
-                await asyncio.sleep(0.3); await self.send(self.make_get_table())
-            elif not self.in_table:
-                if self._want_rejoin and self.table_id:
-                    self._want_rejoin = False; self._rejoining = True; self._joining_table = True
-                    path = f"{self.place_path}.{self.table_id}"
-                    log.info(f"[BOT] Thử vào lại bàn cũ: {path}")
-                    await self.send(self.make_enter(path))
-                else:
-                    self._bet_amts_loaded = False; self._resolved_bet_id = None
-                    await self.send(self.make_list_bet_amt())
-        else:
+                # status=-1 hầu hết là "đã ở sẵn trong bàn đó rồi" (server tự xếp chỗ
+                # cho người tạo bàn). Nếu vội đặt in_game=False rồi tạo bàn khác thì sẽ
+                # đẻ ra bàn rác trong khi bot vẫn đang ngồi bàn cũ. Vì vậy: coi như đã
+                # ở trong bàn, bấm Sẵn sàng, và chỉ bỏ bàn nếu 60s nữa vẫn không có gì.
+                print(f"[TABLE] ENTER_PLACE trả status={status} -> coi như đã ở trong bàn, bấm Sẵn sàng")
+                self._joining_table = False
+                self.in_game = True
+                self._enter_fail_at = time.time()
+                threading.Thread(
+                    target=lambda: (time.sleep(3.0), self.send_ready(1)), daemon=True).start()
+            return
+        if True:
             if self._joining_table:
                 self._joining_table = False
-                if self._rejoining:
-                    self._rejoining = False; self._rejoin_attempts += 1; self.table_id = None
-                    await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
-                else:
-                    await asyncio.sleep(1); await self.send(self.make_create_rule())
+                self.in_game = True
+                self._enter_fail_at = 0.0
+                self.last_action_timestamp = time.time()
+                def delay_initial_ready():
+                    time.sleep(3.0)  
+                    self.send_ready(1)
+                threading.Thread(target=delay_initial_ready, daemon=True).start()
+            elif not self.in_game:
+                # Vừa vào sảnh: nếu vẫn còn bàn cũ (rớt mạng lúc chờ/giữa 2 ván) thì
+                # quay lại ngồi bàn cũ thay vì bỏ bàn tạo bàn mới.
+                if self._table_path and time.time() - self._table_path_ts < 180:
+                    print(f"[TABLE] Thử ngồi lại bàn cũ: {self._table_path}")
+                    self.in_game = True
+                    self._joining_table = True
+                    path = self._table_path
+                    threading.Thread(
+                        target=lambda: (time.sleep(0.5), self.send_enter_place(path=path, mode=1)),
+                        daemon=True).start()
+                    return
+                self._bet_amts_loaded = False
+                self._resolved_bet_id = None
+                self.send_list_bet_amt()
+            else:
+                self.in_game = False
+                self._joining_table = False
+                self.board.reset()
 
-    async def handle_list_bet_amt(self, r: BinaryReader):
-        status = r.i8()
-        if status != 0: return
-        count = r.i8()
-        self.bet_amts = [{"id": i, "value": r.i32()} for i in range(count)]
+    def _handle_quick_play_response(self, msg):
+        if msg.read_byte() == 0:
+            self.in_game = True  
+            self._joining_table = True
+            table_path = msg.read_ascii()
+            self._table_path = table_path; self._table_path_ts = time.time()
+            def async_join():
+                time.sleep(0.5)
+                self.send_enter_place(path=table_path, mode=1)
+            threading.Thread(target=async_join, daemon=True).start()
+
+    def _handle_list_bet_amt_response(self, msg):
+        if msg.read_byte() != 0: return
+        count = msg.read_byte()
+        self.bet_amts = [{"id": i, "value": msg.read_int()} for i in range(count)]
         self._resolved_bet_id = self.resolve_bet_amt_id()
         self._bet_amts_loaded = True
-        await self.send(self.make_create_rule())
 
-    async def handle_create_rule(self, r: BinaryReader):
-        status = r.i8()
-        if status == 0:
-            table_id = r.read_ascii()
-            self.table_id = table_id; self._rejoin_attempts = 0
-            log.info(f"[CREATE_RULE] Bàn mới! id={table_id}")
-            await asyncio.sleep(0.5); self._joining_table = False
-            await self.send(self.make_get_table())
-        else:
-            self._joining_table = False
+    def _handle_create_rule_response(self, msg):
+        if msg.read_byte() == 0:
+            self.in_game = True  
+            self._joining_table = True
+            table_path = msg.read_ascii()
+            self._table_path = table_path; self._table_path_ts = time.time()
+            def async_join():
+                time.sleep(0.5)
+                self.send_enter_place(path=table_path, mode=1)
+            threading.Thread(target=async_join, daemon=True).start()
+        else: self._joining_table = False
 
-    async def handle_table(self, r: BinaryReader):
-        # Guard: KHÔNG reload board khi engine đang tính — tránh xung đột history
-        if self._moving:
-            log.info("[TABLE] Engine đang tính, bỏ qua board reload")
-            return
+    def _handle_slot_changed(self, msg):
         try:
-            first_byte = r.i8()
-            if first_byte != 0:
-                if "not in table" in r.read_utf().lower():
-                    self.in_table = False; self.table_id = None
-                    await self.create_new_table()
-                return
-            
-            seat_count = r.u8()
-            for _ in range(seat_count):
-                r.u8(); r.read_ascii(); r.u8(); child_count = r.u8()
-                for _ in range(child_count): r.u8(); r.read_ascii(); r.read_utf(); r.u8(); r.u8()
-            
-            r.u8(); self.slot = r.i8(); is_playing = r.u8() == 1
-            player_count = r.u8(); self.players = {}
-            self.player_slot_by_id = {}
-            
-            for _ in range(player_count):
-                sid = r.i8(); pid = r.i64(); name = r.read_utf()
-                r.u16(); r.read_ascii(); r.i8(); r.i64(); r.i64(); r.i64(); r.u8(); r.u8()
-                self.players[sid] = {'id': pid, 'name': name}
-                self.player_slot_by_id[pid] = sid
-            
-            current_player = r.i8(); r.i16(); r.i16(); r.u8()
-            self.in_table = True
-            
-            move_count = r.u8()
-            for _ in range(move_count): r.i8(); r.i32()
-            
-            width = r.u8(); height = r.u8(); self.board.resize(width, height)
-            r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
-            
-            r.u8(); r.u8(); n = r.u8()
-            for _ in range(n): r.read_ascii(); r.read_utf()
-            
-            # --- KIỂM TRA ĐỐI THỦ THỰC SỰ NGỒI GHẾ ---
-            has_opponent = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
-            
-            self.is_playing = is_playing
-            log.info(f"[TABLE] Slot={self.slot} Playing={is_playing} Turn=slot{current_player}")
-            
-            if is_playing and current_player == self.slot:
-                if not self._moving and not self.pending_move:
-                    self.pending_move = True; await self.do_move()
-            elif not is_playing and self.slot >= 0:
-                if has_opponent:
-                    if not self.ready:
-                        log.info("[BOT] Phát hiện đối thủ thực sự đã ngồi vào ghế. Bấm Sẵn sàng!")
-                        self.ready = True; await self.send(self.make_ready())
+            _ = msg.read_string()
+            slot_id = msg.read_byte()
+            msg.read_long(); msg.read_long(); msg.read_byte(); msg.read_short(); msg.read_ascii(); msg.read_byte(); msg.read_byte()
+            player_id = msg.read_long()
+            if player_id == CURRENT_PLAYER_ID: 
+                self.board.my_slot_id = slot_id
+            else:
+                if player_id > 0 and not self.board.is_playing:
+                    def delay_ready_on_player():
+                        time.sleep(3.0)  
+                        self.send_ready(1)
+                    threading.Thread(target=delay_ready_on_player, daemon=True).start()
+        except: pass
+
+    def _handle_start_match(self, msg):
+        print(f"[GAME] 🎮 Trận chiến bắt đầu!")
+        self._reconnect_streak = 0
+        self._enter_fail_at = 0.0
+        self.board.reset()
+        self.fixed_pawn_positions.clear()
+        self.board.is_playing = True
+        self.in_game = True
+        self._joining_table = False
+        self.last_action_timestamp = time.time()
+
+        try:
+            player_count = msg.read_byte()
+            for _ in range(player_count): msg.read_byte(); msg.read_int()
+            piece_count = msg.read_byte()
+            board_pieces = []
+            for _ in range(piece_count):
+                raw_sid = msg.read_byte(); raw_face = msg.read_byte(); pos = msg.read_byte(); is_open = msg.read_byte()
+                board_pieces.append((self._decode_piece_id(raw_sid), self._decode_piece_id(raw_face), pos, is_open))
+
+            msg.read_byte(); mystery_count = msg.read_byte()
+            for _ in range(mystery_count): msg.read_byte()
+            msg.read_byte(); msg.read_byte()
+
+            first_turn_slot_id = msg.read_byte()
+            my_slot_id = msg.read_byte()
+            if my_slot_id < 0 or my_slot_id == 255:
+                my_slot_id = self.board.my_slot_id if self.board.my_slot_id >= 0 else first_turn_slot_id
+
+            self.board.set_my_slot(my_slot_id, first_turn_slot_id)
+
+            for sid, face, position, is_open in board_pieces:
+                piece_type = int(face[1]) if len(face) > 1 else 0
+                if piece_type == 7 and position not in STANDARD_PAWN_POSITIONS:
+                    self.fixed_pawn_positions.add(position)
+
+            self.board.fen = self._build_fen_from_pieces(board_pieces)
+            if my_slot_id == first_turn_slot_id:
+                self.board.is_my_turn = True
+                threading.Thread(target=self._make_auto_move, daemon=True).start()
+        except Exception as e: print(f"[START_MATCH ERROR] {e}")
+
+    def _build_fen_from_pieces(self, pieces):
+        board = [['.' for _ in range(9)] for _ in range(10)]
+        for sid, face, position, is_open in pieces:
+            if position < 0 or position >= 90: continue
+            game_row, col = position // 9, position % 9
+            fen_row = 9 - game_row
+            color = face[0]
+            piece_type = int(face[1]) if len(face) > 1 else 0
+            type_to_fen = {1: 'k', 2: 'a', 3: 'b', 4: 'r', 5: 'c', 6: 'n', 7: 'p'}
+            fen_char = type_to_fen.get(piece_type, '?')
+            if color == 'r': fen_char = fen_char.upper()
+            board[fen_row][col] = fen_char
+        fen_rows = []
+        for row in board:
+            fen_row = ""
+            empty = 0
+            for cell in row:
+                if cell == '.': empty += 1
                 else:
-                    if self.ready:
-                        log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
-                    self.ready = False
-            elif not is_playing and self.slot < 0:
-                self.in_table = False; self.table_id = None
-                await asyncio.sleep(1); await self.send(self.make_list_bet_amt())
-            
-            self._rejoining = False
-        except Exception as e: log.error(f"Table error: {e}")
+                    if empty > 0: fen_row += str(empty); empty = 0
+                    fen_row += cell
+            if empty > 0: fen_row += str(empty)
+            fen_rows.append(fen_row)
+        return '/'.join(fen_rows) + ' w'
 
-    async def handle_start(self, r: BinaryReader):
-        self.total_games += 1; self.is_playing = True; self.ready = False; self.pending_move = False
-        self._moving = False; self._last_move_xy = None
-        self._pending_opponent_moves = []
-        self.opponent_gone_at = None
-        self._embryo_reinit_attempts = 0
-        self._embryo_reinit_cooldown_until = 0.0
+    def _handle_move(self, msg):
+        try:
+            source_pos = msg.read_byte()
+            target_pos = msg.read_byte()
+            engine_move = self.board.pos_to_engine_move(source_pos, target_pos)
+            self.last_action_timestamp = time.time()
+            if not self.board.move_history or self.board.move_history[-1] != engine_move:
+                self.board.move_history.append(engine_move)
+        except Exception as e: print(f"[MOVE ERROR] {e}")
+
+    def _handle_play_response(self, msg):
+        if msg.read_byte() != 0:
+            if self.board.move_history: self.board.move_history.pop()
+            self.board.is_my_turn = True
+
+    def _handle_set_turn(self, msg):
+        try:
+            slot_id = msg.read_byte()
+            if slot_id != -1 and self.board.is_playing:  
+                was_my_turn = self.board.is_my_turn
+                self.board.is_my_turn = (slot_id == self.board.my_slot_id)
+                self.last_action_timestamp = time.time()
+                if self.board.is_my_turn and not was_my_turn:
+                    threading.Thread(target=self._make_auto_move, daemon=True).start()
+        except: pass
+
+    def _handle_gameover(self, msg):
+        print("[GAME] 🏁 Trận đấu kết thúc.")
+        self.fixed_pawn_positions.clear()
+        self.board.reset()
+        self.board.is_playing = False
+        self.board.is_my_turn = False
+        self.in_game = True  
+        self._joining_table = False
+        self.last_action_timestamp = time.time()
         
-        player_count = r.u8()
-        for i in range(player_count):
-            r.i8(); r.i32()
+        if getattr(self, '_engine_proc', None) and self._engine_proc.poll() is None:
+            self._fsf_cmd("ucinewgame")
+            self._fsf_cmd("isready")
+
+        def delay_ready():
+            time.sleep(3.0)
+            self.send_ready(1)
+        threading.Thread(target=delay_ready, daemon=True).start()
+
+    def _make_auto_move(self):
+        if not self.board.is_my_turn or not self.board.is_playing: return
         
-        width = r.u8(); height = r.u8(); self.board.resize(width, height)
-        r.i16(); self.board.load_rle(r.read_bytes()); self.update_symbols()
+        if not getattr(self, '_engine_proc', None) or self._engine_proc.poll() is not None:
+            self._init_engine()
+            if not self.engine: return
+
+        fen, moves = self.board.get_current_fen()
+        fixed = self.fixed_pawn_positions if self.fixed_pawn_positions else None
         
-        log.info(f"=== GAME {self.total_games} === Me={'X' if self.my_symbol == CROSS else 'O'}")
-        
-        if self.engine is None:
-            # Lần đầu: tạo process mới + RECTSTART
-            self.init_engine()
-        else:
-            # Đã có process: chỉ RESTART (giữ opening book + ponder state)
-            self.engine.start_game(my_symbol=self.my_symbol)
-        
-        if self.slot < 0:
-            await asyncio.sleep(0.5); await self.send(self.make_get_table())
+        raw_bestmove_line = self.get_best_move(fen, moves, fixed_positions=fixed)
+        if not raw_bestmove_line: return
 
-    async def handle_turn(self, r: BinaryReader):
-        sid = r.i8(); r.i16(); r.i16()
-        if self.slot < 0: return
-        if sid == self.slot and self.is_playing and self.running:
-            if not self.pending_move and not self._moving:
-                self.pending_move = True; await asyncio.sleep(2); await self.do_move()
+        parts = raw_bestmove_line.split()
+        if len(parts) < 2: return
+        best_move = parts[1]
 
-    async def handle_move(self, r: BinaryReader):
-        pos = r.i16(); symbol = r.i8()
-        x, y = self.board.pos_to_xy(pos)
-        
-        # Luôn cập nhật board local
-        current = self.board.get(x, y)
-        if current == symbol:
-            if symbol == self.my_symbol and self._last_move_xy is not None:
-                self._last_move_xy = None
-        elif current != EMPTY and current != symbol:
-            self.my_symbol = symbol
-            self.opponent_symbol = CROSS if symbol == CIRCLE else CIRCLE
-            self.board.undo(x, y); self.board.put(x, y, symbol)
-        else:
-            self.board.put(x, y, symbol)
-        
-        # Nếu engine đang tính → queue nước đi để sync sau
-        if self._moving:
-            self._pending_opponent_moves.append((x, y, symbol))
-            log.info(f"[MOVE] Queued opponent move ({x},{y}) while engine thinking")
+        # ÁP DỤNG BỘ LỌC TỐI ƯU XU HƯỚNG/SÁT CỤC TỪ RAM
+        trend_move = self.trend_analyzer.select_best_trend_move()
+        if trend_move and best_move not in ["(none)", "0000"]:
+            print(f"[RAM-LEARN] 🧠 Thay thế '{best_move}' bằng nước đi tối ưu: '{trend_move}'")
+            best_move = trend_move
 
-    async def handle_play(self, r: BinaryReader):
-        status = r.i8()
-        if status != 0:
-            log.warning(f"PLAY error {status}")
-            self.pending_move = False
-            if self._last_move_xy:
-                self.board.undo(*self._last_move_xy)
-                self._last_move_xy = None
-            await asyncio.sleep(0.5); await self.send(self.make_get_table())
-
-    async def handle_gameover(self, r: BinaryReader):
-        self.is_playing = False; self.pending_move = False
-        self.opponent_gone_at = None
-        player_count = r.u8(); my_result = None
-        results = {}
-        for _ in range(player_count):
-            sid = r.i8(); result = r.i8(); r.i64()
-            results[sid] = result
-            if sid == self.slot: my_result = result
-
-        bot_lost = my_result in (2, 4, 12)
-        if my_result in (1, 11): self.wins += 1; log.info(">>> WIN! <<<")
-        elif bot_lost: self.losses += 1; log.info(">>> LOSE! <<<")
-        else: self.draws += 1; log.info(">>> DRAW! <<<")
-
-        r.read_utf()
-        self.save_stats()
-
-        if self._table_lost_at is not None:
-            self._table_lost_at = None
-            await asyncio.sleep(2); await self.create_new_table()
+        # XỬ LÝ KỊCH BẢN KHI HẾT NƯỚC ĐI CỜ TÀN
+        if best_move in ["(none)", "0000"]:
+            print("\n[HỆ THỐNG TÀN CUỘC] ⚠️ Pikafish báo: bestmove (none) - Hết nước hợp lệ.")
+            self.board.is_my_turn = False
             return
 
-        if bot_lost:
-            # Ưu tiên đúng slot được GAMEOVER đánh dấu thắng; fallback sang đối thủ còn lại.
-            winner_sid = next((sid for sid, result in results.items()
-                               if sid != self.slot and sid >= 0 and result in (1, 11)), None)
-            if winner_sid is None:
-                winner_sid = next((sid for sid in self.players
-                                   if sid != self.slot and sid >= 0), None)
-            winner = self.players.get(winner_sid) if winner_sid is not None else None
-            winner_id = winner.get('id') if winner else None
-            if winner_id is not None:
-                log.info(f"[BOT] Bot thua; sẽ kick người thắng {winner.get('name', winner_id)} sau 5 giây...")
-                asyncio.create_task(self._delay_kick(winner_id, 5.0))
-                return
-            log.warning("[BOT] Bot thua nhưng không tìm thấy playerId người thắng; chuyển sang sẵn sàng")
-
-        log.info("[BOT] Ở lại bàn, sẽ sẵn sàng sau 5 giây...")
-        asyncio.create_task(self._delay_ready(5.0))
-
-    async def handle_kick(self, r: BinaryReader):
-        status = r.i8(); content = r.read_utf()
-        if self._pending_kick_player_id is not None:
-            player_id = self._pending_kick_player_id
-            self._pending_kick_player_id = None
-            if status == 0:
-                log.info(f"[BOT] Kick playerId={player_id} thành công: {content}")
-            else:
-                log.warning(f"[BOT] Kick playerId={player_id} thất bại ({status}): {content}")
-            await asyncio.sleep(1)
-            if self.in_table: await self.send(self.make_get_table())
-            return
-        log.warning(f"[BOT] Bot bị kick khỏi bàn: {content}")
-        self.is_playing = False; self.in_table = False; self.pending_move = False
-        self.table_id = None
-        await asyncio.sleep(1); await self.create_new_table()
-
-    async def _delay_kick(self, player_id: int, delay: float):
-        await asyncio.sleep(delay)
-        if self.is_playing or not self.in_table: return
-        # Chỉ kick nếu đúng playerId vẫn đang ở slot đối phương.
-        if not any(sid != self.slot and sid >= 0 and player.get('id') == player_id
-                   for sid, player in self.players.items()):
-            log.info(f"[BOT] Bỏ kick playerId={player_id}: người chơi không còn ở bàn")
-            return
-        self.ready = False
-        self._pending_kick_player_id = player_id
-        log.info(f"[BOT] Gửi KICK_PLAYER playerId={player_id}")
-        await self.send(self.make_kick_player(player_id))
-        # Không để response bị treo làm nhầm một thông báo kick về sau.
-        await asyncio.sleep(3)
-        if self._pending_kick_player_id == player_id:
-            self._pending_kick_player_id = None
-            log.warning(f"[BOT] KICK_PLAYER playerId={player_id} không có response sau 3 giây")
-            if self.in_table: await self.send(self.make_get_table())
-
-    async def _delay_ready(self, delay: float):
-        await asyncio.sleep(delay)
-        if not self.is_playing and self.in_table:
-            await self.send(self.make_get_table())
-            # Sau khi cập nhật trạng thái bàn, gửi SET_READY để sẵn sàng ván mới
-            if not self.is_playing and self.in_table:
-                self.ready = True
-                await self.send(self.make_ready())
-
-    async def handle_player_enter(self, r: BinaryReader):
-        place_level = r.i8()
-        pid = r.i64(); name = r.read_utf()
-        if r.remaining() >= 36:
-            r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
-            
-        if place_level < 4: return
-        log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
-        await self.send(self.make_get_table())
-
-    async def handle_player_exit(self, r: BinaryReader):
-        place_level = r.i8()
-        pid = r.i64() if r.remaining() >= 8 else -1
-        if place_level < 4: return
-        
-        slot = self.player_slot_by_id.get(pid) if pid >= 0 else None
-        if pid >= 0: self.player_slot_by_id.pop(pid, None)
-        if slot is not None: self.players.pop(slot, None)
-        
-        if slot is not None and slot == self.slot:
-            if self.is_playing:
-                self.in_table = False; self._table_lost_at = time.time()
-            else:
-                self.in_table = False; await asyncio.sleep(1); await self.create_new_table()
-        elif self.is_playing:
-            if self.opponent_gone_at is None:
-                self.opponent_gone_at = time.time()
-                log.info("[BOT] Đối thủ rời giữa ván -> ở lại bàn, chờ GAMEOVER")
-        elif self.in_table:
-            log.info("[BOT] Phát hiện có người rời bàn. Đang cập nhật lại trạng thái...")
-            await self.send(self.make_get_table())
-
-    async def watchdog(self):
-        while self.running:
-            try: await asyncio.sleep(10)
-            except asyncio.CancelledError: return
-            if not self.running: return
-            
-            if self.start_time and time.time() - self.start_time > RUNTIME:
-                self.save_stats(); self.stop(); return
-            
-            if not self.ws or self.ws.close_code is not None: continue
-            
+        # Gửi nước đi hợp lệ lên hệ thống GameVH
+        if best_move:
             try:
-                if (self.opponent_gone_at is not None and self.is_playing
-                    and time.time() - self.opponent_gone_at > 15):
-                    self.opponent_gone_at = None
-                    await self.send(self.make_get_table())
-                
-                if (self._table_lost_at is not None
-                    and time.time() - self._table_lost_at > 8):
-                    self._table_lost_at = None; self.table_id = None
-                    await self.create_new_table()
-                
-                if (not self.is_playing and not self.in_table and not self._joining_table
-                    and not self._rejoining and self._bet_amts_loaded):
-                    await self.send(self.make_create_rule())
-            except Exception: pass
+                source_pos, target_pos = self.board.engine_move_to_pos(best_move)
+                time.sleep(0.3)  # Giả lập thao tác chuột nhẹ nhàng
+                if self.board.is_my_turn and self.board.is_playing:
+                    print(f"-> Hành động: Xuất quân: {best_move}")
+                    self.send_play(source_pos, target_pos)
+            except Exception as e: print(f"[BOT ERROR] Dịch tọa độ lỗi: {e}")
 
-    @staticmethod
-    def _html_attr(tag: str, name: str) -> str:
-        m = re.search(rf'\b{name}\s*=\s*(["\'])(.*?)\1', tag, re.I | re.S)
-        return html_lib.unescape(m.group(2)) if m else ""
+    def _decode_piece_id(self, encoded_id):
+        color = 'r'
+        if encoded_id < 0: encoded_id = -encoded_id; color = 'b'
+        return f"{color}{encoded_id >> 3}{'' if (encoded_id & 7) == 0 else (encoded_id & 7)}"
 
-    def _read_profile_form(self, page_text: str, page_url: str):
-        """Đọc form hồ sơ và giữ nguyên mọi trường hiện có."""
-        form_match = re.search(
-            r'(?is)<form\b[^>]*name=["\']InputForm0["\'][^>]*>.*?</form>',
-            page_text)
-        if not form_match:
-            return None, None
-        form = form_match.group(0)
-        open_tag = re.search(r'(?is)<form\b[^>]*>', form).group(0)
-        action = urljoin(page_url, self._html_attr(open_tag, 'action'))
-        data = {}
+    def start_keep_alive(self):
+        def keep_alive_loop():
+            while self.connected:
+                time.sleep(10)
+                if self.connected: self.send_message("PING")
+        threading.Thread(target=keep_alive_loop, daemon=True).start()
 
-        for tag in re.findall(r'(?is)<input\b[^>]*>', form):
-            name = self._html_attr(tag, 'name')
-            input_type = self._html_attr(tag, 'type').lower()
-            if not name or input_type in ('submit', 'button', 'image', 'file', 'reset'):
-                continue
-            if input_type in ('checkbox', 'radio') and not re.search(r'\bchecked\b', tag, re.I):
-                continue
-            data[name] = self._html_attr(tag, 'value')
+    def run(self):
+        print("[BOT] Khởi chạy hệ thống giám sát tự động...")
+        while True:
+            try:
+                now_ts = time.time()
+                # (a) Không nhận được BẤT KỲ gói nào trong 120s -> kết nối đã chết thật
+                if self.connected and now_ts - self.last_recv_timestamp > 120:
+                    print("[WS] Không nhận dữ liệu 120s -> coi như chết, kết nối lại")
+                    if self.ws: self.ws.close()
+                    time.sleep(2)
+                # (b) Đang trong ván mà 300s không có nước đi nào -> mới cắt (trước là 180s,
+                #     dễ cắt nhầm khi đối thủ suy nghĩ lâu và làm mất luôn cái bàn)
+                elif self.connected and self.board.is_playing:
+                    if now_ts - self.last_action_timestamp > 300:
+                        print("[WS] Ván treo 300s không có nước đi -> kết nối lại")
+                        if self.ws: self.ws.close()
+                        time.sleep(2)
 
-        for match in re.finditer(r'(?is)<select\b([^>]*)>(.*?)</select>', form):
-            name = self._html_attr('<select ' + match.group(1) + '>', 'name')
-            if not name:
-                continue
-            selected = re.search(
-                r'(?is)<option\b([^>]*\bselected\b[^>]*)>(.*?)</option>',
-                match.group(2))
-            if selected:
-                data[name] = self._html_attr('<option ' + selected.group(1) + '>', 'value')
+                if not self.connected:
+                    if self._reconnect_streak >= 3:
+                        print("[BOT] ⚠️ Bị ngắt kết nối liên tục ngay sau khi đăng nhập.")
+                        print(f"[BOT] ⚠️ Nhiều khả năng tài khoản {USER} đang được ĐĂNG NHẬP Ở NƠI KHÁC "
+                              "(GitHub Actions, máy khác, điện thoại...). Server chỉ cho 1 phiên nên hai bên đá nhau.")
+                    if self._reconnect_streak > 0:
+                        delay = min(60, 5 * (2 ** min(self._reconnect_streak - 1, 4)))
+                        print(f"[WS] Rớt liên tiếp lần {self._reconnect_streak} -> chờ {delay}s rồi đăng nhập lại")
+                        time.sleep(delay)
+                    if not fetch_session_info():
+                        time.sleep(5); continue
+                    self.logged_in = False
+                    self.in_game = False
+                    self._joining_table = False
+                    self._bet_amts_loaded = False
+                    self._resolved_bet_id = None
+                    self.bet_amts = []
+                    self.fixed_pawn_positions = set()
+                    self.board.reset()
+                    if not self.connect():
+                        time.sleep(5); continue
+                    self.start_keep_alive()
+                    time.sleep(2)
 
-        for match in re.finditer(r'(?is)<textarea\b([^>]*)>(.*?)</textarea>', form):
-            name = self._html_attr('<textarea ' + match.group(1) + '>', 'name')
-            if name:
-                data[name] = html_lib.unescape(match.group(2)).strip()
-        return action, data
+                # Sau ENTER_PLACE lỗi: nếu 60s trôi qua mà không vào ván nào thì
+                # có lẽ bot KHÔNG thực sự ở trong bàn -> nhả cờ để tạo bàn mới.
+                if (self._enter_fail_at and self.in_game and not self.board.is_playing
+                        and time.time() - self._enter_fail_at > 60):
+                    print("[TABLE] Chờ 60s không vào được ván nào -> bỏ bàn cũ, tạo bàn mới")
+                    self._enter_fail_at = 0.0
+                    self.in_game = False
+                    self._table_path = None
 
-    def update_random_full_name(self, session: requests.Session) -> Dict:
-        """Đổi FULL_NAME mà không chạm tới endpoint đổi tên đăng nhập."""
-        edit_url = 'https://gamevh.net/com/ftl/game/profile/update_profile.jsp'
-        new_name = generate_random_full_name()
-        page = session.get(edit_url, timeout=15, allow_redirects=True)
-        action, data = self._read_profile_form(page.text, page.url)
-        if not action or data is None:
-            log.warning('[Identity] Không đọc được form FULL_NAME')
-            return {'ok': False, 'new_full_name': new_name, 'error': 'form_not_found'}
+                if (self.connected and self.logged_in and not self.in_game
+                        and not self._joining_table):
+                    now = time.time()
+                    if now - self._last_quick_play_time >= self._QUICK_PLAY_INTERVAL:
+                        if BOT_USE_CREATE_TABLE:
+                            if not self._bet_amts_loaded: self.send_list_bet_amt()
+                            else: self.send_create_table()
+                        else: self.send_quick_play()
+                time.sleep(3)
+            except KeyboardInterrupt: break
+            except: time.sleep(5)
 
-        old_name = data.get('FULL_NAME', '')
-        data['FULL_NAME'] = new_name
-        data['OLD_PASSWORD'] = PASSWD
-        data['SAVE'] = '\uf046'
-        response = session.post(
-            action, timeout=20, data=data,
-            headers={'Origin': 'https://gamevh.net', 'Referer': page.url,
-                     'Content-Type': 'application/x-www-form-urlencoded'},
-            allow_redirects=True)
+    def cleanup(self):
+        proc = getattr(self, '_engine_proc', None)
+        if proc:
+            try: 
+                if proc.poll() is None:
+                    proc.stdin.write("quit\n"); proc.stdin.flush(); proc.wait(timeout=2)
+            except:
+                try: proc.terminate()
+                except: pass
+        if self.ws:
+            try: self.ws.close()
+            except: pass
 
-        verify_page = session.get(edit_url, timeout=15, allow_redirects=True)
-        _, verify_data = self._read_profile_form(verify_page.text, verify_page.url)
-        verified_name = (verify_data or {}).get('FULL_NAME')
-        ok = verified_name == new_name
-        if ok:
-            log.info(f'[Identity] FULL_NAME: {old_name!r} -> {new_name!r}')
-        else:
-            log.warning(
-                f'[Identity] FULL_NAME verify failed: expected={new_name!r}, '
-                f'actual={verified_name!r}, HTTP={response.status_code}')
-        return {
-            'ok': ok, 'old_full_name': old_name, 'new_full_name': new_name,
-            'verified_full_name': verified_name, 'http_status': response.status_code
-        }
+def acquire_single_instance_lock():
+    """Chặn chạy 2 tiến trình bot cùng tài khoản trên cùng máy.
 
-    @staticmethod
-    def _extract_profile_balance(page_text: str) -> Optional[int]:
-        m = re.search(
-            r'(?is)<div\s+class=["\'][^"\']*\bchipBalance\b[^"\']*["\'][^>]*>(.*?)</div>',
-            page_text)
-        if not m:
-            return None
-        digits = re.sub(r'[^0-9-]', '', html_lib.unescape(re.sub(r'<[^>]+>', '', m.group(1))))
-        return int(digits) if digits and digits != '-' else None
-
-    @staticmethod
-    def _extract_profile_avatar(page_text: str) -> Optional[int]:
-        m = re.search(r'/avatar/builtin(\d+)\.(?:webp|png|jpg)', page_text, re.I)
-        return int(m.group(1)) if m else None
-
-    def _load_avatar_catalog(self, session: requests.Session) -> List[Dict]:
-        catalog = []
-        seen = set()
-        pattern = re.compile(
-            r'''buyAvatar\(\s*(["']?)(\d+)\1\s*,\s*(["'])(.*?)\3\s*,\s*(["']?)([\d,.]+)\5\s*\)''',
-            re.I | re.S)
-        for category in range(1, 7):
-            url = ('https://gamevh.net/com/ftl/game/profile/'
-                   f'avatar_by_category.jsp?excludeLayout=true&category_id={category}')
-            page = session.get(url, timeout=15)
-            for match in pattern.finditer(page.text):
-                avatar_id = int(match.group(2))
-                if avatar_id in seen:
-                    continue
-                seen.add(avatar_id)
-                cost = int(re.sub(r'[^0-9]', '', match.group(6)) or '0')
-                catalog.append({
-                    'id': avatar_id,
-                    'name': html_lib.unescape(match.group(4)),
-                    'cost': cost,
-                    'category': category
-                })
-        return catalog
-
-    def update_random_avatar(self, session: requests.Session) -> Dict:
-        """Chọn avatar ngẫu nhiên từ catalog sống; có thể phát sinh phí xu."""
-        profile_url = 'https://gamevh.net/com/ftl/game/profile/player_profile.jsp'
-        before_page = session.get(profile_url, timeout=15)
-        old_avatar = self._extract_profile_avatar(before_page.text)
-        balance_before = self._extract_profile_balance(before_page.text)
-        catalog = self._load_avatar_catalog(session)
-        choices = [item for item in catalog if item['id'] != old_avatar]
-        if not choices:
-            log.warning('[Identity] Không tải được catalog avatar')
-            return {'ok': False, 'error': 'avatar_catalog_empty'}
-
-        selected = random.choice(choices)
-        update_url = (
-            'https://gamevh.net/com/ftl/game/profile/update_avatar.jsp'
-            f"?pk={selected['id']}&redirect=/")
-        response = session.post(
-            update_url, timeout=20,
-            headers={'Origin': 'https://gamevh.net',
-                     'Referer': 'https://gamevh.net/com/ftl/game/profile/avatar.jsp'},
-            allow_redirects=True)
-
-        after_page = session.get(profile_url, timeout=15)
-        new_avatar = self._extract_profile_avatar(after_page.text)
-        balance_after = self._extract_profile_balance(after_page.text)
-        ok = new_avatar == selected['id']
-        if ok:
-            log.info(
-                f"[Identity] Avatar: builtin{old_avatar} -> builtin{new_avatar}; "
-                f"giá niêm yết={selected['cost']} xu; số dư={balance_before}->{balance_after}")
-        else:
-            log.warning(
-                f"[Identity] Avatar verify failed: expected=builtin{selected['id']}, "
-                f"actual=builtin{new_avatar}, HTTP={response.status_code}")
-        return {
-            'ok': ok, 'old_avatar': old_avatar, 'new_avatar': new_avatar,
-            'selected_avatar': selected, 'balance_before': balance_before,
-            'balance_after': balance_after, 'http_status': response.status_code
-        }
-
-    def update_profile_identity(self, session: requests.Session) -> Dict:
-        log.info('[Identity] Updating FULL_NAME + avatar (không đổi tên đăng nhập)...')
-        result = {
-            'full_name': self.update_random_full_name(session),
-            'avatar': self.update_random_avatar(session)
-        }
-        self.identity_result = result
-        return result
-
-    def http_login(self) -> bool:
+    Server gamevh chỉ cho 1 phiên/tài khoản: phiên mới đăng nhập sẽ ĐÁ phiên cũ ra
+    (WebSocket bị đóng code 1000). Hai bot cùng chạy sẽ đá nhau vô tận, cứ vài giây
+    lại mất bàn và tạo bàn mới -> đúng triệu chứng "chơi được một lúc lại thoát ra".
+    """
+    try:
+        import fcntl
+        path = os.path.join(tempfile.gettempdir(), f"xiangqi_bot_{USER}.lock")
+        f = open(path, "w")
         try:
-            session = requests.Session()
-            ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/139.0 Safari/537.36")
-            session.headers.update({
-                'User-Agent': ua,
-                'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.7'
-            })
-            session.get('https://gamevh.net/login.jsp', timeout=10)
-            resp = session.post(
-                'https://gamevh.net/login.jsp', timeout=10,
-                data={'redirect': '/', 'USER_NAME': USER, 'PASSWORD': PASSWD,
-                      'AUTO_LOGIN': 'true', 'LOGIN': 'Đăng nhập'},
-                headers={'Origin': 'https://gamevh.net',
-                         'Referer': 'https://gamevh.net/login.jsp',
-                         'Content-Type': 'application/x-www-form-urlencoded'},
-                allow_redirects=True)
-            if 'login.jsp' in resp.url:
-                log.error(f'[BOT] HTTP login failed: {resp.url}')
-                return False
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"[BOT] ❌ Đã có một bot khác đang chạy với tài khoản {USER} (khoá: {path}).")
+            print("[BOT] Thoát để tránh hai phiên đá nhau. Hãy tắt bot kia trước.")
+            sys.exit(1)
+        f.write(str(os.getpid())); f.flush()
+        atexit.register(lambda: (fcntl.flock(f, fcntl.LOCK_UN), f.close()))
+        return f
+    except ImportError:
+        return None
 
-            if AUTO_IDENTITY and not self._identity_attempted:
-                self._identity_attempted = True
-                self.update_profile_identity(session)
-
-            game_resp = session.get(GAME_URL, timeout=10)
-            self.cookie = '; '.join(f'{k}={v}' for k, v in session.cookies.items())
-            page_html = game_resp.text
-
-            tm = re.search(r'var\s+token\s*=\s*(-?\d+)', page_html)
-            if not tm:
-                log.error('[BOT] Token not found')
-                return False
-            self.token = int(tm.group(1))
-
-            nm = re.search(r"var\s+currentPlayerNickName\s*=\s*'([^']+)'", page_html)
-            if not nm:
-                log.error('[BOT] currentPlayerNickName not found')
-                return False
-            self.nickname = nm.group(1)
-
-            pm = re.search(r'var\s+placePath\s*=\s*\"([^\"]+)\"', page_html)
-            if pm:
-                self.place_path = pm.group(1)
-
-            if self.nickname == USER:
-                log.info(f'[Identity] Tên đăng nhập giữ nguyên: {self.nickname}')
-            else:
-                log.warning(
-                    f'[Identity] Server nickname={self.nickname!r} khác CARO_USER={USER!r}')
-            log.info(f'[BOT] Login OK: {self.nickname}')
-            return True
-        except Exception as e:
-            log.error(f'[BOT] Login error: {e}', exc_info=True)
-            return False
-
-    async def connect_ws(self) -> bool:
-        try:
-            self.ws = await websockets.connect(WS_URL,
-                additional_headers={"Cookie": self.cookie, "Origin": "https://gamevh.net",
-                                    "User-Agent": "Mozilla/5.0"},
-                max_size=2**20, ping_interval=None)
-            return True
-        except Exception as e: log.error(f"[BOT] WS connect error: {e}"); return False
-
-    async def run_ws(self):
-        if not await self.connect_ws(): return
-        await self.send(self.make_login())
-        wd_task = asyncio.create_task(self.watchdog())
-        try:
-            async for raw in self.ws:
-                if not self.running: break
-                if isinstance(raw, bytes): await self.handle(raw)
-        except websockets.exceptions.ConnectionClosed as e:
-            log.warning(f"[BOT] WS closed: {e.code}")
-        except Exception as e: log.error(f"[BOT] WS error: {e}")
-        finally:
-            wd_task.cancel()
-            try: await wd_task
-            except Exception: pass
-            self.save_stats()
-            if self.ws and self.ws.close_code is None:
-                try: await self.ws.close()
-                except Exception: pass
-
-    async def run(self):
-        self.start_time = time.time(); self._running = True
-        log.info(f"{'='*50}")
-        log.info("BOT CARO EMBRYO - FULL_NAME + AVATAR v3.0")
-        log.info(f"{'='*50}")
-        
-        retry_count = 0
-        while self.running:
-            if time.time() - self.start_time > RUNTIME: break
-            
-            was_in_table = self.in_table or self.is_playing
-            self._want_rejoin = (was_in_table and self.table_id is not None and self._rejoin_attempts < 2)
-            
-            self.is_playing = False; self.pending_move = False
-            self.in_table = False; self.ready = False
-            self.board = Board(width=15, height=19); self.players.clear()
-            self.bet_amts = []; self._resolved_bet_id = None
-            self._bet_amts_loaded = False; self._joining_table = False
-            self.opponent_gone_at = None; self._table_lost_at = None
-            
-            if self.engine: self.engine.stop(); self.engine = None; self.embryo_available = False
-            
-            # Một lần đăng nhập mỗi chu kỳ để tránh giới hạn/brute-force.
-            login_ok = await asyncio.get_event_loop().run_in_executor(None, self.http_login)
-            if not login_ok:
-                retry_count += 1
-                retry_delay = min(30 * (2 ** (retry_count - 1)), 300)
-                remaining = RUNTIME - (time.time() - self.start_time)
-                if remaining <= 0:
-                    break
-                retry_delay = min(retry_delay, remaining)
-                log.warning(f'[BOT] Login thất bại; thử lại sau {retry_delay:.0f}s')
-                await asyncio.sleep(retry_delay)
-                continue
-
-            retry_count = 0
-            if IDENTITY_TEST_ONLY:
-                # Chế độ kiểm tra: cập nhật + xác minh hồ sơ, không kết nối
-                # WebSocket, không vào phòng, không đặt cược/chơi game.
-                remaining = RUNTIME - (time.time() - self.start_time)
-                log.info(
-                    f'[TEST] Identity test only; không chạy game. '
-                    f'Chờ hết {max(0, remaining):.1f}s...')
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                self.stop()
-                break
-
-            await self.run_ws()
-            
-            if not (self.in_table or self.is_playing):
-                self.table_id = None
-            
-            self.save_stats()
-            if self.engine: self.engine.stop(); self.engine = None
-
-def main():
-    bin_path = auto_download_embryo()
-    if bin_path: print(f"[SETUP] Embryo ready: {os.path.basename(bin_path)}")
-    else: print("[SETUP] No Embryo - bot plays center only")
-    
-    try: asyncio.get_running_loop(); loop = asyncio.get_running_loop(); loop.create_task(_run_bot())
-    except RuntimeError: asyncio.run(_run_bot())
-
-async def _run_bot():
-    try: bot = CaroBot(); await bot.run()
-    except KeyboardInterrupt: log.info("[BOT] Stopped by user")
-    except Exception as e: log.error(f"[BOT] Error: {e}", exc_info=True)
-
-if __name__ == "__main__": main()
-elif 'ipykernel' in sys.modules or 'google.colab' in sys.modules: main()
-
+if __name__ == "__main__":
+    _lock = acquire_single_instance_lock()
+    bot = PikafishBot()
+    def signal_handler(sig, frame): bot.cleanup(); sys.exit(0)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    try: bot.run()
+    finally: bot.cleanup()
