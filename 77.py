@@ -12,6 +12,8 @@ import requests
 import re
 import subprocess
 import signal
+import atexit
+import tempfile
 
 # ==================== TÀI KHOẢN (KHÔNG CẦN COOKIE) ====================
 # Đăng nhập trực tiếp bằng username/password giống các bot nguyen1..nguyen6
@@ -308,12 +310,6 @@ class PikafishBot:
         self.trend_analyzer = TrendAnalyzer()  
         self.engine = None
         self.ws = None
-        # Nếu vừa kết nối đã đứt ngay (<60s) thì coi là rớt liên tiếp -> cần giãn nhịp,
-        # tránh đăng nhập dồn dập tạo ra hàng loạt phiên/bàn rác trên server.
-        if self._connected_since and time.time() - self._connected_since < 60:
-            self._reconnect_streak += 1
-        else:
-            self._reconnect_streak = 0
         self.connected = False
         self.logged_in = False
         self.in_game = False
@@ -898,6 +894,10 @@ class PikafishBot:
                         time.sleep(2)
 
                 if not self.connected:
+                    if self._reconnect_streak >= 3:
+                        print("[BOT] ⚠️ Bị ngắt kết nối liên tục ngay sau khi đăng nhập.")
+                        print(f"[BOT] ⚠️ Nhiều khả năng tài khoản {USER} đang được ĐĂNG NHẬP Ở NƠI KHÁC "
+                              "(GitHub Actions, máy khác, điện thoại...). Server chỉ cho 1 phiên nên hai bên đá nhau.")
                     if self._reconnect_streak > 0:
                         delay = min(60, 5 * (2 ** min(self._reconnect_streak - 1, 4)))
                         print(f"[WS] Rớt liên tiếp lần {self._reconnect_streak} -> chờ {delay}s rồi đăng nhập lại")
@@ -942,7 +942,31 @@ class PikafishBot:
             try: self.ws.close()
             except: pass
 
+def acquire_single_instance_lock():
+    """Chặn chạy 2 tiến trình bot cùng tài khoản trên cùng máy.
+
+    Server gamevh chỉ cho 1 phiên/tài khoản: phiên mới đăng nhập sẽ ĐÁ phiên cũ ra
+    (WebSocket bị đóng code 1000). Hai bot cùng chạy sẽ đá nhau vô tận, cứ vài giây
+    lại mất bàn và tạo bàn mới -> đúng triệu chứng "chơi được một lúc lại thoát ra".
+    """
+    try:
+        import fcntl
+        path = os.path.join(tempfile.gettempdir(), f"xiangqi_bot_{USER}.lock")
+        f = open(path, "w")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"[BOT] ❌ Đã có một bot khác đang chạy với tài khoản {USER} (khoá: {path}).")
+            print("[BOT] Thoát để tránh hai phiên đá nhau. Hãy tắt bot kia trước.")
+            sys.exit(1)
+        f.write(str(os.getpid())); f.flush()
+        atexit.register(lambda: (fcntl.flock(f, fcntl.LOCK_UN), f.close()))
+        return f
+    except ImportError:
+        return None
+
 if __name__ == "__main__":
+    _lock = acquire_single_instance_lock()
     bot = PikafishBot()
     def signal_handler(sig, frame): bot.cleanup(); sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
