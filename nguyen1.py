@@ -444,7 +444,8 @@ CMD_MAP = {
     311: "BROADCAST", 312: "INVITE", 314: "SET_CLIENT_MODE", 315: "CONFIG",
     401: "ENTER_PLACE", 402: "ENTER_CHILD_PLACE", 405: "CREATE_RULE",
     406: "PLAYER_ENTERED", 407: "PLAYER_EXITED", 410: "KICK_PLAYER",
-    413: "LIST_BET_AMT", 414: "GET_TABLE_DATA", 417: "START_MATCH",
+    413: "LIST_BET_AMT", 414: "GET_TABLE_DATA", 416: "SLOT_IN_TABLE_CHANGED",
+    417: "START_MATCH",
     418: "GAMEOVER", 419: "ENTER_STATE", 420: "SET_TURN",
     421: "SET_PLAYER_STATUS", 422: "SET_PLAYER_POINT", 423: "SET_PLAYER_ATTR",
     431: "BALANCE_CHANGED", 432: "OWNER_CHANGED", 433: "GET_TABLE_DATA_EX",
@@ -619,6 +620,11 @@ class CaroBot:
         self.opponent_gone_at = None
         self._table_lost_at = None
         self._want_rejoin = False; self._rejoining = False; self._rejoin_attempts = 0
+
+        # --- READY v2: bám sự kiện ghế (416) thay vì chỉ dựa vào PLAYER_ENTERED ---
+        self._last_ready_sent = 0.0        # chống spam SET_READY
+        self._last_slot_refresh = 0.0      # chống spam GET_TABLE_DATA_EX
+        self._ready_resend_interval = 6.0  # có đối thủ mà chưa vào ván -> gửi lại
 
         # Chỉ cập nhật FULL_NAME/avatar một lần mỗi lần khởi động tiến trình.
         self._identity_attempted = False
@@ -865,6 +871,7 @@ class CaroBot:
             elif cmd == "GAMEOVER": await self.handle_gameover(r)
             elif cmd == "PLAY": await self.handle_play(r)
             elif cmd == "KICK_PLAYER": await self.handle_kick(r)
+            elif cmd == "SLOT_IN_TABLE_CHANGED": await self.handle_slot_changed(r)
             elif cmd == "PLAYER_ENTERED": await self.handle_player_enter(r)
             elif cmd == "PLAYER_EXITED": await self.handle_player_exit(r)
         except Exception as e: log.error(f"Error {cmd}: {e}", exc_info=True)
@@ -978,9 +985,9 @@ class CaroBot:
                     self.pending_move = True; await self.do_move()
             elif not is_playing and self.slot >= 0:
                 if has_opponent:
-                    if not self.ready:
-                        log.info("[BOT] Phát hiện đối thủ thực sự đã ngồi vào ghế. Bấm Sẵn sàng!")
-                        self.ready = True; await self.send(self.make_ready())
+                    # READY v2: KHÔNG latch 1 chiều nữa. Nếu ván chưa bắt đầu thì
+                    # cứ gửi lại SET_READY định kỳ (tự chữa khi gói ready bị rớt).
+                    await self.try_send_ready("đối thủ đã ngồi vào ghế")
                 else:
                     if self.ready:
                         log.info("[BOT] Không có đối thủ ngồi ở ghế đối diện (chỉ có người xem hoặc bàn trống). Hủy Sẵn sàng.")
@@ -1143,15 +1150,69 @@ class CaroBot:
                 self.ready = True
                 await self.send(self.make_ready())
 
+    async def try_send_ready(self, reason: str = "", force: bool = False):
+        """Gửi SET_READY có throttle, cho phép gửi lại nhiều lần (không latch)."""
+        if self.is_playing or not self.in_table or self.slot < 0:
+            return
+        now = time.time()
+        if not force and now - self._last_ready_sent < self._ready_resend_interval:
+            return
+        self._last_ready_sent = now
+        self.ready = True
+        log.info(f"[BOT] Bấm Sẵn sàng ({reason})")
+        await self.send(self.make_ready())
+
+    async def request_table_refresh(self, reason: str = "", min_gap: float = 1.0):
+        """Xin lại GET_TABLE_DATA_EX, có throttle để không spam server."""
+        if not self.in_table:
+            return
+        now = time.time()
+        if now - self._last_slot_refresh < min_gap:
+            return
+        self._last_slot_refresh = now
+        if reason:
+            log.info(f"[BOT] Cập nhật trạng thái bàn ({reason})")
+        await self.send(self.make_get_table())
+
+    async def handle_slot_changed(self, r: BinaryReader):
+        """416 SLOT_IN_TABLE_CHANGED - sự kiện DUY NHẤT báo có người ngồi/rời GHẾ.
+
+        Bắt buộc phải nghe gói này: khán giả đang đứng xem trong phòng rồi mới bấm
+        vào ghế sẽ KHÔNG sinh PLAYER_ENTERED, nên cơ chế cũ (406 -> lấy table) bị mù.
+        Ở đây parse nhẹ để log, còn quyết định Ready vẫn dựa trên GET_TABLE_DATA_EX
+        cho chắc chắn (tránh phụ thuộc layout byte của 416).
+        """
+        slot_id = None; player_id = None
+        try:
+            r.read_utf()
+            slot_id = r.i8()
+            r.i64(); r.i64(); r.u8(); r.i16(); r.read_ascii(); r.u8(); r.u8()
+            player_id = r.i64()
+        except Exception:
+            pass
+        if player_id is not None and player_id > 0:
+            log.info(f"[BOT] SLOT_CHANGED: có người ngồi vào ghế {slot_id} (playerId={player_id})")
+        else:
+            log.info(f"[BOT] SLOT_CHANGED: ghế {slot_id} thay đổi (trống/không đọc được id)")
+        # Cho phép ready lại ngay, không chờ hết interval
+        self._last_ready_sent = 0.0
+        await self.request_table_refresh("sau SLOT_CHANGED")
+
     async def handle_player_enter(self, r: BinaryReader):
         place_level = r.i8()
         pid = r.i64(); name = r.read_utf()
         if r.remaining() >= 36:
             r.i64(); r.i64(); r.read_ascii(); r.i32(); r.i32(); r.i8(); r.i64(); r.i8()
             
-        if place_level < 4: return
-        log.info(f"[BOT] Phát hiện {name} vào bàn cờ. Đang cập nhật trạng thái bàn...")
-        await self.send(self.make_get_table())
+        # READY v2: không chặn cứng place_level nữa. Nếu bot đang ở bàn thì bất kỳ
+        # ai vào phòng/bàn cũng nên refresh để kiểm tra ghế đối diện.
+        if place_level < 4 and not self.in_table: return
+        log.info(f"[BOT] Phát hiện {name} vào phòng/bàn (level={place_level}). Cập nhật trạng thái bàn...")
+        # Chỉ phá throttle ready khi là sự kiện cấp BÀN (level>=4); người vào xem
+        # (level 3) chỉ cần refresh, tránh gửi SET_READY lặp vô ích.
+        if place_level >= 4:
+            self._last_ready_sent = 0.0
+        await self.request_table_refresh("có người vào bàn")
 
     async def handle_player_exit(self, r: BinaryReader):
         place_level = r.i8()
@@ -1200,6 +1261,14 @@ class CaroBot:
                 if (not self.is_playing and not self.in_table and not self._joining_table
                     and not self._rejoining and self._bet_amts_loaded):
                     await self.send(self.make_create_rule())
+
+                # READY v2: đang ở bàn, chưa đánh -> refresh + ready lại định kỳ.
+                if self.in_table and not self.is_playing and self.slot >= 0:
+                    has_opp = any(sid >= 0 and sid != self.slot for sid in self.players.keys())
+                    if has_opp:
+                        await self.try_send_ready("watchdog: vẫn có đối thủ mà chưa vào ván")
+                    else:
+                        await self.request_table_refresh("", min_gap=20.0)
             except Exception: pass
 
     @staticmethod
