@@ -326,7 +326,7 @@ class PikafishBot:
         self._table_path_ts = 0.0
         self._reconnect_streak = 0       # số lần rớt liên tiếp -> giãn thời gian thử lại
         self._connected_since = 0.0
-        self._enter_fail_until = 0.0     # bị từ chối vào bàn -> tạm ngưng tạo bàn mới
+        self._enter_fail_at = 0.0        # lúc ENTER_PLACE bị từ chối (để dò bàn "ma")
         self._latest_bestmove = None
         self._mate_status = None
         self._mate_regex = re.compile(r"score mate (-?\d+)")
@@ -629,19 +629,22 @@ class PikafishBot:
             # (server đẩy về khi người khác ra/vào) thì bỏ qua, tuyệt đối không đụng
             # vào in_game kẻo bot đang ngồi bàn lại tưởng mình đã ra ngoài.
             if self._joining_table:
-                # status=-1 thường nghĩa là server vẫn coi tài khoản đang ở bàn/phiên cũ.
-                # Tạo bàn mới ngay lập tức chỉ đẻ thêm bàn rác -> phải chờ server nhả.
-                print(f"[TABLE] Vào bàn thất bại (status={status}) -> chờ 30s cho server nhả phiên cũ")
+                # status=-1 hầu hết là "đã ở sẵn trong bàn đó rồi" (server tự xếp chỗ
+                # cho người tạo bàn). Nếu vội đặt in_game=False rồi tạo bàn khác thì sẽ
+                # đẻ ra bàn rác trong khi bot vẫn đang ngồi bàn cũ. Vì vậy: coi như đã
+                # ở trong bàn, bấm Sẵn sàng, và chỉ bỏ bàn nếu 60s nữa vẫn không có gì.
+                print(f"[TABLE] ENTER_PLACE trả status={status} -> coi như đã ở trong bàn, bấm Sẵn sàng")
                 self._joining_table = False
-                self.in_game = False
-                self._table_path = None
-                self._enter_fail_until = time.time() + 30
-                self._last_quick_play_time = time.time()
+                self.in_game = True
+                self._enter_fail_at = time.time()
+                threading.Thread(
+                    target=lambda: (time.sleep(3.0), self.send_ready(1)), daemon=True).start()
             return
         if True:
             if self._joining_table:
                 self._joining_table = False
                 self.in_game = True
+                self._enter_fail_at = 0.0
                 self.last_action_timestamp = time.time()
                 def delay_initial_ready():
                     time.sleep(3.0)  
@@ -716,6 +719,7 @@ class PikafishBot:
     def _handle_start_match(self, msg):
         print(f"[GAME] 🎮 Trận chiến bắt đầu!")
         self._reconnect_streak = 0
+        self._enter_fail_at = 0.0
         self.board.reset()
         self.fixed_pawn_positions.clear()
         self.board.is_playing = True
@@ -917,8 +921,17 @@ class PikafishBot:
                     self.start_keep_alive()
                     time.sleep(2)
 
+                # Sau ENTER_PLACE lỗi: nếu 60s trôi qua mà không vào ván nào thì
+                # có lẽ bot KHÔNG thực sự ở trong bàn -> nhả cờ để tạo bàn mới.
+                if (self._enter_fail_at and self.in_game and not self.board.is_playing
+                        and time.time() - self._enter_fail_at > 60):
+                    print("[TABLE] Chờ 60s không vào được ván nào -> bỏ bàn cũ, tạo bàn mới")
+                    self._enter_fail_at = 0.0
+                    self.in_game = False
+                    self._table_path = None
+
                 if (self.connected and self.logged_in and not self.in_game
-                        and not self._joining_table and time.time() >= self._enter_fail_until):
+                        and not self._joining_table):
                     now = time.time()
                     if now - self._last_quick_play_time >= self._QUICK_PLAY_INTERVAL:
                         if BOT_USE_CREATE_TABLE:

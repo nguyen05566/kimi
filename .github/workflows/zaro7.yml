@@ -6,7 +6,7 @@ on:
       runtime_hours:
         description: 'Runtime (hours)'
         required: false
-        default: '5.9'
+        default: '5.7'
         type: string
   # schedule:  # ĐÃ TẮT - chỉ chạy thủ công (workflow_dispatch)
   #- cron: '0 */6 * * *'
@@ -32,16 +32,67 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python dependencies
-        run: pip install websockets requests --break-system-packages
+        run: pip install websocket-client requests --break-system-packages
 
-      - name: Run Caro Bot (Embryo Caro6, Linux native)
-        env:
-          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.9' }}
+      - name: Cache Pikafish engine
+        id: cache-pikafish
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/pikafish
+            ~/pikafish.nnue
+          key: pikafish-2026-01-02-linux
+
+      - name: Download Pikafish engine + NNUE
+        if: steps.cache-pikafish.outputs.cache-hit != 'true'
         run: |
-          echo "Starting zaro7.py; it will auto-restart until job timeout (6h)"
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full
+          PK_URL="https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z"
+          curl -sL -o /tmp/pikafish.7z "$PK_URL"
+          7z x -y -o/tmp/pikafish /tmp/pikafish.7z > /dev/null
+
+          # Chọn binary phù hợp với CPU của runner
+          if grep -q avx512vnni /proc/cpuinfo; then BIN=pikafish-vnni512
+          elif grep -q avx512f /proc/cpuinfo;  then BIN=pikafish-avx512
+          elif grep -q bmi2 /proc/cpuinfo;     then BIN=pikafish-bmi2
+          elif grep -q avx2 /proc/cpuinfo;     then BIN=pikafish-avx2
+          else BIN=pikafish-sse41-popcnt; fi
+          echo "[ENGINE] Chọn $BIN"
+
+          cp "/tmp/pikafish/Linux/$BIN" "$HOME/pikafish"
+          chmod +x "$HOME/pikafish"
+          if [ -f /tmp/pikafish/pikafish.nnue ]; then
+            cp /tmp/pikafish/pikafish.nnue "$HOME/pikafish.nnue"
+          else
+            curl -sL -o "$HOME/pikafish.nnue" \
+              https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue
+          fi
+
+          # Nếu binary chọn sai (CPU không hỗ trợ) thì hạ cấp dần
+          if ! echo -e "uci\nquit" | "$HOME/pikafish" > /dev/null 2>&1; then
+            echo "[ENGINE] $BIN không chạy được, fallback sse41-popcnt"
+            cp /tmp/pikafish/Linux/pikafish-sse41-popcnt "$HOME/pikafish"
+            chmod +x "$HOME/pikafish"
+          fi
+
+      - name: Verify engine
+        run: |
+          chmod +x "$HOME/pikafish"
+          ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
+          echo -e "uci\nquit" | "$HOME/pikafish" | head -3
+
+      - name: Run Xiangqi Bot zaro7 (tài khoản nguyen7)
+        env:
+          ZARO7_USER: ${{ secrets.ZARO7_USER }}
+          ZARO7_PASSWD: ${{ secrets.ZARO7_PASSWD }}
+          CARO_RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          echo "Starting zaro7.py; it will auto-restart until job timeout (~6h)"
           while true; do
             echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting zaro7.py ==="
-            python3 zaro7.py || echo "zaro7.py exited with code $?"
+            python3 -u zaro7.py || echo "zaro7.py exited with code $?"
             echo "Restarting zaro7.py in 10 seconds"
             sleep 10
           done
