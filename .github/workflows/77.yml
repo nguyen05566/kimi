@@ -92,7 +92,7 @@ jobs:
           echo "Starting 77.py; it will auto-restart until job timeout (~6h)"
           while true; do
             echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') Starting 77.py ==="
-            python3 77.py || echo "77.py exited with code $?"
+            python3 -u 77.py || echo "77.py exited with code $?"
             echo "Restarting 77.py in 10 seconds"
             sleep 10
           done

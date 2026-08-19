@@ -65,11 +65,11 @@ def fetch_session_info():
         })
 
         # B1: mở trang login để lấy JSESSIONID
-        session.get(LOGIN_URL, timeout=10)
+        session.get(LOGIN_URL, timeout=20)
 
         # B2: POST đăng nhập
         resp = session.post(
-            LOGIN_URL, timeout=10,
+            LOGIN_URL, timeout=20,
             data={"redirect": "/", "USER_NAME": USER, "PASSWORD": PASSWD,
                   "AUTO_LOGIN": "true", "LOGIN": "Đăng nhập"},
             headers={"Origin": "https://gamevh.net",
@@ -81,7 +81,7 @@ def fetch_session_info():
             return False
 
         # B3: vào trang game để lấy token / nickname / playerId
-        game_resp = session.get(GAME_URL, timeout=10)
+        game_resp = session.get(GAME_URL, timeout=20)
         page_html = game_resp.text
 
         tm = re.search(r"var\s+token\s*=\s*(-?\d+)", page_html)
@@ -308,6 +308,12 @@ class PikafishBot:
         self.trend_analyzer = TrendAnalyzer()  
         self.engine = None
         self.ws = None
+        # Nếu vừa kết nối đã đứt ngay (<60s) thì coi là rớt liên tiếp -> cần giãn nhịp,
+        # tránh đăng nhập dồn dập tạo ra hàng loạt phiên/bàn rác trên server.
+        if self._connected_since and time.time() - self._connected_since < 60:
+            self._reconnect_streak += 1
+        else:
+            self._reconnect_streak = 0
         self.connected = False
         self.logged_in = False
         self.in_game = False
@@ -319,6 +325,12 @@ class PikafishBot:
         self._bet_amts_loaded = False
         self.fixed_pawn_positions = set()
         self.last_action_timestamp = time.time()
+        self.last_recv_timestamp = time.time()
+        self._table_path = None          # nhớ bàn đang ngồi để quay lại sau khi rớt mạng
+        self._table_path_ts = 0.0
+        self._reconnect_streak = 0       # số lần rớt liên tiếp -> giãn thời gian thử lại
+        self._connected_since = 0.0
+        self._enter_fail_until = 0.0     # bị từ chối vào bàn -> tạm ngưng tạo bàn mới
         self._latest_bestmove = None
         self._mate_status = None
         self._mate_regex = re.compile(r"score mate (-?\d+)")
@@ -368,7 +380,10 @@ class PikafishBot:
             threading.Thread(target=consume_stdout_and_filter, args=(self._engine_proc,), daemon=True).start()
 
             self._fsf_cmd("uci")
-            self._fsf_cmd("setoption name Threads value 4")
+            # Chừa ít nhất 1 nhân cho luồng WebSocket, nếu không pong/heartbeat bị trễ
+            # và server cắt kết nối ngay giữa ván.
+            _threads = max(1, min(4, (os.cpu_count() or 2) - 1))
+            self._fsf_cmd(f"setoption name Threads value {_threads}")
             self._fsf_cmd("setoption name Hash value 256")
             
             # Khóa cứng MultiPV = 3 để RAM phản xạ mượt và nhanh hơn 5
@@ -406,8 +421,9 @@ class PikafishBot:
             self._fsf_cmd(pos_cmd)
             
             # ÉP THỜI GIAN: Cho Engine chạy đúng 1.2 giây để lấy đủ dữ liệu chuỗi PV
-            self._fsf_cmd("go movetime 3200") 
-            return self._read_bestmove()
+            self._fsf_cmd("go movetime 3200")
+            # movetime 3200ms mà timeout 3s -> luôn bị "stop" trước khi engine trả lời
+            return self._read_bestmove(timeout=4.2)
         except Exception as e: print(f"[ENGINE] Lỗi tính toán: {e}")
         return None
 
@@ -460,7 +476,11 @@ class PikafishBot:
             on_error=self._on_error, on_close=self._on_close,
             header={"Origin": "https://gamevh.net"}
         )
-        self.ws_thread = threading.Thread(target=lambda: self.ws.run_forever(ping_interval=25, ping_timeout=10), daemon=True)
+        # ping_timeout=10 cũ khiến engine ăn hết CPU 3.2s/nước -> pong trả chậm -> tự ngắt
+        # giữa ván. Bỏ pong-timeout, thay bằng kiểm tra liveness theo dữ liệu nhận được.
+        self.ws_thread = threading.Thread(
+            target=lambda: self.ws.run_forever(ping_interval=30, ping_timeout=None),
+            daemon=True)
         self.ws_thread.start()
         for _ in range(25):
             if self.connected: break
@@ -470,12 +490,27 @@ class PikafishBot:
     def _on_open(self, ws):
         self.connected = True
         self.last_action_timestamp = time.time()
+        self.last_recv_timestamp = time.time()
+        self._connected_since = time.time()
         self._send_login()
 
     def _on_message(self, ws, message):
+        self.last_recv_timestamp = time.time()
         if isinstance(message, bytes): self._handle_binary_message(message)
-    def _on_error(self, ws, error): pass
+    def _on_error(self, ws, error):
+        print(f"[WS] ❌ Lỗi kết nối: {type(error).__name__}: {error}")
+
     def _on_close(self, ws, code, msg):
+        if self.board.is_playing:
+            print(f"[WS] ⚠️ MẤT KẾT NỐI GIỮA VÁN (code={code}, msg={msg}) -> mất bàn, sẽ phải tạo bàn mới")
+        else:
+            print(f"[WS] Đóng kết nối (code={code}, msg={msg})")
+        # Nếu vừa kết nối đã đứt ngay (<60s) thì coi là rớt liên tiếp -> cần giãn nhịp,
+        # tránh đăng nhập dồn dập tạo ra hàng loạt phiên/bàn rác trên server.
+        if self._connected_since and time.time() - self._connected_since < 60:
+            self._reconnect_streak += 1
+        else:
+            self._reconnect_streak = 0
         self.connected = False
         self.logged_in = False
         self.in_game = False
@@ -576,6 +611,9 @@ class PikafishBot:
             elif cmd == "PLAY" or cmd == "502": self._handle_play_response(msg)
             elif cmd == "SET_TURN": self._handle_set_turn(msg)
             elif cmd == "GAMEOVER": self._handle_gameover(msg)
+            elif cmd == "ALERT":
+                try: print(f"[SERVER] ALERT: {msg.read_string()}")
+                except Exception: pass
         except Exception as e: print(f"[RECV ERROR] {e}")
 
     def _handle_login_response(self, msg):
@@ -589,7 +627,22 @@ class PikafishBot:
             self.send_enter_place()
 
     def _handle_enter_place_response(self, msg):
-        if msg.read_byte() == 0:
+        status = msg.read_byte()
+        if status != 0:
+            # Chỉ coi là "vào bàn lỗi" khi CHÍNH bot đang xin vào bàn; các gói 401 khác
+            # (server đẩy về khi người khác ra/vào) thì bỏ qua, tuyệt đối không đụng
+            # vào in_game kẻo bot đang ngồi bàn lại tưởng mình đã ra ngoài.
+            if self._joining_table:
+                # status=-1 thường nghĩa là server vẫn coi tài khoản đang ở bàn/phiên cũ.
+                # Tạo bàn mới ngay lập tức chỉ đẻ thêm bàn rác -> phải chờ server nhả.
+                print(f"[TABLE] Vào bàn thất bại (status={status}) -> chờ 30s cho server nhả phiên cũ")
+                self._joining_table = False
+                self.in_game = False
+                self._table_path = None
+                self._enter_fail_until = time.time() + 30
+                self._last_quick_play_time = time.time()
+            return
+        if True:
             if self._joining_table:
                 self._joining_table = False
                 self.in_game = True
@@ -599,6 +652,17 @@ class PikafishBot:
                     self.send_ready(1)
                 threading.Thread(target=delay_initial_ready, daemon=True).start()
             elif not self.in_game:
+                # Vừa vào sảnh: nếu vẫn còn bàn cũ (rớt mạng lúc chờ/giữa 2 ván) thì
+                # quay lại ngồi bàn cũ thay vì bỏ bàn tạo bàn mới.
+                if self._table_path and time.time() - self._table_path_ts < 180:
+                    print(f"[TABLE] Thử ngồi lại bàn cũ: {self._table_path}")
+                    self.in_game = True
+                    self._joining_table = True
+                    path = self._table_path
+                    threading.Thread(
+                        target=lambda: (time.sleep(0.5), self.send_enter_place(path=path, mode=1)),
+                        daemon=True).start()
+                    return
                 self._bet_amts_loaded = False
                 self._resolved_bet_id = None
                 self.send_list_bet_amt()
@@ -612,6 +676,7 @@ class PikafishBot:
             self.in_game = True  
             self._joining_table = True
             table_path = msg.read_ascii()
+            self._table_path = table_path; self._table_path_ts = time.time()
             def async_join():
                 time.sleep(0.5)
                 self.send_enter_place(path=table_path, mode=1)
@@ -629,6 +694,7 @@ class PikafishBot:
             self.in_game = True  
             self._joining_table = True
             table_path = msg.read_ascii()
+            self._table_path = table_path; self._table_path_ts = time.time()
             def async_join():
                 time.sleep(0.5)
                 self.send_enter_place(path=table_path, mode=1)
@@ -653,6 +719,7 @@ class PikafishBot:
 
     def _handle_start_match(self, msg):
         print(f"[GAME] 🎮 Trận chiến bắt đầu!")
+        self._reconnect_streak = 0
         self.board.reset()
         self.fixed_pawn_positions.clear()
         self.board.is_playing = True
@@ -816,12 +883,25 @@ class PikafishBot:
         print("[BOT] Khởi chạy hệ thống giám sát tự động...")
         while True:
             try:
-                if self.connected and self.board.is_playing:
-                    if time.time() - self.last_action_timestamp > 180:
+                now_ts = time.time()
+                # (a) Không nhận được BẤT KỲ gói nào trong 120s -> kết nối đã chết thật
+                if self.connected and now_ts - self.last_recv_timestamp > 120:
+                    print("[WS] Không nhận dữ liệu 120s -> coi như chết, kết nối lại")
+                    if self.ws: self.ws.close()
+                    time.sleep(2)
+                # (b) Đang trong ván mà 300s không có nước đi nào -> mới cắt (trước là 180s,
+                #     dễ cắt nhầm khi đối thủ suy nghĩ lâu và làm mất luôn cái bàn)
+                elif self.connected and self.board.is_playing:
+                    if now_ts - self.last_action_timestamp > 300:
+                        print("[WS] Ván treo 300s không có nước đi -> kết nối lại")
                         if self.ws: self.ws.close()
                         time.sleep(2)
 
                 if not self.connected:
+                    if self._reconnect_streak > 0:
+                        delay = min(60, 5 * (2 ** min(self._reconnect_streak - 1, 4)))
+                        print(f"[WS] Rớt liên tiếp lần {self._reconnect_streak} -> chờ {delay}s rồi đăng nhập lại")
+                        time.sleep(delay)
                     if not fetch_session_info():
                         time.sleep(5); continue
                     self.logged_in = False
@@ -837,7 +917,8 @@ class PikafishBot:
                     self.start_keep_alive()
                     time.sleep(2)
 
-                if self.connected and self.logged_in and not self.in_game and not self._joining_table:
+                if (self.connected and self.logged_in and not self.in_game
+                        and not self._joining_table and time.time() >= self._enter_fail_until):
                     now = time.time()
                     if now - self._last_quick_play_time >= self._QUICK_PLAY_INTERVAL:
                         if BOT_USE_CREATE_TABLE:
