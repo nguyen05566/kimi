@@ -32,7 +32,7 @@ for _py_ver in ['python3.12', 'python3.13', 'python3.11']:
         break
 
 WS_URL = "wss://gamevh.net/ws/gameServer"
-CURRENT_PLAYER_NICKNAME = 'nguyen05511'
+CURRENT_PLAYER_NICKNAME = 'nguyen19'
 CURRENT_PLAYER_ID = 65692430
 TOKEN = 1238338868
 GAME_ID = 'xiangqi'
