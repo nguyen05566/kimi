@@ -216,6 +216,12 @@ class XiangqiBoardTracker:
     def reset(self):
         self.fen = self.INITIAL_FEN
         self.move_history = []
+        # Mốc để nạp engine: base_fen + các nước kể từ mốc. Giữ được danh sách nước
+        # là engine mới phát hiện được LẶP NƯỚC (chiếu/đuổi liên tục = THUA theo
+        # luật cờ tướng). Bản trước nạp FEN trần, engine mù về lặp nước -> tự sát.
+        self.base_fen = self.INITIAL_FEN.split(' ')[0]
+        self.base_side = 'w'
+        self.moves_since_base = []
         self.my_slot_id = -1
         self.first_turn_slot_id = 0
         self.is_my_turn = False
@@ -273,32 +279,46 @@ class XiangqiBoardTracker:
             return None
 
     def get_current_fen(self):
-        """Dựng THẾ CỜ HIỆN TẠI và chốt bên đi theo LƯỢT THẬT của server.
+        """Nạp cho engine: mốc thế cờ + các nước kể từ mốc.
 
-        Vì sao không dùng chẵn/lẻ số nước nữa: bàn cờ tướng gamevh CHO PHÉP BỎ LƯỢT
-        (2-3 lần ở các nước đầu). Mỗi lần bỏ lượt là một nước "biến mất" khỏi lịch sử,
-        làm chẵn/lẻ lệch pha. Tệ hơn: bỏ lượt HAI lần thì chẵn/lẻ lại khớp trở lại
-        nên không thể phát hiện, engine nhận FEN gốc ghi "đỏ đi" rồi được nạp danh
-        sách nước mở đầu bằng nước của ĐEN -> nước đó không hợp lệ, engine bỏ qua
-        toàn bộ và tính cờ trên thế xuất phát -> bot đi sai màu, server từ chối.
-
-        Cách chắc chắn: tự áp từng nước đã xảy ra lên bàn cờ để có thế hiện tại,
-        rồi ghi thẳng bên đi = màu quân của bot khi tới lượt bot. Không phụ thuộc
-        vào việc có bao nhiêu lượt bị bỏ.
+        - Bình thường: giữ nguyên danh sách nước để engine biết thế cờ đã lặp lại
+          bao nhiêu lần (cờ tướng: chiếu/đuổi liên tục là THUA, engine phải biết).
+        - Khi đối phương BỎ LƯỢT: chuỗi luân phiên đứt, không diễn tả được bằng
+          danh sách nước -> dựng thế hiện tại làm MỐC MỚI rồi ghi thẳng bên đi.
+          Chỉ mất lịch sử lặp từ thời điểm đó, không sai bên đi.
         """
-        board_fen = self.fen.split(' ')[0] if ' ' in self.fen else self.fen
         my_side = 'w' if self.is_red else 'b'
         turn_side = my_side if self.is_my_turn else ('b' if my_side == 'w' else 'w')
+        n = len(self.moves_since_base)
+        expected = self.base_side if n % 2 == 0 else ('b' if self.base_side == 'w' else 'w')
 
-        cur = board_fen
-        for mv in self.move_history:
+        if expected == turn_side:
+            return f"{self.base_fen} {self.base_side}", self.moves_since_base
+
+        cur = self.base_fen
+        for mv in self.moves_since_base:
             nxt = self._apply_move_to_fen(cur, mv)
             if nxt is None:
-                # Không dựng được (nước lạ/quân úp) -> quay về cách cũ cho an toàn
-                print(f"[BOARD] ⚠️ Không áp được nước {mv}, dùng FEN gốc + danh sách nước")
-                return f"{board_fen} w", self.move_history
+                print(f"[BOARD] ⚠️ Không áp được nước {mv}, giữ nguyên mốc cũ")
+                return f"{self.base_fen} {self.base_side}", self.moves_since_base
             cur = nxt
+        print(f"[BOARD] Đối phương bỏ lượt -> chốt mốc thế cờ mới, bên đi = {turn_side}")
+        self.base_fen = cur
+        self.base_side = turn_side
+        self.moves_since_base = []
         return f"{cur} {turn_side}", []
+
+    def set_base(self, board_fen, side='w'):
+        """Chốt mốc thế cờ (gọi khi vào ván mới)."""
+        self.fen = board_fen
+        self.base_fen = board_fen.split(' ')[0] if ' ' in board_fen else board_fen
+        self.base_side = side
+        self.moves_since_base = []
+        self.move_history = []
+
+    def record_move(self, mv):
+        self.move_history.append(mv)
+        self.moves_since_base.append(mv)
 
     def set_my_slot(self, slot_id, first_turn_slot_id):
         self.my_slot_id = slot_id
@@ -412,6 +432,9 @@ class PikafishBot:
         self._latest_bestmove = None
         self._mate_status = None
         self._mate_regex = re.compile(r"score mate (-?\d+)")
+        self._score_regex = re.compile(r"depth (\d+).*score (cp|mate) (-?\d+)")
+        self._last_score = "?"
+        self._last_depth = "?"
         self._init_engine()
 
     def _init_engine(self):
@@ -449,6 +472,12 @@ class PikafishBot:
                         line_str = line.strip()
                         
                         self.trend_analyzer.parse_line(line_str)
+
+                        _m = self._score_regex.search(line_str)
+                        if _m:
+                            self._last_depth = _m.group(1)
+                            self._last_score = ("mate " + _m.group(3)) if _m.group(2) == "mate" \
+                                               else f"{int(_m.group(3)):+d}"
                         
                         if "score mate" in line_str:
                             match = self._mate_regex.search(line_str)
@@ -868,7 +897,7 @@ class PikafishBot:
                 if piece_type == 7 and position not in STANDARD_PAWN_POSITIONS:
                     self.fixed_pawn_positions.add(position)
 
-            self.board.fen = self._build_fen_from_pieces(board_pieces)
+            self.board.set_base(self._build_fen_from_pieces(board_pieces), 'w')
             if my_slot_id == first_turn_slot_id:
                 self.board.is_my_turn = True
                 threading.Thread(target=self._make_auto_move, daemon=True).start()
@@ -906,15 +935,17 @@ class PikafishBot:
             engine_move = self.board.pos_to_engine_move(source_pos, target_pos)
             self.last_action_timestamp = time.time()
             if not self.board.move_history or self.board.move_history[-1] != engine_move:
-                self.board.move_history.append(engine_move)
+                self.board.record_move(engine_move)
                 self._played_this_turn = False
         except Exception as e: print(f"[MOVE ERROR] {e}")
 
     def _handle_play_response(self, msg):
         if msg.read_byte() != 0:
-            # Server từ chối nước đi. Trước đây chỉ trả lại lượt rồi CHỜ SET_TURN mới,
-            # nhưng server không gửi lại -> bot đứng im đến hết giờ. Phải tự đánh lại.
-            if self.board.move_history: self.board.move_history.pop()
+            # Server từ chối nước đi -> tự tính lại (không chờ SET_TURN mới).
+            # KHÔNG được pop lịch sử ở đây! Nước bị từ chối chưa bao giờ được ghi
+            # (chỉ ghi khi nhận gói MOVE), nên pop sẽ xoá nhầm nước THẬT của đối
+            # thủ -> bàn cờ trong đầu bot lệch với bàn thật -> đi những nước như
+            # tự sát ở giữa và cuối trận.
             self.board.is_my_turn = True
             self._played_this_turn = False
             self._play_reject_count = getattr(self, '_play_reject_count', 0) + 1
@@ -1084,7 +1115,8 @@ class PikafishBot:
                 source_pos, target_pos = self.board.engine_move_to_pos(best_move)
                 time.sleep(0.3)  # Giả lập thao tác chuột nhẹ nhàng
                 if self.board.is_my_turn and self.board.is_playing:
-                    print(f"-> Hành động: Xuất quân: {best_move}")
+                    print(f"-> Hành động: Xuất quân: {best_move} "
+                          f"[điểm {self._last_score} depth {self._last_depth}]")
                     self.send_play(source_pos, target_pos)
             except Exception as e: print(f"[BOT ERROR] Dịch tọa độ lỗi: {e}")
 
