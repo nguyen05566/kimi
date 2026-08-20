@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 zaro12 - Xiangqi Bot (gamevh.net) - engine Pikafish
-Chuyển từ caro sang cờ tướng, dùng chung mã nguồn với 77.py.
 Tài khoản: nguyen12
 """
 
@@ -222,23 +221,85 @@ class XiangqiBoardTracker:
         self.is_my_turn = False
         self.is_playing = False
         self.is_red = None
+    # ---------------------------------------------------------------
+    # TOẠ ĐỘ: số ô (position sid) của server là TUYỆT ĐỐI, giống nhau cho cả
+    # hai bên. Client chính thức khai báo  positions[j*9+i] = {sid: j*9+i}
+    # và setRedInBottom() chỉ XOAY HÌNH HIỂN THỊ chứ không đổi số ô.
+    # Code cũ lật hàng (9 - row) khi bot cầm quân ĐEN -> sai ô -> server từ
+    # chối mọi nước -> bot đứng hình rồi thua. Bỏ hẳn phép lật.
+    #   sid = row * 9 + col (row 0 = phía ĐỎ);  engine: file='a'+col, rank=row
+    # ---------------------------------------------------------------
     def pos_to_engine_move(self, source_pos, target_pos):
         s_col, s_row = source_pos % 9, source_pos // 9
         t_col, t_row = target_pos % 9, target_pos // 9
-        if not self.is_red:
-            s_row, t_row = 9 - s_row, 9 - t_row
         return f"{chr(ord('a') + s_col)}{s_row}{chr(ord('a') + t_col)}{t_row}"
     def engine_move_to_pos(self, engine_move):
-        s_col, s_rank = ord(engine_move[0]) - ord('a'), int(engine_move[1])
-        t_col, t_rank = ord(engine_move[2]) - ord('a'), int(engine_move[3])
-        s_row, t_row = s_rank, t_rank
-        if not self.is_red:
-            s_row, t_row = 9 - s_row, 9 - t_row
+        s_col, s_row = ord(engine_move[0]) - ord('a'), int(engine_move[1])
+        t_col, t_row = ord(engine_move[2]) - ord('a'), int(engine_move[3])
         return s_row * 9 + s_col, t_row * 9 + t_col
+    @staticmethod
+    def _apply_move_to_fen(board_fen, move):
+        """Áp 1 nước vào bàn cờ (cờ tướng không có nhập thành/phong cấp nên chỉ là dời quân)."""
+        try:
+            grid = []
+            for r in board_fen.split('/'):
+                line = []
+                for ch in r:
+                    if ch.isdigit(): line.extend(['.'] * int(ch))
+                    else: line.append(ch)
+                if len(line) != 9: return None
+                grid.append(line)
+            if len(grid) != 10: return None
+            s_col, s_rank = ord(move[0]) - 97, int(move[1])
+            t_col, t_rank = ord(move[2]) - 97, int(move[3])
+            s_row, t_row = 9 - s_rank, 9 - t_rank
+            if not (0 <= s_row < 10 and 0 <= t_row < 10 and 0 <= s_col < 9 and 0 <= t_col < 9):
+                return None
+            piece = grid[s_row][s_col]
+            if piece == '.': return None
+            grid[t_row][t_col] = piece; grid[s_row][s_col] = '.'
+            rows = []
+            for line in grid:
+                out, empty = "", 0
+                for c in line:
+                    if c == '.': empty += 1
+                    else:
+                        if empty: out += str(empty); empty = 0
+                        out += c
+                if empty: out += str(empty)
+                rows.append(out)
+            return '/'.join(rows)
+        except Exception:
+            return None
+
     def get_current_fen(self):
-        side = 'w' if len(self.move_history) % 2 == 0 else 'b'
+        """Trả về (fen, moves) để nạp vào engine.
+
+        SỬA 2 LỖI:
+        1) FEN gốc là thế lúc bắt đầu ván -> lượt LUÔN là 'w' (đỏ đi trước).
+           Code cũ gán side theo chẵn/lẻ số nước, nên khi lịch sử lẻ thì engine
+           từ chối áp nước đầu (nước của đỏ) và tính cờ trên thế xuất phát.
+        2) Khi đối phương BỎ LƯỢT, server trả lượt lại cho bot mà không có nước đi
+           nào -> chẵn/lẻ lệch pha với lượt thật. Lúc đó phải tự dựng thế cờ hiện
+           tại rồi chỉ định thẳng bên đi, không dùng danh sách moves nữa.
+        """
         board_fen = self.fen.split(' ')[0] if ' ' in self.fen else self.fen
-        return f"{board_fen} {side}", self.move_history
+        my_side = 'w' if self.is_red else 'b'
+        turn_side = my_side if self.is_my_turn else ('b' if my_side == 'w' else 'w')
+        parity_side = 'w' if len(self.move_history) % 2 == 0 else 'b'
+
+        if parity_side == turn_side:
+            return f"{board_fen} w", self.move_history
+
+        cur = board_fen
+        for mv in self.move_history:
+            nxt = self._apply_move_to_fen(cur, mv)
+            if nxt is None:
+                print(f"[BOARD] ⚠️ Không dựng lại được thế cờ tại nước {mv}")
+                return f"{board_fen} w", self.move_history
+            cur = nxt
+        print(f"[BOARD] Lệch pha lượt (đối phương bỏ lượt?) -> dựng thế hiện tại, bên đi = {turn_side}")
+        return f"{cur} {turn_side}", []
     def set_my_slot(self, slot_id, first_turn_slot_id):
         self.my_slot_id = slot_id
         self.first_turn_slot_id = first_turn_slot_id
@@ -336,6 +397,10 @@ class PikafishBot:
         self.fixed_pawn_positions = set()
         self.last_action_timestamp = time.time()
         self.last_recv_timestamp = time.time()
+        self._thinking = False           # đang tính nước -> không kích hoạt luồng thứ hai
+        self._turn_started_at = 0.0      # lúc lượt chuyển sang bot
+        self._last_play_sent_at = 0.0    # lúc bot gửi nước đi gần nhất
+        self.turn_timeout = 0            # số giây còn lại cho lượt hiện tại (từ SET_TURN)
         self.slot_players = {}           # slot_id -> playerId (để biết kick ai)
         self._pending_kick_id = None
         self._table_path = None          # nhớ bàn đang ngồi để quay lại sau khi rớt mạng
@@ -600,6 +665,7 @@ class PikafishBot:
         self.send_message("QUICK_PLAY", bytes(data))
 
     def send_play(self, source_pos, target_pos):
+        self._last_play_sent_at = time.time()
         data = bytearray()
         data.extend(self.conn.pack_byte(source_pos))
         data.extend(self.conn.pack_byte(target_pos))
@@ -761,6 +827,10 @@ class PikafishBot:
 
     def _handle_start_match(self, msg):
         print(f"[GAME] 🎮 Trận chiến bắt đầu!")
+        self._play_reject_count = 0
+        self._thinking = False
+        self._turn_started_at = 0.0
+        self._last_play_sent_at = 0.0
         self._reconnect_streak = 0
         self._enter_fail_at = 0.0
         self.board.reset()
@@ -838,19 +908,46 @@ class PikafishBot:
 
     def _handle_play_response(self, msg):
         if msg.read_byte() != 0:
+            # Server từ chối nước đi. Trước đây chỉ trả lại lượt rồi CHỜ SET_TURN mới,
+            # nhưng server không gửi lại -> bot đứng im đến hết giờ. Phải tự đánh lại.
             if self.board.move_history: self.board.move_history.pop()
             self.board.is_my_turn = True
+            self._play_reject_count = getattr(self, '_play_reject_count', 0) + 1
+            print(f"[PLAY] ⚠️ Server từ chối nước đi (lần {self._play_reject_count}) -> tính lại")
+            if self._play_reject_count <= 3:
+                threading.Thread(
+                    target=lambda: (time.sleep(0.5), self._make_auto_move()), daemon=True).start()
+        else:
+            self._play_reject_count = 0
 
     def _handle_set_turn(self, msg):
+        """SET_TURN theo đúng client gamevh:
+             byte slotId, short turnTimeout, short playerRemainDuration
+           slotId == -2 là bộ đếm ngược "Chuẩn bị/Bắt đầu", KHÔNG phải lượt đi.
+        """
         try:
             slot_id = msg.read_byte()
-            if slot_id != -1 and self.board.is_playing:  
-                was_my_turn = self.board.is_my_turn
-                self.board.is_my_turn = (slot_id == self.board.my_slot_id)
-                self.last_action_timestamp = time.time()
-                if self.board.is_my_turn and not was_my_turn:
+            try:
+                turn_timeout = msg.read_short()
+            except Exception:
+                turn_timeout = 0
+            if slot_id == -2:
+                return                      # chỉ là đếm ngược trước ván
+            if slot_id == -1 or not self.board.is_playing:
+                return
+            self.turn_timeout = turn_timeout
+            was_my_turn = self.board.is_my_turn
+            self.board.is_my_turn = (slot_id == self.board.my_slot_id)
+            self.last_action_timestamp = time.time()
+            if self.board.is_my_turn:
+                self._turn_started_at = time.time()
+                # CHỈ tính nước khi lượt vừa CHUYỂN sang bot. Nếu kích hoạt ở mọi
+                # SET_TURN thì server gửi lặp cùng một lượt sẽ khiến bot tính nước
+                # lần hai trên lịch sử cũ -> ra nước của bên kia -> bị từ chối.
+                if not was_my_turn and not self._thinking:
                     threading.Thread(target=self._make_auto_move, daemon=True).start()
-        except: pass
+        except Exception as e:
+            print(f"[SET_TURN ERROR] {e}")
 
     def _handle_kick_response(self, msg):
         try:
@@ -931,6 +1028,14 @@ class PikafishBot:
 
     def _make_auto_move(self):
         if not self.board.is_my_turn or not self.board.is_playing: return
+        if self._thinking: return
+        self._thinking = True
+        try:
+            self._do_auto_move()
+        finally:
+            self._thinking = False
+
+    def _do_auto_move(self):
         
         if not getattr(self, '_engine_proc', None) or self._engine_proc.poll() is not None:
             self._init_engine()
@@ -1025,6 +1130,17 @@ class PikafishBot:
                         time.sleep(5); continue
                     self.start_keep_alive()
                     time.sleep(2)
+
+                # Tới lượt bot nhưng 12s vẫn chưa gửi được nước nào (đối phương bị bỏ
+                # lượt, gói MOVE tới trễ, nước bị từ chối...) -> tự tính lại, tránh
+                # đứng im cho tới khi hết giờ rồi thua oan.
+                if (self.board.is_playing and self.board.is_my_turn and not self._thinking
+                        and self._turn_started_at
+                        and time.time() - self._turn_started_at > 12
+                        and self._last_play_sent_at < self._turn_started_at):
+                    print("[TURN] Tới lượt nhưng 12s chưa đi được -> tính lại")
+                    self._turn_started_at = time.time()
+                    threading.Thread(target=self._make_auto_move, daemon=True).start()
 
                 # Sau ENTER_PLACE lỗi: nếu 60s trôi qua mà không vào ván nào thì
                 # có lẽ bot KHÔNG thực sự ở trong bàn -> nhả cờ để tạo bàn mới.
