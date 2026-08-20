@@ -398,6 +398,7 @@ class PikafishBot:
         self.last_action_timestamp = time.time()
         self.last_recv_timestamp = time.time()
         self._thinking = False           # đang tính nước -> không kích hoạt luồng thứ hai
+        self._played_this_turn = False   # đã gửi nước cho lượt hiện tại chưa
         self._turn_started_at = 0.0      # lúc lượt chuyển sang bot
         self._last_play_sent_at = 0.0    # lúc bot gửi nước đi gần nhất
         self.turn_timeout = 0            # số giây còn lại cho lượt hiện tại (từ SET_TURN)
@@ -666,6 +667,7 @@ class PikafishBot:
 
     def send_play(self, source_pos, target_pos):
         self._last_play_sent_at = time.time()
+        self._played_this_turn = True
         data = bytearray()
         data.extend(self.conn.pack_byte(source_pos))
         data.extend(self.conn.pack_byte(target_pos))
@@ -831,6 +833,7 @@ class PikafishBot:
         self._thinking = False
         self._turn_started_at = 0.0
         self._last_play_sent_at = 0.0
+        self._played_this_turn = False
         self._reconnect_streak = 0
         self._enter_fail_at = 0.0
         self.board.reset()
@@ -904,6 +907,7 @@ class PikafishBot:
             self.last_action_timestamp = time.time()
             if not self.board.move_history or self.board.move_history[-1] != engine_move:
                 self.board.move_history.append(engine_move)
+                self._played_this_turn = False
         except Exception as e: print(f"[MOVE ERROR] {e}")
 
     def _handle_play_response(self, msg):
@@ -912,6 +916,7 @@ class PikafishBot:
             # nhưng server không gửi lại -> bot đứng im đến hết giờ. Phải tự đánh lại.
             if self.board.move_history: self.board.move_history.pop()
             self.board.is_my_turn = True
+            self._played_this_turn = False
             self._play_reject_count = getattr(self, '_play_reject_count', 0) + 1
             print(f"[PLAY] ⚠️ Server từ chối nước đi (lần {self._play_reject_count}) -> tính lại")
             if self._play_reject_count <= 3:
@@ -939,13 +944,19 @@ class PikafishBot:
             was_my_turn = self.board.is_my_turn
             self.board.is_my_turn = (slot_id == self.board.my_slot_id)
             self.last_action_timestamp = time.time()
-            if self.board.is_my_turn:
-                self._turn_started_at = time.time()
-                # CHỈ tính nước khi lượt vừa CHUYỂN sang bot. Nếu kích hoạt ở mọi
-                # SET_TURN thì server gửi lặp cùng một lượt sẽ khiến bot tính nước
-                # lần hai trên lịch sử cũ -> ra nước của bên kia -> bị từ chối.
-                if not was_my_turn and not self._thinking:
-                    threading.Thread(target=self._make_auto_move, daemon=True).start()
+            if not self.board.is_my_turn:
+                return
+            self._turn_started_at = time.time()
+            if not was_my_turn:
+                # Lượt vừa chuyển sang bot -> đây là LƯỢT MỚI, được phép đi.
+                # Ca "đối phương bỏ lượt" rơi vào đây: server chỉ gửi SET_TURN,
+                # không có MOVE nào, nên phải nhận ra và đi bình thường.
+                self._played_this_turn = False
+            # Đi khi: tới lượt, không đang tính, và CHƯA đi cho lượt này.
+            # Không dùng riêng was_my_turn (bỏ sót SET_TURN gửi lại -> bot đứng im),
+            # cũng không kích hoạt vô điều kiện (đi hai lần trên lịch sử cũ).
+            if not self._thinking and not self._played_this_turn:
+                threading.Thread(target=self._make_auto_move, daemon=True).start()
         except Exception as e:
             print(f"[SET_TURN ERROR] {e}")
 
@@ -1137,7 +1148,7 @@ class PikafishBot:
                 if (self.board.is_playing and self.board.is_my_turn and not self._thinking
                         and self._turn_started_at
                         and time.time() - self._turn_started_at > 12
-                        and self._last_play_sent_at < self._turn_started_at):
+                        and not self._played_this_turn):
                     print("[TURN] Tới lượt nhưng 12s chưa đi được -> tính lại")
                     self._turn_started_at = time.time()
                     threading.Thread(target=self._make_auto_move, daemon=True).start()
