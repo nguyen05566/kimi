@@ -51,6 +51,14 @@ PLACE_PATH = 'Lobby.xiangqi.0'
 # (mạnh nhất & nhanh nhất). MultiPV>1: bật thêm lớp lọc xu hướng TrendAnalyzer.
 ENGINE_MULTIPV = 1
 
+# Kick đối phương sau khi hết ván (giống nguyen1..nguyen6):
+#   "when_lose" - bot THUA thì kick người thắng (đúng hành vi nguyen1..6, mặc định)
+#   "when_win"  - bot THẮNG thì kick người thua
+#   "always"    - kick đối phương ở mọi kết quả
+#   "off"       - không kick
+KICK_MODE = "when_lose"
+KICK_DELAY = 5.0
+
 BOT_BET_XU = 5000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '10'
@@ -126,7 +134,7 @@ CMD_NAMES = {
     311: "BROADCAST", 314: "SET_CLIENT_MODE", 315: "CONFIG",
     331: "CHAT.SEND", 335: "CHAT.MSG",
     401: "ENTER_PLACE", 405: "CREATE_RULE", 406: "PLAYER_ENTERED", 407: "PLAYER_EXITED",
-    408: "QUICK_PLAY", 412: "LIST_ZONE_ROOM", 413: "LIST_BET_AMT",
+    408: "QUICK_PLAY", 410: "KICK_PLAYER", 412: "LIST_ZONE_ROOM", 413: "LIST_BET_AMT",
     414: "GET_TABLE_DATA", 416: "SLOT_IN_TABLE_CHANGED",
     417: "START_MATCH", 418: "GAMEOVER", 419: "ENTER_STATE",
     420: "SET_TURN", 434: "SET_READY",
@@ -326,6 +334,8 @@ class PikafishBot:
         self.fixed_pawn_positions = set()
         self.last_action_timestamp = time.time()
         self.last_recv_timestamp = time.time()
+        self.slot_players = {}           # slot_id -> playerId (để biết kick ai)
+        self._pending_kick_id = None
         self._table_path = None          # nhớ bàn đang ngồi để quay lại sau khi rớt mạng
         self._table_path_ts = 0.0
         self._reconnect_streak = 0       # số lần rớt liên tiếp -> giãn thời gian thử lại
@@ -593,6 +603,23 @@ class PikafishBot:
         data.extend(self.conn.pack_byte(target_pos))
         self.send_message("PLAY", bytes(data))
 
+    def opponent_player_id(self):
+        """playerId của người ngồi ghế đối diện (nếu biết)."""
+        for sid, pid in self.slot_players.items():
+            if pid and pid != CURRENT_PLAYER_ID and sid != self.board.my_slot_id:
+                return pid
+        return None
+
+    def send_kick_player(self, player_id):
+        """Đuổi người chơi khỏi bàn - opcode 410 + int64 playerId (giống nguyen1..6)."""
+        self._pending_kick_id = player_id
+        data = bytearray()
+        data.extend(struct.pack('>q', int(player_id)))
+        print(f"[KICK] Gửi KICK_PLAYER playerId={player_id}")
+        # Dùng ĐÚNG opcode số 410 như web client và nguyen1..6 (không gửi tên ASCII),
+        # vì đây là lệnh hiếm, gửi sai dạng là server bỏ qua im lặng.
+        self.send_message(410, bytes(data))
+
     def send_ready(self, is_ready=1):
         if self.board.is_playing: return
         print("[GAME] ⏳ Gửi trạng thái READY...")
@@ -616,6 +643,7 @@ class PikafishBot:
             elif cmd == "PLAY" or cmd == "502": self._handle_play_response(msg)
             elif cmd == "SET_TURN": self._handle_set_turn(msg)
             elif cmd == "GAMEOVER": self._handle_gameover(msg)
+            elif cmd == "KICK_PLAYER": self._handle_kick_response(msg)
             elif cmd == "ALERT":
                 try: print(f"[SERVER] ALERT: {msg.read_string()}")
                 except Exception: pass
@@ -715,6 +743,10 @@ class PikafishBot:
             slot_id = msg.read_byte()
             msg.read_long(); msg.read_long(); msg.read_byte(); msg.read_short(); msg.read_ascii(); msg.read_byte(); msg.read_byte()
             player_id = msg.read_long()
+            if player_id > 0:
+                self.slot_players[slot_id] = player_id
+            else:
+                self.slot_players.pop(slot_id, None)
             if player_id == CURRENT_PLAYER_ID: 
                 self.board.my_slot_id = slot_id
             else:
@@ -818,8 +850,60 @@ class PikafishBot:
                     threading.Thread(target=self._make_auto_move, daemon=True).start()
         except: pass
 
+    def _handle_kick_response(self, msg):
+        try:
+            status = msg.read_byte()
+            content = msg.read_string()
+        except Exception:
+            status, content = None, ""
+        if self._pending_kick_id is not None:
+            pid = self._pending_kick_id; self._pending_kick_id = None
+            if status == 0: print(f"[KICK] ✅ Đã đuổi playerId={pid} khỏi bàn. {content}")
+            else:           print(f"[KICK] ❌ Đuổi playerId={pid} thất bại (status={status}): {content}")
+            return
+        # Không phải phản hồi của mình -> chính bot bị đuổi
+        print(f"[KICK] ⚠️ Bot bị đuổi khỏi bàn: {content}")
+        self.in_game = False
+        self._joining_table = False
+        self._table_path = None
+        self.board.reset()
+
     def _handle_gameover(self, msg):
-        print("[GAME] 🏁 Trận đấu kết thúc.")
+        # --- Đọc kết quả từng ghế: count(u8) + [slot(i8), result(i8), int64] ---
+        my_result, results = None, {}
+        try:
+            count = msg.read_byte()
+            for _ in range(count):
+                sid = msg.read_byte(); res = msg.read_byte(); msg.read_long()
+                results[sid] = res
+                if sid == self.board.my_slot_id:
+                    my_result = res
+        except Exception:
+            results = {}
+
+        bot_won  = my_result in (1, 11)
+        bot_lost = my_result in (2, 4, 12)
+        if bot_won:    print("[GAME] 🏁 Trận đấu kết thúc. >>> THẮNG <<<")
+        elif bot_lost: print("[GAME] 🏁 Trận đấu kết thúc. >>> THUA <<<")
+        elif my_result is None: print("[GAME] 🏁 Trận đấu kết thúc.")
+        else: print("[GAME] 🏁 Trận đấu kết thúc. >>> HOÀ <<<")
+
+        # --- Có kick đối phương không? ---
+        should_kick = (KICK_MODE == "always"
+                       or (KICK_MODE == "when_lose" and bot_lost)
+                       or (KICK_MODE == "when_win" and bot_won))
+        victim = None
+        if should_kick:
+            # Ưu tiên ghế được GAMEOVER đánh dấu, fallback sang ghế đối diện đang biết.
+            want = (1, 11) if KICK_MODE == "when_lose" else (2, 4, 12)
+            target_sid = next((sid for sid, res in results.items()
+                               if sid != self.board.my_slot_id and res in want), None)
+            victim = self.slot_players.get(target_sid) if target_sid is not None else None
+            if not victim:
+                victim = self.opponent_player_id()
+            if not victim:
+                print("[KICK] Không xác định được playerId đối phương -> bỏ qua")
+
         self.fixed_pawn_positions.clear()
         self.board.reset()
         self.board.is_playing = False
@@ -832,10 +916,16 @@ class PikafishBot:
             self._fsf_cmd("ucinewgame")
             self._fsf_cmd("isready")
 
-        def delay_ready():
-            time.sleep(3.0)
+        def after_gameover():
+            if victim:
+                time.sleep(KICK_DELAY)
+                if self.connected and not self.board.is_playing:
+                    self.send_kick_player(victim)
+                    time.sleep(2.0)
+            else:
+                time.sleep(3.0)
             self.send_ready(1)
-        threading.Thread(target=delay_ready, daemon=True).start()
+        threading.Thread(target=after_gameover, daemon=True).start()
 
     def _make_auto_move(self):
         if not self.board.is_my_turn or not self.board.is_playing: return
