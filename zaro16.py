@@ -49,6 +49,10 @@ TOKEN = 0
 GAME_ID = 'xiangqi'
 PLACE_PATH = 'Lobby.xiangqi.0'
 
+# Số nhánh engine phân tích song song. MultiPV=1: chỉ tin nước tốt nhất của engine
+# (mạnh nhất & nhanh nhất). MultiPV>1: bật thêm lớp lọc xu hướng TrendAnalyzer.
+ENGINE_MULTIPV = 1
+
 BOT_BET_XU = 5000
 BOT_USE_CREATE_TABLE = True
 BOT_MATCH_DURATION = '10'
@@ -342,7 +346,12 @@ class PikafishBot:
             "./pikafish"
         ]
         pikafish_path = next((p for p in possible_paths if os.path.isfile(p) and os.access(p, os.X_OK)), None)
-        if not pikafish_path: return
+        if not pikafish_path:
+            # Trước đây return im lặng: bot vẫn vào bàn, không đánh được nước nào và
+            # thua trắng mà log không hề báo gì. Phải hét lên cho biết.
+            print("[ENGINE] ❌ KHÔNG TÌM THẤY pikafish! Đã tìm ở: " + ", ".join(possible_paths))
+            print("[ENGINE] ❌ Bot sẽ KHÔNG đánh được nước nào. Hãy cài engine trước khi chạy.")
+            return
 
         try:
             self._engine_proc = subprocess.Popen(
@@ -384,8 +393,7 @@ class PikafishBot:
             self._fsf_cmd(f"setoption name Threads value {_threads}")
             self._fsf_cmd("setoption name Hash value 256")
             
-            # Khóa cứng MultiPV = 3 để RAM phản xạ mượt và nhanh hơn 5
-            self._fsf_cmd("setoption name MultiPV value 3")
+            self._fsf_cmd(f"setoption name MultiPV value {ENGINE_MULTIPV}")
             
             time.sleep(1)
             
@@ -399,7 +407,8 @@ class PikafishBot:
                 self._fsf_cmd("setoption name UseNNUE value false")
             self._fsf_cmd("isready")
             self.engine = True
-            print(f"[ENGINE] ✅ Sẵn sàng hoạt động với MultiPV=3 nâng cấp bộ não chống ngáo sát cục.")
+            print(f"[ENGINE] ✅ Sẵn sàng | Threads={_threads} | MultiPV={ENGINE_MULTIPV}"
+                  + ("" if ENGINE_MULTIPV > 1 else " (dùng thẳng bestmove của engine)"))
         except Exception as e:
             print(f"[ENGINE] ❌ Lỗi khởi tạo: {e}")
 
@@ -848,10 +857,14 @@ class PikafishBot:
         best_move = parts[1]
 
         # ÁP DỤNG BỘ LỌC TỐI ƯU XU HƯỚNG/SÁT CỤC TỪ RAM
-        trend_move = self.trend_analyzer.select_best_trend_move()
-        if trend_move and best_move not in ["(none)", "0000"]:
-            print(f"[RAM-LEARN] 🧠 Thay thế '{best_move}' bằng nước đi tối ưu: '{trend_move}'")
-            best_move = trend_move
+        # CHỈ khi MultiPV > 1. Với MultiPV=1, pv_ram_cache chỉ chứa nước đầu của từng
+        # vòng lặp depth (nông -> sâu); chọn theo điểm cao nhất có thể lôi ra một nước
+        # ở depth nông và ghi đè lên bestmove cuối cùng của engine => đi yếu hơn.
+        if ENGINE_MULTIPV > 1:
+            trend_move = self.trend_analyzer.select_best_trend_move()
+            if trend_move and best_move not in ["(none)", "0000"]:
+                print(f"[RAM-LEARN] 🧠 Thay thế '{best_move}' bằng nước đi tối ưu: '{trend_move}'")
+                best_move = trend_move
 
         # XỬ LÝ KỊCH BẢN KHI HẾT NƯỚC ĐI CỜ TÀN
         if best_move in ["(none)", "0000"]:
