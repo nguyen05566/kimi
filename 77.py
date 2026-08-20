@@ -947,14 +947,14 @@ class PikafishBot:
                 return
             self._turn_started_at = time.time()
             if not was_my_turn:
-                # Lượt vừa chuyển sang bot -> đây là LƯỢT MỚI, được phép đi.
-                # Ca "đối phương bỏ lượt" rơi vào đây: server chỉ gửi SET_TURN,
-                # không có MOVE nào, nên phải nhận ra và đi bình thường.
                 self._played_this_turn = False
-            # Đi khi: tới lượt, không đang tính, và CHƯA đi cho lượt này.
-            # Không dùng riêng was_my_turn (bỏ sót SET_TURN gửi lại -> bot đứng im),
-            # cũng không kích hoạt vô điều kiện (đi hai lần trên lịch sử cũ).
-            if not self._thinking and not self._played_this_turn:
+            # ĐỐI PHƯƠNG BỎ LƯỢT: server gửi lại SET_TURN cho CÙNG một lượt, không
+            # kèm MOVE nào. Vì vậy phải tính nước MỖI KHI nhận SET_TURN trỏ vào bot
+            # (chỉ trừ lúc đang tính dở) - kể cả khi lịch sử nước đi không đổi.
+            # Nước tính lại luôn đúng màu của bot nhờ get_current_fen() chốt bên đi
+            # theo lượt thật, nên không còn cảnh ra nước của đối phương như trước.
+            # Nếu thực sự không phải lượt bot, server chỉ việc từ chối - vô hại.
+            if not self._thinking:
                 threading.Thread(target=self._make_auto_move, daemon=True).start()
         except Exception as e:
             print(f"[SET_TURN ERROR] {e}")
