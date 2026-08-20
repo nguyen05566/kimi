@@ -273,33 +273,33 @@ class XiangqiBoardTracker:
             return None
 
     def get_current_fen(self):
-        """Trả về (fen, moves) để nạp vào engine.
+        """Dựng THẾ CỜ HIỆN TẠI và chốt bên đi theo LƯỢT THẬT của server.
 
-        SỬA 2 LỖI:
-        1) FEN gốc là thế lúc bắt đầu ván -> lượt LUÔN là 'w' (đỏ đi trước).
-           Code cũ gán side theo chẵn/lẻ số nước, nên khi lịch sử lẻ thì engine
-           từ chối áp nước đầu (nước của đỏ) và tính cờ trên thế xuất phát.
-        2) Khi đối phương BỎ LƯỢT, server trả lượt lại cho bot mà không có nước đi
-           nào -> chẵn/lẻ lệch pha với lượt thật. Lúc đó phải tự dựng thế cờ hiện
-           tại rồi chỉ định thẳng bên đi, không dùng danh sách moves nữa.
+        Vì sao không dùng chẵn/lẻ số nước nữa: bàn cờ tướng gamevh CHO PHÉP BỎ LƯỢT
+        (2-3 lần ở các nước đầu). Mỗi lần bỏ lượt là một nước "biến mất" khỏi lịch sử,
+        làm chẵn/lẻ lệch pha. Tệ hơn: bỏ lượt HAI lần thì chẵn/lẻ lại khớp trở lại
+        nên không thể phát hiện, engine nhận FEN gốc ghi "đỏ đi" rồi được nạp danh
+        sách nước mở đầu bằng nước của ĐEN -> nước đó không hợp lệ, engine bỏ qua
+        toàn bộ và tính cờ trên thế xuất phát -> bot đi sai màu, server từ chối.
+
+        Cách chắc chắn: tự áp từng nước đã xảy ra lên bàn cờ để có thế hiện tại,
+        rồi ghi thẳng bên đi = màu quân của bot khi tới lượt bot. Không phụ thuộc
+        vào việc có bao nhiêu lượt bị bỏ.
         """
         board_fen = self.fen.split(' ')[0] if ' ' in self.fen else self.fen
         my_side = 'w' if self.is_red else 'b'
         turn_side = my_side if self.is_my_turn else ('b' if my_side == 'w' else 'w')
-        parity_side = 'w' if len(self.move_history) % 2 == 0 else 'b'
-
-        if parity_side == turn_side:
-            return f"{board_fen} w", self.move_history
 
         cur = board_fen
         for mv in self.move_history:
             nxt = self._apply_move_to_fen(cur, mv)
             if nxt is None:
-                print(f"[BOARD] ⚠️ Không dựng lại được thế cờ tại nước {mv}")
+                # Không dựng được (nước lạ/quân úp) -> quay về cách cũ cho an toàn
+                print(f"[BOARD] ⚠️ Không áp được nước {mv}, dùng FEN gốc + danh sách nước")
                 return f"{board_fen} w", self.move_history
             cur = nxt
-        print(f"[BOARD] Lệch pha lượt (đối phương bỏ lượt?) -> dựng thế hiện tại, bên đi = {turn_side}")
         return f"{cur} {turn_side}", []
+
     def set_my_slot(self, slot_id, first_turn_slot_id):
         self.my_slot_id = slot_id
         self.first_turn_slot_id = first_turn_slot_id
