@@ -1,0 +1,100 @@
+name: PlayOK Reversi (nguyen066)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Thời gian chạy (giờ)'
+        required: false
+        default: '5.7'
+        type: string
+      room:
+        description: 'Phòng playok (để trống = phòng đông nhất)'
+        required: false
+        default: ''
+        type: string
+      ttype:
+        description: 'Hạn chế bàn tự tạo: public | private | 1200/1350/1500/1650/1800/1950/2100'
+        required: false
+        default: 'public'
+        type: string
+      level:
+        description: 'Độ sâu Edax (18 rất mạnh, 21+ chậm hơn nhiều)'
+        required: false
+        default: '18'
+        type: string
+  # schedule:
+  #   - cron: '0 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Dùng chung khoá với hai workflow playok kia: mỗi tài khoản chỉ 1 phiên.
+  group: playok-nguyen066
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests py7zr --break-system-packages
+
+      - name: Cache Edax engine
+        id: cache-edax
+        uses: actions/cache@v4
+        with:
+          path: /tmp/edax
+          key: edax-v4.6-eval44-linux
+
+      - name: Build / verify Edax
+        timeout-minutes: 10
+        run: |
+          # Edax không có nhị phân Linux dựng sẵn, nhưng toàn bộ nguồn gộp vào
+          # một file all.c nên biên dịch chỉ mất khoảng 2 giây.
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from edax import Edax
+          e = Edax(level=10)
+          e.start()
+          start = "-" * 27 + "OX" + "-" * 6 + "XO" + "-" * 27
+          mv = e.best_move(start, "X")
+          assert mv in (19, 26, 37, 44), f"Edax trả nước lạ: {mv}"
+          print("[CHECK] Edax ra nước mở đầu hợp lệ:", mv)
+          e.stop()
+          PY
+
+      - name: Run PlayOK Reversi bot
+        env:
+          PLAYOK_KSESSION: ${{ secrets.PLAYOK_KSESSION }}
+          PLAYOK_KU: ${{ secrets.PLAYOK_KU }}
+          PLAYOK_ROOM: ${{ inputs.room }}
+          PLAYOK_TTYPE: ${{ inputs.ttype }}
+          EDAX_LEVEL: ${{ inputs.level || '18' }}
+          PLAYOK_TRANSPORT: polling
+          RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+        run: |
+          [ -z "$PLAYOK_KSESSION" ] && unset PLAYOK_KSESSION
+          [ -z "$PLAYOK_KU" ] && unset PLAYOK_KU
+
+          END=$(python3 -c "import time,os;print(int(time.time()+float(os.environ['RUNTIME_HOURS'])*3600))")
+          echo "Chạy tới $(date -u -d @$END +'%Y-%m-%dT%H:%M:%SZ') UTC"
+          while [ "$(date +%s)" -lt "$END" ]; do
+            LEFT=$(( END - $(date +%s) ))
+            CHUNK=$(( LEFT > 1800 ? 1800 : LEFT ))
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') chạy tiếp ${CHUNK}s ==="
+            python3 -u playok_rv.py --seconds "$CHUNK" || echo "bot thoát mã $?"
+            sleep 10
+          done
+          echo "Hết giờ."

@@ -475,3 +475,28 @@ gói 90 như cờ tướng, cần xác minh khi chạy thật.
 
 Kết luận: làm bot reversi hoàn toàn khả thi, và còn NHẸ hơn hai bot kia
 (Edax 574 KB + 7 MB eval, so với Pikafish 53 MB NNUE).
+
+### Reversi — kết quả chạy thật
+
+Bot `bot_rv.py` chạy được ngay lần đầu. Bằng chứng từ ván thật:
+
+```
+[90, 116, 13, 0, 8, 3, 1, 1, 1500, -1, 5, 4, 19, 26, 37, 44, ...]
+                                        ^thẻ 5, n=4, ô hợp lệ = D3 C4 F5 E6
+[bot] gửi D3 pos=19
+[92, 116, 19]                     <- server phát ngược về, nước đã lên bàn
+[bot] #92 nước 1: D3 (v=19) — CỦA TÔI ✅  [4-1]
+```
+
+Danh sách ô hợp lệ của server khớp 100% với bàn cờ bot tự tính suốt cả ván.
+Bỏ lượt do server tự chèn `-1`; client KHÔNG có nút pass (`ee(2,…)` chỉ được
+gọi từ ô hợp lệ, `Qb` chỉ là cờ vẽ giao diện).
+
+Quy luật rút ra cho mọi game playok — chỉ cần bốn con số là chuyển được bot
+sang game mới:
+
+| | cookie | handshake | số giữa gói 92 | mã ô |
+|---|---|---|---|---|
+| cờ tướng | `xq` | 1728 | 1 | `ô_đến*100 + ô_đi` |
+| gomoku | `gm` | 1712 | 0 | `x + 15*y` |
+| reversi | `rv` | 1713 | 2 | `x + 8*y` |
