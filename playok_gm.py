@@ -162,6 +162,8 @@ class Bot:
         self.myname = None
         self.await_new_table = False
         self.ranks = None        # thang elo server gửi qua set_rank
+        self.join_others = False # mặc định KHÔNG ngồi nhờ bàn người khác
+        self.my_elo = None
         self.want_ttype = None   # hạn chế elo muốn đặt cho bàn tự tạo
         self.create_table = create_table
         self.avoid_swap2 = True
@@ -250,6 +252,11 @@ class Bot:
                     print(f"[bot] ✅ server xác nhận ttype={v} -> bàn dạng "
                           f"{who}{'+' if isinstance(who, int) else ''}")
 
+        if code == 25 and len(i) >= 4 and s and s[0] == self.myname:
+            if self.my_elo != i[3]:
+                self.my_elo = i[3]
+                print(f"[bot] elo của tôi: {self.my_elo}")
+
         if code == 18 and s:
             self.myname = s[0]
             print(f"[bot] đăng nhập: {self.myname}")
@@ -278,6 +285,13 @@ class Bot:
                         print(f"[bot] đủ 2 ghế (đối thủ {opp}) -> bấm bắt đầu")
                         threading.Thread(target=self._delayed_go,
                                          args=(i[1],), daemon=True).start()
+
+        if code == 72 and len(i) >= 2 and i[1] == self.table:
+            print(f"[bot] bàn #{i[1]} đã đóng -> sẽ tạo bàn mới")
+            self.tables.pop(i[1], None)
+            self.table = None
+            self.seated = False
+            self.in_game = False
 
         if code == 32 and s and not getattr(self, "room_done", False):
             self._pick_room(s[0])
@@ -400,8 +414,13 @@ class Bot:
         if self.thinking:
             return
         if not self.in_game:
-            if self.seated and self.table and \
-                    time.time() - getattr(self, "_last_go", 0) > 4:
+            # Chỉ nhắc BẮT ĐẦU khi bàn đã đủ hai người. Bot tự tạo bàn rồi ngồi
+            # chờ có thể một mình hàng chục phút; bắn [85] 4 giây một lần suốt
+            # thời gian đó là vô nghĩa và dễ bị server chặn.
+            info = self.tables.get(self.table) or []
+            ready = len(info) >= 3 and bool(info[1]) and bool(info[2])
+            if (ready and self.seated and self.table
+                    and time.time() - getattr(self, "_last_go", 0) > 4):
                 self._last_go = time.time()
                 self.t.send_frame({"i": [85, self.table]})
             return
@@ -494,6 +513,15 @@ class Bot:
             self.thinking = False
 
     # ---------------- bàn ----------------
+    def new_table(self):
+        """Tự tạo bàn của mình. Chỉ chủ bàn mới đặt được hạn chế elo."""
+        print("[bot] tạo bàn mới của mình"
+              + (f" (sẽ đặt {self.want_ttype})" if self.want_ttype else ""))
+        self.table = None
+        self.seated = False
+        self.await_new_table = True
+        self.t.send_frame({"i": [CODE_NEW_TABLE]})
+
     def apply_settings(self):
         """Đặt hạn chế elo cho bàn VỪA TỰ TẠO.
 
@@ -508,6 +536,13 @@ class Bot:
         except ValueError as e:
             print(f"[bot] bỏ qua thiết lập ttype: {e}")
             return
+        labels = ttype_labels(self.ranks)
+        idx = (8 if code == 2 else code - 2) if code > 1 else code >> 1
+        need = labels[idx] if 0 <= idx < len(labels) else None
+        if isinstance(need, int) and self.my_elo and self.my_elo < need:
+            print(f"[bot] ⚠️ elo của bot là {self.my_elo}, THẤP HƠN ngưỡng "
+                  f"{need} vừa đặt — chính bot có thể không ngồi được bàn "
+                  f"của mình. Nếu 15s nữa vẫn chưa ngồi được thì hạ ttype.")
         self.t.send_frame({"i": [CODE_SETTING, self.table, code],
                            "s": ["ttype"]})
         print(f"[bot] đặt bàn #{self.table} -> {self.want_ttype} (ttype={code})")
@@ -529,6 +564,10 @@ class Bot:
             time.sleep(0.05)
 
     def try_join_table(self):
+        # Ngồi nhờ bàn người khác thì bot KHÔNG phải chủ bàn, không đặt được
+        # hạn chế elo (ttype) -> mặc định tắt, chỉ tự tạo bàn của mình.
+        if not self.join_others:
+            return False
         # Đang ngồi hoặc đang đánh thì TUYỆT ĐỐI không đi ngồi bàn khác.
         # Thiếu chốt này, sau khi vào lại kênh bot vừa đánh ở bàn cũ vừa gửi
         # [72]/[83] sang bàn mới -> self.my_seat và self.table bị ghi đè giữa
@@ -582,9 +621,7 @@ class Bot:
             print(f"[bot] server khôi phục sẵn bàn #{self.table} -> dùng luôn")
             self.t.send_frame({"i": [85, self.table]})
         elif not self.try_join_table():
-            print("[bot] không có bàn trống -> tự tạo bàn")
-            self.await_new_table = True
-            self.t.send_frame({"i": [CODE_NEW_TABLE]})
+            self.new_table()
 
         end = time.time() + seconds
         fails = 0
@@ -619,8 +656,7 @@ class Bot:
             if not self.seated and time.time() - getattr(self, "_hunt", 0) > 20:
                 self._hunt = time.time()
                 if not self.try_join_table():
-                    self.await_new_table = True
-                    self.t.send_frame({"i": [CODE_NEW_TABLE]})
+                    self.new_table()
             frames = self.t.recv_frames()
             if frames:
                 fails = 0
@@ -644,6 +680,9 @@ def main():
                     help="thời gian engine nghĩ mỗi nước (mili giây)")
     ap.add_argument("--allow-swap2", action="store_true",
                     help="cho phép vào cả bàn luật swap2 (mặc định né)")
+    ap.add_argument("--join-others", action="store_true",
+                    help="cho phép ngồi nhờ bàn người khác (mặc định TẮT: chỉ "
+                         "tự tạo bàn để áp được hạn chế elo)")
     ap.add_argument("--ttype", default=os.environ.get("PLAYOK_TTYPE", ""),
                     help="hạn chế bàn tự tạo: public | private | ngưỡng elo "
                          "(1200/1350/1500/1650/1800/1950/2100) | bậc 1-7")
@@ -666,6 +705,7 @@ def main():
     bot.want_room = args.room
     bot.movetime = args.movetime
     bot.want_ttype = args.ttype or None
+    bot.join_others = args.join_others
     bot.avoid_swap2 = not args.allow_swap2
     try:
         bot.run(args.seconds)
