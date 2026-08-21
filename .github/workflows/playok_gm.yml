@@ -1,0 +1,97 @@
+name: PlayOK Gomoku (nguyen066)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Thời gian chạy (giờ)'
+        required: false
+        default: '5.7'
+        type: string
+      room:
+        description: 'Phòng playok (để trống = phòng đông nhất)'
+        required: false
+        default: ''
+        type: string
+      movetime:
+        description: 'Thời gian engine nghĩ mỗi nước (mili giây)'
+        required: false
+        default: '3000'
+        type: string
+      allow_swap2:
+        description: 'Cho phép vào cả bàn luật swap2'
+        required: false
+        default: false
+        type: boolean
+  # schedule:
+  #   - cron: '30 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  # PlayOK chỉ cho 1 phiên mỗi tài khoản. Nhóm này DÙNG CHUNG với workflow cờ
+  # tướng: hai bot cùng tài khoản sẽ đá nhau, nên chỉ một cái được chạy.
+  group: playok-nguyen066
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests py7zr --break-system-packages
+
+      - name: Cache Rapfi engine
+        id: cache-rapfi
+        uses: actions/cache@v4
+        with:
+          path: /tmp/rapfi
+          key: rapfi-250615-standard-bs15
+
+      - name: Download / verify Rapfi
+        timeout-minutes: 10
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from rapfi import ensure_engine, fix_config
+          ensure_engine()
+          fix_config()          # bỏ mục weight thiếu file, tránh tụt về eval cổ điển
+          PY
+          ls -lh /tmp/rapfi
+
+      - name: Run PlayOK Gomoku bot
+        env:
+          PLAYOK_KSESSION: ${{ secrets.PLAYOK_KSESSION }}
+          PLAYOK_KU: ${{ secrets.PLAYOK_KU }}
+          PLAYOK_ROOM: ${{ inputs.room }}
+          PLAYOK_MOVETIME: ${{ inputs.movetime || '3000' }}
+          PLAYOK_TRANSPORT: polling
+          RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+          ALLOW_SWAP2: ${{ inputs.allow_swap2 }}
+        run: |
+          [ -z "$PLAYOK_KSESSION" ] && unset PLAYOK_KSESSION
+          [ -z "$PLAYOK_KU" ] && unset PLAYOK_KU
+          EXTRA=""
+          [ "$ALLOW_SWAP2" = "true" ] && EXTRA="--allow-swap2"
+
+          END=$(python3 -c "import time,os;print(int(time.time()+float(os.environ['RUNTIME_HOURS'])*3600))")
+          echo "Chạy tới $(date -u -d @$END +'%Y-%m-%dT%H:%M:%SZ') UTC"
+          while [ "$(date +%s)" -lt "$END" ]; do
+            LEFT=$(( END - $(date +%s) ))
+            CHUNK=$(( LEFT > 1800 ? 1800 : LEFT ))
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') chạy tiếp ${CHUNK}s ==="
+            python3 -u playok_gm.py --seconds "$CHUNK" $EXTRA || echo "bot thoát mã $?"
+            sleep 10
+          done
+          echo "Hết giờ."

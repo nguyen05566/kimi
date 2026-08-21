@@ -216,3 +216,99 @@ luôn trường thời gian làm nước đi khi ván có đồng hồ khác 0.
 `[70, tid, ...] + ['20m', 'ten0', 'ten1']` — tên mình nằm ở ghế nào thì
 đó là bàn và ghế của mình. Cách này còn bắt được cả trường hợp server
 **tự khôi phục bàn cũ** khi đăng nhập lại (bot cũ vội tạo bàn mới).
+
+---
+
+## Cập nhật 2026-08-21 (lần 2) — GOMOKU chạy được + ĐÍNH CHÍNH gói 90
+
+### 0. ĐÍNH CHÍNH: `i[2]` của gói 90 KHÔNG phải "mã trạng thái"
+
+Hôm qua tôi ghi "state = 9 + số nước hợp lệ". **Sai.** Đọc thẳng dispatcher
+`xb()` trong `gm.js`:
+
+```js
+case 90:
+  if (b.length < b[2] + 4) break;
+  ...
+  0 < b[2] && (a.ia = b[3]);          // a.ia = GHẾ TỚI LƯỢT
+  d = 3 + b[2];
+  for (c = 5; c < d;) { e = 5 > b[c] ? Fe(a,b,c,d) : a.Ae(b,c); ... }
+```
+
+Sự thật:
+
+```
+[90, tid, ĐỘ_DÀI_HEADER, turnSeat, ?, <chuỗi thẻ TLV>, sốCột, <ids>, <giá trị/người chơi>]
+```
+
+- `i[2]` = **độ dài khối header**, không phải trạng thái. Nó bằng `9 + n`
+  ở cờ tướng chỉ vì danh sách `n` nước hợp lệ nằm trong header — trùng hợp.
+- `i[3]` = **ghế tới lượt**, đây mới là thứ duy nhất cần đọc.
+- Header là chuỗi thẻ TLV, quét từ chỉ số 5 tới `3 + i[2]`:
+
+| Thẻ | Số ô | Nội dung |
+|---|---|---|
+| 1 | 3 | đồng hồ |
+| 2 | 4 | đồng hồ có gia giờ |
+| 3 | 2 | cờ; **bit 2 = `ad`** (hoán ghế ↔ màu quân) |
+| ≥5 | tuỳ game | `a.Ae()` riêng từng game — cờ tướng: danh sách nước hợp lệ; gomoku: chế độ swap2 |
+
+Bot cờ tướng vẫn chạy đúng vì `turnSeat >= 0` là điều kiện tương đương,
+nhưng cách đọc trong tài liệu cũ là ăn may chứ không phải hiểu đúng.
+
+### 1. Gomoku — gửi nước (lỗi khiến bot cũ câm suốt)
+
+```js
+f.Wb = function(a, b) {
+    a = [92, this.K, a];
+    if (typeof b != "undefined") a.push(b);
+    a.push(Math.floor((Date.now() - this.ob.v) / 100));
+    this.send(a, null);
+};
+f.zb = ... this.fa.Wb(0, x + 15*y) ...        // bấm chuột lên bàn
+```
+
+→ **`[92, tid, 0, pos, thời_gian]`**. Cờ tướng là `1` ở giữa, **gomoku là `0`**.
+Bản cũ gửi `1` nên server đọc phần tử `[2] = 1` làm nước đi → vô nghĩa → bỏ qua
+im lặng, không báo lỗi gì. Sai đúng một chữ số.
+
+### 2. Gomoku — nhận nước và mã hoá ô
+
+```js
+f.Vd = function(a) { for (b=2; b<a.length; b++) this.Ib.push(a[b]); }   // gói 92
+f.Db = ... e = d%15; g = Math.floor(d/15)%15; d = Math.floor(d/225)%2 ...
+```
+
+- Mọi phần tử từ chỉ số 2 của gói 92 đều là nước đi.
+- `v % 15` = cột, `(v / 15) % 15` = hàng, **`(v / 225) % 2` = MÀU QUÂN**.
+- `v == -1` bỏ qua; `v >= 450` là thẻ chọn màu của swap2, không phải nước.
+- Gói 91 của gomoku là **danh sách phẳng**, không phải cặp (nước, thời gian)
+  như cờ tướng.
+
+Bit màu quan trọng: swap2 cho một người đặt 3 quân liên tiếp nên **không**
+suy được chủ nhân nước đi theo kiểu luân phiên. Màu của mình lấy theo client:
+`màu = ad ? 1 - ghế : ghế`.
+
+### 3. Gomoku — luật swap2
+
+Thẻ 5 trong header gói 90 mang `Ab` (`f.Ae = function(a,b){return 5==a[b] ?
+(Bf(this.D, a.slice(b+1,b+2)), b+2) : b}`):
+
+| `Ab` | Nghĩa |
+|---|---|
+| 0 | bình thường, cứ đặt quân |
+| 3 | **bắt buộc chọn màu**, client chặn đặt quân (`3 != this.Ab`) |
+| 4 | chờ đối thủ chọn |
+| 5 | được chọn màu **hoặc** đặt thêm quân |
+
+Chọn màu = gửi nước với giá trị đặc biệt: **450 = ĐEN, 900 = TRẮNG**
+(`Wb(0,450)` / `Wb(0,900)`). Không xử lý `Ab == 3` thì bot đứng hình tới hết giờ.
+
+### 4. Bẫy của engine Rapfi (không liên quan playok nhưng mất giờ)
+
+`config.toml` khai 3 bộ trọng số (freestyle / standard / renju) nhưng bản tải
+về chỉ có bộ standard. Rapfi nạp bộ ĐẦU TIÊN lúc `START`, không thấy file thì in
+`ERROR Evaluator mix9svq failed to initialized` rồi **âm thầm tụt xuống hàm
+lượng giá cổ điển** — engine vẫn chạy nên rất dễ bỏ sót, nhưng yếu hẳn.
+Cùng một thế cờ: eval `-183` khi hỏng, `-499` khi nạp đúng mạng nơ-ron.
+`rapfi.py` nay tự xoá các mục weight thiếu file.

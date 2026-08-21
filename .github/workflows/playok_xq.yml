@@ -29,7 +29,8 @@ permissions:
 concurrency:
   # playok chỉ cho ĐÚNG 1 phiên mỗi tài khoản. Hai job cùng chạy sẽ đá nhau
   # liên tục (server gửi ["login-1"]) và không bot nào đánh được.
-  group: playok-xiangqi-nguyen066
+  # DÙNG CHUNG nhóm với workflow gomoku: bật cái này thì cái kia tự bị huỷ.
+  group: playok-nguyen066
   cancel-in-progress: true
 
 jobs:
