@@ -201,6 +201,15 @@ class Bot:
         if not i:
             return
         code = i[0]
+        if code == -1 and s and str(s[0]).startswith("login"):
+            # Server báo phiên này bị PHIÊN KHÁC cùng tài khoản đá ra.
+            # PlayOK chỉ cho 1 phiên/tài khoản: nếu trình duyệt của bạn đang
+            # mở playok bằng chính tài khoản này thì hai bên sẽ đá nhau vô tận.
+            self.kicked_at = time.time()
+            print("[bot] ⛔ BỊ ĐÁ: có phiên khác đang đăng nhập cùng tài khoản "
+                  f"({s[0]}). Hãy thoát playok ở trình duyệt/điện thoại, "
+                  "hoặc dùng tài khoản khác cho bot.")
+            return
         if code == CODE_PING:
             self.t.send_frame({"i": [CODE_PING]})
             return
@@ -583,6 +592,9 @@ class Bot:
             if getattr(self.t, "dead", False):
                 fails += 1
                 wait = min(30, 5 * fails)
+                if time.time() - getattr(self, "kicked_at", 0) < 30:
+                    wait = 60      # bị đá thì đừng vào lại ngay, sẽ đá qua đá lại
+                    print("[bot] vừa bị đá -> chờ 60s cho phiên kia yên vị")
                 print(f"[bot] kênh chết (lần {fails}) -> chờ {wait}s rồi vào lại")
                 time.sleep(wait)
                 try:
