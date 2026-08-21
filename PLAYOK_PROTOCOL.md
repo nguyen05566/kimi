@@ -392,3 +392,27 @@ giữa ván** nên bot đánh nhầm màu; nặng hơn là `[85]` gửi tới b�
 trả **502 → chết kênh** (quan sát 3 lần trong một phiên). Sửa: `try_join_table()`
 thoát ngay nếu `seated` hoặc `in_game`, và sau khi vào lại kênh phải chờ ~8 giây
 cho server khôi phục bàn cũ rồi mới cho phép săn bàn.
+
+### Bổ sung: gói 70 mang sẵn `ttype` của bàn
+
+```
+[70, tid, ttype, cờ_ghế0, cờ_ghế1] + [thời_gian, tên0, tên1]
+```
+
+Kiểm chứng: đặt bàn của bot thành 1350+ (`ttype=4`) rồi soi bằng **phiên khách
+riêng biệt** — khách thấy `[70, 101, 4, 1, 0] + ['5m', 'nguyen066', '']`.
+Đối chiếu các bàn khác trong cùng sảnh: `0` (public), `3` (1200+), `5` (1500+)
+— khớp đúng bảng mã `ttype`. Nhờ vậy có thể lọc bàn theo mức elo ngay từ danh
+sách sảnh mà không cần vào từng bàn.
+
+### Vì sao bot nên TỰ TẠO BÀN
+
+Chỉ chủ bàn mới đổi được thiết lập. Ngồi nhờ bàn người khác thì bot phải chấp
+nhận mức của họ (thường là `public`). Muốn "chỉ chơi với người 1350+" thì bot
+phải tự tạo bàn — nên mặc định `--join-others` đã TẮT.
+
+Kèm theo hai điều chỉnh bắt buộc khi bot ngồi một mình chờ khách:
+- chỉ bắn `[85]` (bắt đầu) khi bàn đã đủ hai người, không thì cứ 4 giây một gói
+  suốt hàng chục phút;
+- nhận gói `72` (bàn đóng) thì dựng bàn mới, không thì bot ngồi với số bàn đã
+  chết.
