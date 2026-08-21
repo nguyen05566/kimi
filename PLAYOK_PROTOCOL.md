@@ -416,3 +416,62 @@ Kèm theo hai điều chỉnh bắt buộc khi bot ngồi một mình chờ khá
   suốt hàng chục phút;
 - nhận gói `72` (bàn đóng) thì dựng bàn mới, không thì bot ngồi với số bàn đã
   chết.
+
+---
+
+## Khảo sát 2026-08-21 — Reversi/Othello (https://www.playok.com/vi/reversi/)
+
+Đã bóc `https://www.playok.com/j/rv.js?264`. Giao thức **giống hệt** hai game kia,
+chỉ khác vài con số:
+
+| | cờ tướng | gomoku | **reversi** |
+|---|---|---|---|
+| cookie | `kbeta=xq` | `kbeta=gm` | **`kbeta=rv`** |
+| mã handshake | 1728 | 1712 | **1713** |
+| số giữa gói 92 | 1 | 0 | **2** |
+| mã ô | `ô_đến*100+ô_đi` | `x + 15*y` | **`x + 8*y`** |
+
+```js
+f.ee = function(a, b) {                    // giống Wb của gomoku
+    a = [92, this.K, a];
+    if (typeof b != "undefined") a.push(b);
+    a.push(Math.floor((Date.now() - this.nb.A) / 100));
+    this.send(a, null);
+};
+... this.fa.ee(2, a + 8*b)                 // chỗ bấm chuột lên bàn
+window.k2start = function(){ new Xa({Of:Gf, Rf:1713, Ff:2, ig:"thcol0nl"}) };
+```
+
+Giải mã giá trị nhận về (hàm `Fb` + `Ef`):
+
+```js
+d = v % 8;                    // cột
+e = Math.floor(v/8) % 8;      // hàng
+g = Math.floor(v/64) % 2;     // MÀU:  0 = ĐEN (đi trước), 1 = TRẮNG
+v == -1                       // BỎ LƯỢT (pass) — Othello có nước bỏ lượt
+Ef(v) -> "D3" (màu 0, chữ HOA) hoặc "d3" (màu 1, chữ thường)
+```
+
+Thế khởi đầu trong `reset()`: `C[3][3]=1, C[3][4]=0, C[4][3]=0, C[4][4]=1`
+→ d4/e5 trắng, e4/d5 đen — đúng luật Othello chuẩn.
+
+Gói 92 nhận về chỉ mang **một** giá trị ở chỉ số 2 (`f.Od = a => a[2]`),
+khác gomoku (đẩy mọi phần tử từ chỉ số 2).
+
+Client tự tính nước hợp lệ bằng hàm `Df()`, nhưng server vẫn gửi danh sách ô
+hợp lệ xuống (`Ff(a,b){a.rb=b}`) — nhiều khả năng nằm ở thẻ ≥5 trong header
+gói 90 như cờ tướng, cần xác minh khi chạy thật.
+
+### Engine
+
+- **Edax** (C, GPL, `abulmo/edax-reversi`, v4.6) — chuẩn mực mã nguồn mở, dùng
+  cả trong bài báo *"Othello is Solved"*. **Đã build và chạy thử tại đây**:
+  `make build ARCH=x86-64-v3 COMP=gcc CC=gcc` mất **~2 giây**, binary 574 KB;
+  `eval.dat` 7 MB tải từ release v4.4. Giao thức chữ đơn giản:
+  `setboard <64 ký tự> X` → `go` → in `Edax plays D3`. Ký tự: `X` đen, `O` trắng,
+  `-` trống — khớp thẳng với màu 0/1 của playok.
+- **Egaroucid** (C++, `Nyanyan/Egaroucid`) — tác giả công bố mạnh hơn Edax một
+  chút; bản console chạy Linux nhưng **phải tự build**, không có sẵn nhị phân.
+
+Kết luận: làm bot reversi hoàn toàn khả thi, và còn NHẸ hơn hai bot kia
+(Edax 574 KB + 7 MB eval, so với Pikafish 53 MB NNUE).
