@@ -13,6 +13,11 @@ on:
         required: false
         default: ''
         type: string
+      ttype:
+        description: 'Hạn chế bàn tự tạo: public | private | 1200/1350/1500/1650/1800/1950/2100'
+        required: false
+        default: 'public'
+        type: string
       movetime:
         description: 'Thời gian engine nghĩ mỗi nước (mili giây)'
         required: false
@@ -76,6 +81,7 @@ jobs:
           PLAYOK_KU: ${{ secrets.PLAYOK_KU }}
           PLAYOK_ROOM: ${{ inputs.room }}
           PLAYOK_MOVETIME: ${{ inputs.movetime || '3000' }}
+          PLAYOK_TTYPE: ${{ inputs.ttype }}
           PLAYOK_TRANSPORT: polling
           RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
           ALLOW_SWAP2: ${{ inputs.allow_swap2 }}

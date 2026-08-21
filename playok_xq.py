@@ -18,7 +18,6 @@ Cách chạy:
 """
 import argparse
 import json
-import os
 import queue
 import re
 import ssl
@@ -32,16 +31,11 @@ import requests
 # ----------------------------------------------------------------------------
 # 1) CẤU HÌNH COOKIE (đăng nhập)
 # ----------------------------------------------------------------------------
-# Cookie đăng nhập playok. Trên GitHub Actions thì đặt qua Secrets:
-#   PLAYOK_KSESSION  (bắt buộc)  ví dụ  bf1fc4171ce46cc0:nguyen066:e184
-#   PLAYOK_KU        (tuỳ chọn)
-# Không có secret thì dùng giá trị mặc định bên dưới.
 COOKIES = {
-    "kt": os.environ.get("PLAYOK_KT", "cckn"),
+    "kt": "cckn",
     "kguest": "0",
-    "ku": os.environ.get("PLAYOK_KU", "dcb10af4"),
-    "ksession": os.environ.get(
-        "PLAYOK_KSESSION", "bf1fc4171ce46cc0:nguyen066:e184"),
+    "ku": "dcb10af4",
+    "ksession": "bf1fc4171ce46cc0:nguyen066:e184",
     "kbeta": "xq",
     "kbexp": "0",
 }
@@ -95,6 +89,90 @@ def parse_legal(i):
         if len(i) >= 12 + n:
             return [v for v in i[12:12 + n] if isinstance(v, int) and v > 0]
     return []
+
+
+# ----------------------------------------------------------------------------
+# THIẾT LẬP BÀN — gói [82, tid, giá_trị] + [tên]
+# (hàm `function V(a,b,c){a.send([82,a.K,c],[b])}` trong gm.js/xq.js)
+# Server báo lại toàn bộ thiết lập bằng gói 89: [89, tid, v1, v2...] + [tên1...]
+# CHỈ NGƯỜI TẠO BÀN (table operator) mới đổi được.
+#
+# Tên thiết lập đã đọc được từ client:
+#   ttype  loại bàn / hạn chế elo      tg   thời gian ván
+#   tm     thời gian cộng thêm          ud   cấm đi lại (no undo)
+#   gtype  1 = tính elo, 0 = không      pro  luật swap2 (chỉ gomoku)
+# ----------------------------------------------------------------------------
+CODE_SETTING = 82
+CODE_SETTINGS_STATE = 89
+
+
+# Thang mặc định của gomoku (dùng khi chưa nhận được set_rank)
+DEFAULT_TTYPE_LABELS = ["public", 1200, 1350, 1500, 1650, 1800, 1950, 2100,
+                        "private"]
+
+
+def ttype_labels(ranks=None):
+    """Nhãn [public, m1..m7, private] dựng theo chuỗi `set_rank` của server.
+
+    Client dựng: h = 0..6 -> Ra(1 + h//2) nếu h chẵn, h lẻ thì lấy trung bình
+    hai mốc liền kề; Ra(n) = 1 + rank[n]. Chưa có set_rank thì dùng thang
+    mặc định của gomoku.
+    """
+    if not ranks or len(ranks) < 5:
+        return list(DEFAULT_TTYPE_LABELS)
+    def ra(n):
+        return 1 + ranks[n] if n < len(ranks) else None
+    out = ["public"] + [None] * 7 + ["private"]
+    for h in range(7):
+        if h % 2 == 0:
+            out[h + 1] = ra(1 + (h >> 1))
+        else:
+            a, b = ra(1 + (h >> 1)), ra((h >> 1) + 2)
+            out[h + 1] = (a + b) // 2 if a and b else None
+    return out
+
+
+def ttype_code(choice, ranks=None):
+    """Đổi lựa chọn của người dùng thành mã `ttype` gửi cho server.
+
+    Công thức lấy nguyên từ trình đơn thả xuống trong client:
+        V(a, "ttype", (a.j.$ != null && 0 < l) ? (8 <= l ? 2 : l + 2) : 2 * l)
+    với `l` là thứ tự mục chọn: 0 = public, 1..7 = các mức elo, 8 = private.
+    Suy ra: public = 0, private = 2, bảy mức elo = 3..9.
+
+    Nhận: "public" | "private" | ngưỡng elo ("1350", "1350+") | bậc 1..7.
+    """
+    s = str(choice).strip().lower().rstrip("+")
+    if s in ("", "public"):
+        return 0
+    if s == "private":
+        return 2
+    if not s.lstrip("-").isdigit():
+        raise ValueError(f"không hiểu ttype {choice!r}")
+    n = int(s)
+    labels = ttype_labels(ranks)
+    for idx in range(1, 8):                    # khớp đúng ngưỡng elo
+        if isinstance(labels[idx], int) and labels[idx] == n:
+            return idx + 2
+    if 1 <= n <= 7:                            # số nhỏ = bậc 1..7
+        return n + 2
+    raise ValueError(f"ttype {choice!r} không có trong thang "
+                     f"{[x for x in labels[1:8]]}")
+
+
+def parse_set_rank(strings):
+    """Bắt chuỗi `set_rank` trong gói text để biết ngưỡng elo THẬT của game này.
+
+    Client: this.$ = value.split(" ").filter((c,d) => d%2 == 0).map(parseInt)
+    """
+    for k in range(len(strings) - 1):
+        if strings[k] == "set_rank":
+            try:
+                parts = strings[k + 1].split(" ")
+                return [int(v) for j, v in enumerate(parts) if j % 2 == 0]
+            except Exception:
+                return None
+    return None
 
 
 class PollingTransport:
@@ -467,6 +545,8 @@ class Bot:
         self.ap = self.ge = None
         self.myname = None
         self.await_new_table = False
+        self.ranks = None        # thang elo server gửi qua set_rank
+        self.want_ttype = None   # hạn chế elo muốn đặt cho bàn tự tạo
         self.create_table = create_table
         self.movetime = 1500        # ms mỗi nước, chỉnh bằng --movetime
         self._lock = threading.Lock()
@@ -525,6 +605,7 @@ class Bot:
             print("=" * 58 + "\n")
             self.t.send_frame({"i": [83, self.table, 0]})
             self.my_seat = 0
+            self.apply_settings()
             # KHÔNG chat: tài khoản mới bị server chặn chat ("as a new user you
             # cannot use chat yet") và frame chat bị từ chối bằng 502 -> CHẾT KÊNH.
         # 84 = có người vào bàn; nếu là người khác thì bấm bắt đầu [85]
@@ -535,6 +616,24 @@ class Bot:
                 print(f"[bot] {who} vào phòng bàn (chờ họ ngồi ghế)")
             else:
                 self.myname = who
+        if s and self.ranks is None:
+            r = parse_set_rank(s)
+            if r:
+                self.ranks = r
+                print("[bot] thang elo của game này: "
+                      + ", ".join(str(x) for x in ttype_labels(r)))
+
+        if code == CODE_SETTINGS_STATE and len(i) >= 3 and s:
+            # [89, tid, v1, v2...] + [tên1, tên2...] - server báo lại thiết lập
+            for k, name in enumerate(s):
+                if name == "ttype" and 2 + k < len(i):
+                    v = i[2 + k]
+                    lab = ttype_labels(self.ranks)
+                    idx = (8 if v == 2 else v - 2) if v > 1 else v >> 1
+                    who = lab[idx] if 0 <= idx < len(lab) else "?"
+                    print(f"[bot] ✅ server xác nhận ttype={v} -> bàn dạng "
+                          f"{who}{'+' if isinstance(who, int) else ''}")
+
         if code == 18 and s:
             self.myname = s[0]
             print(f"[bot] đăng nhập: {self.myname}")
@@ -709,6 +808,24 @@ class Bot:
                     print("[chat]", s[0])
         self.maybe_move()
 
+    def apply_settings(self):
+        """Đặt hạn chế elo cho bàn VỪA TỰ TẠO.
+
+        Chỉ người tạo bàn mới đổi được thiết lập (server chat: "you are now the
+        table operator - you can change settings"), nên chỉ gọi sau khi bot
+        bấm [71] tạo bàn, không gọi khi ngồi nhờ bàn người khác.
+        """
+        if not self.want_ttype or not self.table:
+            return
+        try:
+            code = ttype_code(self.want_ttype, self.ranks)
+        except ValueError as e:
+            print(f"[bot] bỏ qua thiết lập ttype: {e}")
+            return
+        self.t.send_frame({"i": [CODE_SETTING, self.table, code],
+                           "s": ["ttype"]})
+        print(f"[bot] đặt bàn #{self.table} -> {self.want_ttype} (ttype={code})")
+
     def _delayed_go(self, tid):
         """Trễ 3 giây rồi bấm bắt đầu, nhắc thêm 2 lần trong cửa sổ ~10 giây."""
         time.sleep(3)
@@ -730,6 +847,12 @@ class Bot:
             time.sleep(0.1)
 
     def try_join_table(self):
+        # Đang ngồi hoặc đang đánh thì TUYỆT ĐỐI không đi ngồi bàn khác.
+        # Thiếu chốt này, sau khi vào lại kênh bot vừa đánh ở bàn cũ vừa gửi
+        # [72]/[83] sang bàn mới -> self.my_seat và self.table bị ghi đè giữa
+        # ván, ghế nhảy 0 <-> 1 và bot đánh nhầm màu.
+        if self.seated or self.in_game:
+            return True
         """Vào bàn người khác đang thiếu người: [72] vào bàn -> [83] ngồi ghế.
 
         Phải gửi [72] TRƯỚC, nếu không server bỏ qua [83] (đây là lý do các bản
@@ -892,6 +1015,13 @@ class Bot:
                     self.await_new_table = True
                     self.t.send_frame({"i": [CODE_NEW_TABLE]})
                     print("[bot] đã vào lại, tạo bàn mới")
+                    # Chờ server khôi phục bàn cũ trước khi cho phép săn bàn,
+                    # nếu không hai việc chạy song song sẽ giẫm chân nhau.
+                    grace = time.time() + 8
+                    while time.time() < grace and not self.seated:
+                        for f in self.t.recv_frames(timeout=1.0):
+                            self.on_frame(f)
+                    self._hunt = time.time()
                 except Exception as e:
                     print(f"[bot] vào lại thất bại: {e}")
                 continue
@@ -911,22 +1041,19 @@ class Bot:
 
 def main():
     ap = argparse.ArgumentParser()
-    home = os.path.expanduser("~")
-    ap.add_argument("--engine", default=os.environ.get(
-        "PIKAFISH_PATH", f"{home}/pikafish"))
-    ap.add_argument("--nnue", default=os.environ.get(
-        "PIKAFISH_NNUE", f"{home}/pikafish.nnue"))
+    ap.add_argument("--engine", default="/home/user/playok/Linux/pikafish-avx2")
+    ap.add_argument("--nnue", default="/home/user/playok/pikafish.nnue")
     ap.add_argument("--color", choices=["red", "black"], default="red")
-    ap.add_argument("--transport", choices=["auto", "ws", "polling"],
-                    default=os.environ.get("PLAYOK_TRANSPORT", "polling"))
-    ap.add_argument("--room", default=os.environ.get("PLAYOK_ROOM", "hanoi"),
+    ap.add_argument("--transport", choices=["auto", "ws", "polling"], default="auto")
+    ap.add_argument("--room", default="hanoi",
                     help="tên phòng cố định (hanoi, haiphong, danang, cantho...)")
     ap.add_argument("--create", action="store_true", help="tạo bàn mới khi vào")
-    ap.add_argument("--seconds", type=int,
-                    default=int(os.environ.get("PLAYOK_SECONDS", "180")))
-    ap.add_argument("--movetime", type=int,
-                    default=int(os.environ.get("PLAYOK_MOVETIME", "1500")),
+    ap.add_argument("--seconds", type=int, default=180)
+    ap.add_argument("--movetime", type=int, default=1500,
                     help="thời gian engine nghĩ mỗi nước (mili giây)")
+    ap.add_argument("--ttype", default=os.environ.get("PLAYOK_TTYPE", ""),
+                    help="hạn chế bàn tự tạo: public | private | ngưỡng elo "
+                         "(1200/1350/1500/1650/1800/1950/2100) | bậc 1-7")
     args = ap.parse_args()
 
     engine = Pikafish(args.engine, nnue=args.nnue)
@@ -944,6 +1071,7 @@ def main():
     bot = Bot(transport, engine, args.color, create_table=args.create)
     bot.want_room = args.room
     bot.movetime = args.movetime
+    bot.want_ttype = args.ttype or None
     try:
         bot.run(args.seconds)
     except KeyboardInterrupt:

@@ -36,7 +36,9 @@ import threading
 import time
 import urllib.request
 
-from playok_xq import PollingTransport, WebSocketTransport, UA, WWW, HOST
+from playok_xq import (PollingTransport, WebSocketTransport, UA, WWW, HOST,
+                    CODE_SETTING, CODE_SETTINGS_STATE, ttype_code,
+                    ttype_labels, parse_set_rank)
 from rapfi import Rapfi
 
 # ----------------------------------------------------------------------------
@@ -159,6 +161,8 @@ class Bot:
         self.ap = self.ge = None
         self.myname = None
         self.await_new_table = False
+        self.ranks = None        # thang elo server gửi qua set_rank
+        self.want_ttype = None   # hạn chế elo muốn đặt cho bàn tự tạo
         self.create_table = create_table
         self.avoid_swap2 = True
         self._lock = threading.Lock()
@@ -212,11 +216,30 @@ class Bot:
             print("=" * 58 + "\n")
             self.t.send_frame({"i": [83, self.table, 0]})
             self.my_seat = 0
+            self.apply_settings()
 
         if code == 84 and s and self.table:
             who = s[0]
             if who and who != self.myname:
                 print(f"[bot] {who} vào phòng bàn (chờ họ ngồi ghế)")
+
+        if s and self.ranks is None:
+            r = parse_set_rank(s)
+            if r:
+                self.ranks = r
+                print("[bot] thang elo của game này: "
+                      + ", ".join(str(x) for x in ttype_labels(r)))
+
+        if code == CODE_SETTINGS_STATE and len(i) >= 3 and s:
+            # [89, tid, v1, v2...] + [tên1, tên2...] - server báo lại thiết lập
+            for k, name in enumerate(s):
+                if name == "ttype" and 2 + k < len(i):
+                    v = i[2 + k]
+                    lab = ttype_labels(self.ranks)
+                    idx = (8 if v == 2 else v - 2) if v > 1 else v >> 1
+                    who = lab[idx] if 0 <= idx < len(lab) else "?"
+                    print(f"[bot] ✅ server xác nhận ttype={v} -> bàn dạng "
+                          f"{who}{'+' if isinstance(who, int) else ''}")
 
         if code == 18 and s:
             self.myname = s[0]
@@ -462,6 +485,24 @@ class Bot:
             self.thinking = False
 
     # ---------------- bàn ----------------
+    def apply_settings(self):
+        """Đặt hạn chế elo cho bàn VỪA TỰ TẠO.
+
+        Chỉ người tạo bàn mới đổi được thiết lập (server chat: "you are now the
+        table operator - you can change settings"), nên chỉ gọi sau khi bot
+        bấm [71] tạo bàn, không gọi khi ngồi nhờ bàn người khác.
+        """
+        if not self.want_ttype or not self.table:
+            return
+        try:
+            code = ttype_code(self.want_ttype, self.ranks)
+        except ValueError as e:
+            print(f"[bot] bỏ qua thiết lập ttype: {e}")
+            return
+        self.t.send_frame({"i": [CODE_SETTING, self.table, code],
+                           "s": ["ttype"]})
+        print(f"[bot] đặt bàn #{self.table} -> {self.want_ttype} (ttype={code})")
+
     def _delayed_go(self, tid):
         time.sleep(3)
         for k in range(3):
@@ -479,6 +520,12 @@ class Bot:
             time.sleep(0.05)
 
     def try_join_table(self):
+        # Đang ngồi hoặc đang đánh thì TUYỆT ĐỐI không đi ngồi bàn khác.
+        # Thiếu chốt này, sau khi vào lại kênh bot vừa đánh ở bàn cũ vừa gửi
+        # [72]/[83] sang bàn mới -> self.my_seat và self.table bị ghi đè giữa
+        # ván, ghế nhảy 0 <-> 1 và bot đánh nhầm màu.
+        if self.seated or self.in_game:
+            return True
         for tid, v in list(self.tables.items()):
             if tid in self.joined or len(v) < 3:
                 continue
@@ -547,6 +594,13 @@ class Bot:
                     self.in_game = False
                     self.room_done = False
                     time.sleep(2)
+                    # Chờ server khôi phục bàn cũ trước khi cho phép săn bàn,
+                    # nếu không hai việc chạy song song sẽ giẫm chân nhau.
+                    grace = time.time() + 8
+                    while time.time() < grace and not self.seated:
+                        for f in self.t.recv_frames(timeout=1.0):
+                            self.on_frame(f)
+                    self._hunt = time.time()
                 except Exception as e:
                     print(f"[bot] vào lại thất bại: {e}")
                 continue
@@ -578,6 +632,9 @@ def main():
                     help="thời gian engine nghĩ mỗi nước (mili giây)")
     ap.add_argument("--allow-swap2", action="store_true",
                     help="cho phép vào cả bàn luật swap2 (mặc định né)")
+    ap.add_argument("--ttype", default=os.environ.get("PLAYOK_TTYPE", ""),
+                    help="hạn chế bàn tự tạo: public | private | ngưỡng elo "
+                         "(1200/1350/1500/1650/1800/1950/2100) | bậc 1-7")
     args = ap.parse_args()
 
     engine = Rapfi(size=SIZE, rule=1, turn_ms=args.movetime)
@@ -596,6 +653,7 @@ def main():
     bot = Bot(transport, engine)
     bot.want_room = args.room
     bot.movetime = args.movetime
+    bot.want_ttype = args.ttype or None
     bot.avoid_swap2 = not args.allow_swap2
     try:
         bot.run(args.seconds)

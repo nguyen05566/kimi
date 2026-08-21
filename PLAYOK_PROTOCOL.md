@@ -312,3 +312,83 @@ về chỉ có bộ standard. Rapfi nạp bộ ĐẦU TIÊN lúc `START`, không
 lượng giá cổ điển** — engine vẫn chạy nên rất dễ bỏ sót, nhưng yếu hẳn.
 Cùng một thế cờ: eval `-183` khi hỏng, `-499` khi nạp đúng mạng nơ-ron.
 `rapfi.py` nay tự xoá các mục weight thiếu file.
+
+---
+
+## Cập nhật 2026-08-21 (lần 3) — Thiết lập bàn: chỉ chơi với người 1350+
+
+### Khung gói
+
+```js
+function V(a, b, c) { a.send([82, a.K, c], [b]); }   // [82, tid, giá_trị] + [tên]
+```
+
+Server báo lại toàn bộ thiết lập bằng **gói 89**:
+`[89, tid, v1, v2, ...] + ["tên1", "tên2", ...]` (hàm `we()` ghép theo thứ tự).
+
+Tên thiết lập đọc được từ client:
+
+| Tên | Ý nghĩa |
+|---|---|
+| `ttype` | loại bàn / hạn chế elo |
+| `tg` | thời gian ván | 
+| `tm` | thời gian cộng thêm |
+| `ud` | cấm đi lại (no undo) |
+| `gtype` | 1 = tính elo, 0 = không tính (ô "non-rated (x)") |
+| `pro` | luật swap2 (chỉ gomoku) |
+
+**Chỉ người tạo bàn** đổi được (server chat: *"you are now the table operator -
+you can change settings and boot users"*). Ngồi nhờ bàn người khác thì không.
+
+### Mã `ttype`
+
+```js
+a.na = u(e, "select", { onchange: function() {
+    var l = this.selectedIndex;
+    V(a, "ttype", null != a.j.$ && 0 < l ? (8 <= l ? 2 : l + 2) : 2 * l);
+}}, g);
+```
+
+`l` là thứ tự mục chọn: 0 = public, 1..7 = bảy mức elo, 8 = private. Suy ra:
+
+| Mục chọn | `l` | **`ttype` gửi đi** |
+|---|---|---|
+| public | 0 | **0** |
+| 1200+ | 1 | **3** |
+| **1350+** | 2 | **4** |
+| 1500+ | 3 | **5** |
+| 1650+ | 4 | **6** |
+| 1800+ | 5 | **7** |
+| 1950+ | 6 | **8** |
+| 2100+ | 7 | **9** |
+| private | 8 | **2** |
+
+Chiều ngược lại (`we()`): `index = (e > 1) ? (e == 2 ? 8 : e - 2) : (e >> 1)` —
+đã kiểm tra khớp cả hai chiều cho cả 9 mục.
+
+Đã chạy thật: gửi `{"i":[82,tid,4],"s":["ttype"]}` → server trả gói 89 với
+`ttype = 4`, tức bàn thành **1350+**.
+
+### Bảy ngưỡng elo lấy từ đâu
+
+Không phải hằng số. Server gửi chuỗi cấu hình `set_rank`, client đọc:
+
+```js
+"set_rank" == a && (this.$ = b.split(" ")
+                     .filter(function(c,d){ return 0 == d % 2 })
+                     .map(function(c){ return parseInt(c,10) }))
+function Ra(a,b){ return a.$ ? 1 + a.$[b] : 0 }
+```
+
+rồi dựng bảy nhãn: `h = 0..6`, `h` chẵn → `Ra(1 + h/2)`, `h` lẻ → trung bình hai
+mốc liền kề. Với gomoku ra đúng 1200 / 1350 / 1500 / 1650 / 1800 / 1950 / 2100.
+Game khác có thể khác số, nên bot bắt `set_rank` lúc đăng nhập và tự dựng thang.
+
+### Bẫy kèm theo (tự gây ra, đã sửa)
+
+Bot đang ngồi đánh mà vẫn chạy vòng săn bàn: nó gửi `[72]`/`[83]`/`[85]` sang
+bàn khác giữa ván → `self.table` và `self.my_seat` bị ghi đè, **ghế nhảy 0 ↔ 1
+giữa ván** nên bot đánh nhầm màu; nặng hơn là `[85]` gửi tới bàn không còn hợp lệ
+trả **502 → chết kênh** (quan sát 3 lần trong một phiên). Sửa: `try_join_table()`
+thoát ngay nếu `seated` hoặc `in_game`, và sau khi vào lại kênh phải chờ ~8 giây
+cho server khôi phục bàn cũ rồi mới cho phép săn bàn.
