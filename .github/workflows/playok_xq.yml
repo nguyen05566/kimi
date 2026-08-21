@@ -1,0 +1,135 @@
+name: PlayOK Xiangqi (nguyen066)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_hours:
+        description: 'Thời gian chạy (giờ)'
+        required: false
+        default: '5.7'
+        type: string
+      room:
+        description: 'Phòng playok (hanoi, haiphong, danang, cantho...)'
+        required: false
+        default: 'hanoi'
+        type: string
+      movetime:
+        description: 'Thời gian engine nghĩ mỗi nước (mili giây)'
+        required: false
+        default: '1500'
+        type: string
+  # Bật cron nếu muốn chạy tự động. LƯU Ý: playok chỉ cho 1 phiên/tài khoản,
+  # phiên mới sẽ đá phiên cũ -> đừng để 2 job chồng nhau.
+  # schedule:
+  #   - cron: '0 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  # playok chỉ cho ĐÚNG 1 phiên mỗi tài khoản. Hai job cùng chạy sẽ đá nhau
+  # liên tục (server gửi ["login-1"]) và không bot nào đánh được.
+  group: playok-xiangqi-nguyen066
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests --break-system-packages
+
+      - name: Cache Pikafish engine
+        id: cache-pikafish
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/pikafish
+            ~/pikafish.nnue
+          key: pikafish-2026-01-02-linux
+
+      - name: Download Pikafish engine + NNUE
+        if: steps.cache-pikafish.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        env:
+          PK_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
+        run: |
+          set -e
+          # KHÔNG dùng apt: "apt-get install p7zip-full" từng treo >7 phút vì
+          # chờ lock dpkg trên runner mới boot. py7zr qua pip mất 3-4 giây.
+          python3 -m pip install --quiet py7zr
+
+          curl -fL --retry 4 --retry-delay 5 --retry-all-errors --max-time 420 \
+               -o /tmp/pikafish.7z "$PK_URL"
+          ls -lh /tmp/pikafish.7z
+
+          if grep -q avx512vnni /proc/cpuinfo; then BIN=pikafish-vnni512
+          elif grep -q avx512f /proc/cpuinfo;  then BIN=pikafish-avx512
+          elif grep -q bmi2 /proc/cpuinfo;     then BIN=pikafish-bmi2
+          elif grep -q avx2 /proc/cpuinfo;     then BIN=pikafish-avx2
+          else BIN=pikafish-sse41-popcnt; fi
+          echo "[ENGINE] CPU hợp với $BIN"
+
+          python3 - "$BIN" <<'PY'
+          import os, shutil, sys, py7zr
+          binname = sys.argv[1]
+          targets = {f"Linux/{binname}", "Linux/pikafish-sse41-popcnt", "pikafish.nnue"}
+          with py7zr.SevenZipFile("/tmp/pikafish.7z") as z:
+              z.extract(path="/tmp/pikafish", targets=sorted(targets))
+          home = os.path.expanduser("~")
+          shutil.copy(f"/tmp/pikafish/Linux/{binname}", f"{home}/pikafish")
+          shutil.copy("/tmp/pikafish/pikafish.nnue", f"{home}/pikafish.nnue")
+          os.chmod(f"{home}/pikafish", 0o755)
+          print(f"[ENGINE] Đã cài {binname} + NNUE vào {home}")
+          PY
+
+          if ! echo -e "uci\nquit" | "$HOME/pikafish" > /dev/null 2>&1; then
+            echo "[ENGINE] $BIN không chạy được -> fallback sse41-popcnt"
+            cp /tmp/pikafish/Linux/pikafish-sse41-popcnt "$HOME/pikafish"
+            chmod +x "$HOME/pikafish"
+          fi
+
+      - name: Verify engine
+        timeout-minutes: 3
+        run: |
+          chmod +x "$HOME/pikafish"
+          ls -lh "$HOME/pikafish" "$HOME/pikafish.nnue"
+          echo -e "uci\nquit" | "$HOME/pikafish" | head -3
+
+      - name: Run PlayOK Xiangqi bot
+        env:
+          # Secret bắt buộc nếu muốn đổi tài khoản; không có thì dùng cookie
+          # mặc định ghi trong playok_xq.py (tài khoản nguyen066).
+          PLAYOK_KSESSION: ${{ secrets.PLAYOK_KSESSION }}
+          PLAYOK_KU: ${{ secrets.PLAYOK_KU }}
+          PLAYOK_ROOM: ${{ inputs.room || 'hanoi' }}
+          PLAYOK_MOVETIME: ${{ inputs.movetime || '1500' }}
+          PLAYOK_TRANSPORT: polling
+          RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
+          PIKAFISH_PATH: /home/runner/pikafish
+          PIKAFISH_NNUE: /home/runner/pikafish.nnue
+        run: |
+          # Secret rỗng -> xoá biến đi để playok_xq.py dùng cookie mặc định,
+          # nếu không sẽ tiêm chuỗi rỗng và đăng nhập hỏng.
+          [ -z "$PLAYOK_KSESSION" ] && unset PLAYOK_KSESSION
+          [ -z "$PLAYOK_KU" ] && unset PLAYOK_KU
+
+          END=$(python3 -c "import time,os;print(int(time.time()+float(os.environ['RUNTIME_HOURS'])*3600))")
+          echo "Chạy tới $(date -u -d @$END +'%Y-%m-%dT%H:%M:%SZ') UTC"
+          while [ "$(date +%s)" -lt "$END" ]; do
+            LEFT=$(( END - $(date +%s) ))
+            CHUNK=$(( LEFT > 1800 ? 1800 : LEFT ))
+            echo "=== $(date -u +'%Y-%m-%dT%H:%M:%SZ') chạy tiếp ${CHUNK}s ==="
+            python3 -u playok_xq.py --seconds "$CHUNK" || echo "bot thoát mã $?"
+            sleep 10
+          done
+          echo "Hết giờ."
