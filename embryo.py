@@ -7,10 +7,13 @@ Embryo là engine Gomocup (pbrain-) kiểu alpha-beta (dựa trên Stockfish), C
 Linux native, ~1MB. Bản "Gomoku/Standard" (= đúng 5, KHÔNG overline, KHÔNG cấm
 nước) khớp ĐÚNG luật PlayOK. Nhanh (~1000 node/ms).
 
-LƯU Ý quan trọng: Embryo KHÔNG tuân `INFO timeout_turn` (chạy đến khi xét xong độ
-sâu cố định -> ở thế yên tĩnh có thể >15s, gây hết giờ). Nhưng nó CÓ tuân
-`INFO max_node` / `INFO max_depth`. Nên wrapper dùng node-budget (theo movetime)
-để chặn đúng giờ, thay vì dựa vào timeout_turn.
+LƯU Ý về thời gian (đã test kỹ — Embryo quản lý giờ rất kỳ):
+  - `INFO timeout_turn` đơn lẻ -> BỊ BỎ QUA (chạy >15s ở thế yên tĩnh -> hết giờ).
+  - `INFO time_left` đơn lẻ     -> search quá ít (~22 node, rất yếu).
+  - CHỈ khi gửi CẢ `timeout_turn` LẪN `time_left` thì Embryo mới dùng thời gian
+    đúng: search sâu dần theo movetime, trả trong ~movetime/2, depth 14-28.
+Wrapper gửi cả timeout_turn (ở start) + time_left (mỗi nước) + max_node (nắp
+an toàn) để vừa mạnh vừa không bao giờ vượt giờ.
 
 Cùng interface với rapfi.Rapfi / alphagomoku.AlphaGomoku.
 """
@@ -65,6 +68,10 @@ class Embryo:
         self._cmd(f"START {self.size}")
         if not self._wait_for(lambda l: l.strip() in ("OK",) or l.startswith("ERROR"), 20):
             raise RuntimeError("Embryo không phản hồi START")
+        # Embryo chỉ quản lý thời gian đúng khi CẢ timeout_turn LẪN time_left
+        # cùng được gửi (đơn lẻ: timeout_turn bị bỏ qua -> >15s; time_left đơn lẻ
+        # -> search quá ít ~22 node). Gửi cả hai + max_node làm nắp an toàn.
+        self._cmd(f"INFO timeout_turn {self.turn_ms}")
         self.log(f"[ENGINE] Embryo sẵn sàng ({self.size}x{self.size}, Gomoku/Standard)")
         return True
 
@@ -117,10 +124,11 @@ class Embryo:
         with self._lock:
             self._lines.clear()
         self.last_eval = None
-        # Embryo không tuân timeout_turn -> chặn bằng node-budget theo movetime.
-        # ~1000 node/ms; đểhesодо thừa chút đệm.
-        max_node = max(20000, int(self.turn_ms * 800))
-        self._cmd(f"INFO max_node {max_node}")
+        # Embryo dùng thời gian đúng khi có timeout_turn (đã gửi ở start) + time_left.
+        # Thêm max_node làm nắp an toàn (dù time_left đã chặn). Test: ~movetime/2,
+        # depth 14-28, 1.6-3.2 triệu node -> mạnh và không vượt giờ.
+        self._cmd(f"INFO time_left {self.turn_ms}")
+        self._cmd(f"INFO max_node {max(20000, int(self.turn_ms * 800))}")
         cmd = "BOARD"
         for (x, y, who) in ordered:
             cmd += f"\n{x},{y},{who}"
