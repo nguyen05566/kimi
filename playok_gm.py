@@ -155,6 +155,7 @@ class Bot:
         self.turn_seat = -1
         self.ad = None           # cờ hoán ghế <-> màu quân (thẻ 3 gói 90)
         self.mode = MODE_NORMAL  # chế độ swap2 (thẻ 5 gói 90)
+        self.first_seat = -1     # ghế đi nước đầu tiên (= ĐEN) -> xác định màu chắc chắn
         self.in_game = False
         self.thinking = False
         self.movetime = 3000
@@ -354,11 +355,22 @@ class Bot:
                 self.turn_seat = turn
                 self.in_game = turn >= 0
                 if self.in_game and not was:
+                    if self.n_moves() == 0:
+                        self.first_seat = turn   # ghi ghế đi trước (= ĐEN) khi ván mới sạch
                     print(f"[bot] ★ VÁN BẮT ĐẦU — tôi ghế {self.my_seat}, "
                           f"ghế đi trước {turn}, đã có {self.n_moves()} nước")
                 if was and not self.in_game:
                     print(f"[bot] ★ VÁN KẾT THÚC sau {len(self.moves)} nước")
                     self.moves = []
+                    # FIX: reset trạng thái màu/ghế để ván sau không dính giá trị cũ.
+                    # Trước đây self.ad không được reset -> nếu ván mới không nhận lại
+                    # thẻ 3 trong gói 90, my_color() dùng ad CŨ -> đảo đen/trắng ->
+                    # engine (Rapfi, rule Standard) áp nước cấm lên sai bên -> cầm
+                    # trắng đánh dở, dễ thua.
+                    self.ad = None
+                    self.mode = MODE_NORMAL
+                    self.turn_seat = -1
+                    self.first_seat = -1
                 print(f"[bot] #90 header={i[2]} turn={turn} "
                       f"(ghế tôi {self.my_seat}, quân {self.my_color_name()}) "
                       f"swap2={self.mode} nước={self.n_moves()}")
@@ -381,6 +393,13 @@ class Bot:
                         self._sent_pos = None
                         print(f"[bot] #92 nước {n}: {to_label(v)} (v={v}) — "
                               f"{'CỦA TÔI ✅' if mine else 'đối thủ'}")
+                        if mine:
+                            # KIỂM CHỨNG: màu thật server gán cho nước của bot
+                            # phải khớp my_color(); nếu lệch -> đang đảo màu.
+                            bit = (v // AREA) % 2
+                            if bit != self.my_color():
+                                print(f"[bot] ⚠️ bit màu thật={bit} nhưng "
+                                      f"my_color={self.my_color()} -> ĐẢO MÀU?")
 
             elif code == CODE_CHAT:
                 if s:
@@ -391,11 +410,20 @@ class Bot:
     def my_color(self):
         """0 = đen (đi trước), 1 = trắng.
 
-        Lấy từ chính client gomoku: khi đặt quân nó vẽ màu `Nb(ia)` với
-        `Nb(a) = this.D.ad ? 1-a : a`, tức MÀU = GHẾ, đảo lại nếu cờ ad bật.
-        Đây là cách duy nhất đáng tin: luật swap2 cho một người đặt 3 quân
-        liên tiếp nên KHÔNG thể suy màu theo kiểu chẵn/lẻ luân phiên.
+        Ưu tiên cách CHẮC CHẮN NHẤT với luật thường (mode == NORMAL): người đi
+        nước đầu tiên luôn là ĐEN, nên màu của bot = 0 nếu my_seat == first_seat,
+        ngược lại = 1. Cách này không phụ thuộc cờ ad hay bit màu của server nên
+        KHÔNG THỂ bị đảo màu — rất quan trọng vì engine Rapfi (rule=1, Standard)
+        chỉ cấm nước với ĐEN: nếu lừa nó đảo màu, nó sẽ áp nước cấm lên sai bên
+        (chính bot khi cầm trắng) -> bot né các nước tốt hợp lệ -> yếu, dễ thua.
+
+        Bit màu trong giá trị server gửi (`Math.floor(d/225)%2` trong Db của
+        gm.js) thực ra chính là parity thứ tự nước đi (= 0 cho nước đầu/đen), nên
+        suy theo first_seat luôn khớp. Chỉ dùng cờ ad (Nb(ghế)) cho luật swap2
+        (mode != NORMAL) hoặc khi chưa biết first_seat.
         """
+        if self.mode == MODE_NORMAL and self.first_seat >= 0:
+            return 0 if self.first_seat == self.my_seat else 1
         if self.ad is None:
             real = [v for v in self.moves if is_move_value(v)]
             return len(real) % 2          # tạm suy khi chưa nhận được cờ ad
