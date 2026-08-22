@@ -73,18 +73,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/alphagomoku
-          key: alphagomoku-5.9.3
+          key: alphagomoku-5.9.3-bs1
 
       - name: Download AlphaGomoku
-        if: inputs.engine != 'rapfi' && steps.cache-alpha.outputs.cache-hit != 'true'
+        if: inputs.engine != 'rapfi'
         timeout-minutes: 10
         run: |
           python3 - <<'PY'
           import sys
           sys.path.insert(0, ".")
-          from alphagomoku import ensure_engine
+          from alphagomoku import ensure_engine, fix_config
           ensure_engine()
+          fix_config()         # batch_size=1 -> MCTS search thật (không bị kẹt n=1)
           PY
+          cat /tmp/alphagomoku/config.json | python3 -c "import sys,json;d=json.load(sys.stdin);print('batch_size',d['devices'][0]['batch_size'],'threads',d['search_threads'])"
           ls -lh /tmp/alphagomoku
 
       # ---------- Rapfi (dự phòng) ----------

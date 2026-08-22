@@ -53,6 +53,43 @@ def ensure_engine(log=print):
     return BIN
 
 
+def fix_config(log=print):
+    """Sửa config.json cho MCTS chạy được trên CPU (RẤT QUAN TRỌNG).
+
+    Mặc định batch_size=12 + 1 thread làm MCTS kiểu AlphaZero BỊ KẸT: nó đợi gom
+    đủ 12 mẫu mới đánh giá mạng, nhưng 1 thread chỉ đẻ ra được 1 mẫu -> engine
+    chỉ đánh giá gốc rồi trả ngay nước đoán policy 1 lớp (n=1, depth 1-1, rất
+    yếu, không nhất quán). Triệu chứng: bot thua nặng khi cầm trắng đáp trung
+    tâm. Hạ batch_size=1 thì engine search thật (~1300-2200 node / 4s, depth
+    13-17). Đồng thời tăng search_threads theo số lõi và tắt logging.
+    """
+    import json as _json
+    cfg_path = os.path.join(ENGINE_DIR, "config.json")
+    if not os.path.exists(cfg_path):
+        return
+    with open(cfg_path, encoding="utf8") as fh:
+        c = _json.load(fh)
+    changed = False
+    for dev in c.get("devices", []):
+        if dev.get("device") == "CPU" and dev.get("batch_size", 1) != 1:
+            dev["batch_size"] = 1
+            changed = True
+    c["search_config"] = c.get("search_config", {})
+    if c["search_config"].get("max_batch_size", 1) != 1:
+        c["search_config"]["max_batch_size"] = 1
+        changed = True
+    threads = max(1, min(8, os.cpu_count() or 4))
+    if c.get("search_threads", 1) != threads:
+        c["search_threads"] = threads
+        changed = True
+    c["use_logging"] = False
+    with open(cfg_path, "w", encoding="utf8") as fh:
+        _json.dump(c, fh, indent=2)
+    if changed:
+        log(f"[ENGINE] config: batch_size=1, search_threads={threads} "
+            "(sửa kẹt MCTS -> engine search thật)")
+
+
 class AlphaGomoku:
     """Giao thức Gomocup: START / INFO / BOARD ... DONE -> "x,y".
 
@@ -68,6 +105,7 @@ class AlphaGomoku:
 
     def start(self):
         ensure_engine(self.log)
+        fix_config(self.log)          # BẮT BUỘC: hạ batch_size=1, nếu không MCTS kẹt (n=1)
         self.proc = subprocess.Popen(
             [BIN], cwd=ENGINE_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1)
