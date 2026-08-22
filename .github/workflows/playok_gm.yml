@@ -23,6 +23,16 @@ on:
         required: false
         default: '3000'
         type: string
+      engine:
+        description: 'Engine: alpha (AlphaGomoku, mặc định) | rapfi'
+        required: false
+        default: 'alpha'
+        type: string
+      rule:
+        description: 'Mã luật: 0=freestyle (PlayOK) | 1=standard | 4=renju'
+        required: false
+        default: '0'
+        type: string
       allow_swap2:
         description: 'Cho phép vào cả bàn luật swap2'
         required: false
@@ -56,7 +66,30 @@ jobs:
       - name: Install Python dependencies
         run: pip install requests py7zr --break-system-packages
 
+      # ---------- AlphaGomoku (mặc định) ----------
+      - name: Cache AlphaGomoku
+        if: inputs.engine != 'rapfi'
+        id: cache-alpha
+        uses: actions/cache@v4
+        with:
+          path: /tmp/alphagomoku
+          key: alphagomoku-5.9.3
+
+      - name: Download AlphaGomoku
+        if: inputs.engine != 'rapfi' && steps.cache-alpha.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from alphagomoku import ensure_engine
+          ensure_engine()
+          PY
+          ls -lh /tmp/alphagomoku
+
+      # ---------- Rapfi (dự phòng) ----------
       - name: Cache Rapfi engine
+        if: inputs.engine == 'rapfi'
         id: cache-rapfi
         uses: actions/cache@v4
         with:
@@ -64,6 +97,7 @@ jobs:
           key: rapfi-250615-standard-bs15
 
       - name: Download / verify Rapfi
+        if: inputs.engine == 'rapfi' && steps.cache-rapfi.outputs.cache-hit != 'true'
         timeout-minutes: 10
         run: |
           python3 - <<'PY'
@@ -82,6 +116,8 @@ jobs:
           PLAYOK_ROOM: ${{ inputs.room }}
           PLAYOK_MOVETIME: ${{ inputs.movetime || '3000' }}
           PLAYOK_TTYPE: ${{ inputs.ttype }}
+          PLAYOK_ENGINE: ${{ inputs.engine || 'alpha' }}
+          PLAYOK_RULE: ${{ inputs.rule || '0' }}
           PLAYOK_TRANSPORT: polling
           RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
           ALLOW_SWAP2: ${{ inputs.allow_swap2 }}
@@ -91,6 +127,7 @@ jobs:
           EXTRA=""
           [ "$ALLOW_SWAP2" = "true" ] && EXTRA="--allow-swap2"
 
+          echo "Engine: $PLAYOK_ENGINE | Rule: $PLAYOK_RULE (0=freestyle=PlayOK)"
           END=$(python3 -c "import time,os;print(int(time.time()+float(os.environ['RUNTIME_HOURS'])*3600))")
           echo "Chạy tới $(date -u -d @$END +'%Y-%m-%dT%H:%M:%SZ') UTC"
           while [ "$(date +%s)" -lt "$END" ]; do

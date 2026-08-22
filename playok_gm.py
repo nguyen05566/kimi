@@ -39,7 +39,7 @@ import urllib.request
 from playok_xq import (PollingTransport, WebSocketTransport, UA, WWW, HOST,
                     CODE_SETTING, CODE_SETTINGS_STATE, ttype_code,
                     ttype_labels, parse_set_rank)
-from rapfi import Rapfi
+# Engine được import theo --engine trong main(), mặc định AlphaGomoku.
 
 # ----------------------------------------------------------------------------
 # 1) CẤU HÌNH
@@ -714,9 +714,21 @@ def main():
     ap.add_argument("--ttype", default=os.environ.get("PLAYOK_TTYPE", ""),
                     help="hạn chế bàn tự tạo: public | private | ngưỡng elo "
                          "(1200/1350/1500/1650/1800/1950/2100) | bậc 1-7")
+    ap.add_argument("--engine", choices=["alpha", "rapfi"],
+                    default=os.environ.get("PLAYOK_ENGINE", "alpha"),
+                    help="engine: alpha (AlphaGomoku, mặc định) | rapfi")
+    ap.add_argument("--rule", type=int,
+                    default=int(os.environ.get("PLAYOK_RULE", "0")),
+                    help="mã luật. PlayOK gomoku = FREESTYLE nên để 0. "
+                         "Rapfi: 0=freestyle 1=standard 4=renju | "
+                         "AlphaGomoku: 0=freestyle 1=standard 4=renju(cấm nước đen)")
     args = ap.parse_args()
 
-    engine = Rapfi(size=SIZE, rule=1, turn_ms=args.movetime)
+    if args.engine == "rapfi":
+        from rapfi import Rapfi as Engine
+    else:
+        from alphagomoku import AlphaGomoku as Engine
+    engine = Engine(size=SIZE, rule=args.rule, turn_ms=args.movetime)
     engine.start()
 
     transport = None
