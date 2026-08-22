@@ -490,6 +490,27 @@ def decode_packed(n):
     return frm // 10, frm % 10, to // 10, to % 10
 
 
+def _is_valid_packed(n):
+    """True nếu n là một nước đi hợp lệ theo mã base-100.
+
+    packed = ô_đến*100 + ô_đi, mỗi ô = hàng*10 + cột, với hàng 0..9, cột 0..8.
+    Ô không hợp lệ là ô có cột = 9 (ô 'hàng*10 + 9' không tồn tại trên bàn 9 cột).
+    Dùng để lọc nước đi thật khỏi timestamp/số âm/terminator trong gói 91.
+    """
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return False
+    if n <= 0 or n >= 100 * 100:
+        return False
+    to, frm = divmod(n, 100)
+    if frm % 10 >= 9 or frm // 10 >= 10:
+        return False
+    if to % 10 >= 9 or to // 10 >= 10:
+        return False
+    return True
+
+
 def uci_to_packed(uci):
     fr_col = ord(uci[0]) - 97
     to_col = ord(uci[2]) - 97
@@ -795,21 +816,36 @@ class Bot:
                       f"clk={i[-2:]}")
 
             elif code == CODE_HISTORY:
-                # [91, tid, packed, thời_gian, packed, thời_gian, ...]
-                # số ÂM chen vào trước một nước = nước đó có ăn quân.
-                # Bản cũ lấy "mọi số > 0" nên khi ván có đồng hồ khác 0 sẽ
-                # nuốt luôn cả trường thời gian làm nước đi -> bàn cờ loạn.
+                # [91, tid, ...] là bản ghi toàn bộ nước đã đi để KHÔI PHỤC bàn
+                # cờ (lúc reconnect hoặc reset ván mới).
+                # Cấu trúc quan sát thực tế:
+                #   reset ván mới : [91, tid, 0]            (terminator 0)
+                #   khôi phục ván : [91, tid, packed, ts, packed, ts, ...]
+                # Nước có ăn quân   : số ÂM chen ngay TRƯỚC packed (giống gói 92).
+                # Bản cũ dùng nhịp "move/ts xen kẽ" (want_move) -> hễ timestamp
+                # lệch hoặc số âm chen sai vị trí là bàn cờ loạn ngay.
+                # Nay: chỉ nhận giá trị mà decode_packed cho ra ô HỢP LỆ
+                # (hàng 0..9, cột 0..8), bỏ timestamp/số âm/terminator một cách
+                # an toàn — không phụ thuộc nhịp chẵn/lẻ.
                 self.board.reset()
                 self.nmoves = 0
-                want_move = True
+                # Neo số nước từ mảng ký hiệu WXF nếu có: mỗi nước 1 chuỗi.
+                n_hint = 0
+                if s and isinstance(s, list):
+                    n_hint = sum(1 for x in s if isinstance(x, str) and x.strip())
+                packed_moves = []
                 for v in i[2:]:
-                    if not isinstance(v, int) or v < 0:
+                    if not isinstance(v, int) or v <= 0:
                         continue
-                    if want_move:
-                        if v:
-                            self.board.apply_move(*decode_packed(v))
-                            self.nmoves += 1
-                    want_move = not want_move
+                    if _is_valid_packed(v):
+                        packed_moves.append(v)
+                # n_hint (số ký hiệu) là nguồn sự thật về số nước; nếu lọc ra đúng
+                # số đó thì dùng nguyên. Nếu lệch (hiếm), lấy toàn bộ nước hợp lệ
+                # để bảo toàn thế cờ thay vì bỏ sót.
+                use = packed_moves[:n_hint] if n_hint else packed_moves
+                for pk in use:
+                    self.board.apply_move(*decode_packed(pk))
+                    self.nmoves += 1
                 self._hist_at = time.time()
                 self.side = "w" if self.nmoves % 2 == 0 else "b"
                 if self.nmoves:
@@ -1103,8 +1139,14 @@ def main():
     ap.add_argument("--seconds", type=int,
                     default=int(os.environ.get("PLAYOK_SECONDS", "180")))
     ap.add_argument("--movetime", type=int,
-                    default=int(os.environ.get("PLAYOK_MOVETIME", "1500")),
+                    default=int(os.environ.get("PLAYOK_MOVETIME", "2000")),
                     help="thời gian engine nghĩ mỗi nước (mili giây)")
+    ap.add_argument("--threads", type=int,
+                    default=int(os.environ.get("PLAYOK_THREADS", "4")),
+                    help="số luồng CPU cho engine Pikafish (default 4)")
+    ap.add_argument("--hash", type=int,
+                    default=int(os.environ.get("PLAYOK_HASH", "256")),
+                    help="dung lượng hash engine (MB, default 256)")
     ap.add_argument("--join-others", action="store_true",
                     help="cho phép ngồi nhờ bàn người khác (mặc định TẮT: chỉ "
                          "tự tạo bàn để áp được hạn chế elo)")
@@ -1113,7 +1155,8 @@ def main():
                          "(1200/1350/1500/1650/1800/1950/2100) | bậc 1-7")
     args = ap.parse_args()
 
-    engine = Pikafish(args.engine, nnue=args.nnue)
+    engine = Pikafish(args.engine, nnue=args.nnue,
+                      threads=args.threads, hash_mb=args.hash)
 
     transport = None
     if args.transport in ("auto", "ws"):
