@@ -9,11 +9,12 @@ nước) khớp ĐÚNG luật PlayOK. Nhanh (~1000 node/ms).
 
 LƯU Ý về thời gian (đã test kỹ — Embryo quản lý giờ rất kỳ):
   - `INFO timeout_turn` đơn lẻ -> BỊ BỎ QUA (chạy >15s ở thế yên tĩnh -> hết giờ).
-  - `INFO time_left` đơn lẻ     -> search quá ít (~22 node, rất yếu).
-  - CHỈ khi gửi CẢ `timeout_turn` LẪN `time_left` thì Embryo mới dùng thời gian
-    đúng: search sâu dần theo movetime, trả trong ~movetime/2, depth 14-28.
-Wrapper gửi cả timeout_turn (ở start) + time_left (mỗi nước) + max_node (nắp
-an toàn) để vừa mạnh vừa không bao giờ vượt giờ.
+  - `INFO time_left` NHỎ        -> search quá ít, rất yếu (depth 1-2).
+  - `INFO time_left` LỚN + `timeout_turn` -> Embryo nghĩ đúng đến ~timeout_turn
+    (đầy đủ sức, depth 16-32) và tuân cap (~3.1s cho movetime 3000).
+  - `INFO max_node` thì NGƯỢC lại làm Embryo VƯỢT giờ -> KHÔNG dùng.
+Wrapper gửi timeout_turn (ở start, = movetime) + time_left LỚN (1800000, mỗi
+nước) để Embryo luôn biết dư giờ và nghĩ đầy đủ, không bị yếu.
 
 Cùng interface với rapfi.Rapfi / alphagomoku.AlphaGomoku.
 """
@@ -124,11 +125,11 @@ class Embryo:
         with self._lock:
             self._lines.clear()
         self.last_eval = None
-        # Embryo dùng thời gian đúng khi có timeout_turn (đã gửi ở start) + time_left.
-        # Thêm max_node làm nắp an toàn (dù time_left đã chặn). Test: ~movetime/2,
-        # depth 14-28, 1.6-3.2 triệu node -> mạnh và không vượt giờ.
-        self._cmd(f"INFO time_left {self.turn_ms}")
-        self._cmd(f"INFO max_node {max(20000, int(self.turn_ms * 800))}")
+        # Báo time_left LỚN để Embryo "biết dư giờ" -> nghĩ đúng đến ~timeout_turn
+        # (đầy đủ sức: depth 16-32). KHÔNG dùng max_node vì test thấy nó làm Embryo
+        # VƯỢT giờ. timeout_turn (đã gửi ở start) là chốt thời gian thật; Embryo tuân
+        # đúng khi đi kèm time_left lớn (test: ~3.1s cho movetime 3000ms).
+        self._cmd("INFO time_left 1800000")
         cmd = "BOARD"
         for (x, y, who) in ordered:
             cmd += f"\n{x},{y},{who}"
