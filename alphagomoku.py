@@ -9,14 +9,15 @@ dùng thay rapfi.py 1-1 (cùng interface: start/best_move_ordered/best_move/stop
 /last_eval). Bản CPU (pbrain-AlphaGomoku) chạy được trên GitHub Actions, không
 cần GPU.
 
-MÃ LUẬT (đã test thực tế trên bản 5.9.3, KHÁC Rapfi một chút):
-    0 = freestyle  -> KHÔNG cấm nước           <- PlayOK gomoku DÙNG luật này
-    1 = standard   -> đúng-5, nhưng test thấy KHÔNG cấm 3-3/4-4
-    4 = renju      -> CẤM nước với ĐEN (3-3, 4-4, overline)
+MÃ LUẬT (đã test thực tế trên bản 5.9.3):
+    0 = freestyle  -> 5+ đều thắng (overline 6+ cũng thắng), KHÔNG cấm nước
+    1 = standard   -> ĐÚNG 5 mới thắng (overline 6+ KHÔNG thắng), KHÔNG cấm nước
+    4 = renju      -> đúng 5, CẤM nước với ĐEN (3-3, 4-4, overline)
 
-=> Trên PlayOK (freestyle) PHẢI dùng rule=0. Nếu để rule=1/4 thì engine sẽ né
-   các nước THẮNG hợp lệ (double-three / double-four / overline) và cứ mưu trap
-   "nước cấm" vốn không tồn tại ở freestyle -> bot yếu, đặc biệt cầm trắng.
+PlayOK gomoku (đọc gm.js: điều kiện thắng là `5 == 1+số_đứng_trước+số_đứng_sau`)
+đòi ĐÚNG 5, KHÔNG tính overline, KHÔNG cấm nước -> khớp ĐÚNG rule=1 (standard).
+Đừng dùng rule=0 (engine sẽ coi overline là thắng, nhưng PlayOK không công nhận)
+hay rule=4 (cấm nước đen vô lý ở PlayOK).
 """
 import os
 import re

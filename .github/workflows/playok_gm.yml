@@ -29,9 +29,9 @@ on:
         default: 'alpha'
         type: string
       rule:
-        description: 'Mã luật: 0=freestyle (PlayOK) | 1=standard | 4=renju'
+        description: 'Mã luật cho PlayOK (đúng 5, không overline, không cấm nước): 1=standard(AlphaGomoku, mặc định) | 0=freestyle | 4=renju'
         required: false
-        default: '0'
+        default: '1'
         type: string
       allow_swap2:
         description: 'Cho phép vào cả bàn luật swap2'
@@ -117,7 +117,7 @@ jobs:
           PLAYOK_MOVETIME: ${{ inputs.movetime || '3000' }}
           PLAYOK_TTYPE: ${{ inputs.ttype }}
           PLAYOK_ENGINE: ${{ inputs.engine || 'alpha' }}
-          PLAYOK_RULE: ${{ inputs.rule || '0' }}
+          PLAYOK_RULE: ${{ inputs.rule || '1' }}
           PLAYOK_TRANSPORT: polling
           RUNTIME_HOURS: ${{ inputs.runtime_hours || '5.7' }}
           ALLOW_SWAP2: ${{ inputs.allow_swap2 }}
@@ -127,7 +127,7 @@ jobs:
           EXTRA=""
           [ "$ALLOW_SWAP2" = "true" ] && EXTRA="--allow-swap2"
 
-          echo "Engine: $PLAYOK_ENGINE | Rule: $PLAYOK_RULE (0=freestyle=PlayOK)"
+          echo "Engine: $PLAYOK_ENGINE | Rule: $PLAYOK_RULE (1=standard=PlayOK: đúng 5, không overline, không cấm nước)"
           END=$(python3 -c "import time,os;print(int(time.time()+float(os.environ['RUNTIME_HOURS'])*3600))")
           echo "Chạy tới $(date -u -d @$END +'%Y-%m-%dT%H:%M:%SZ') UTC"
           while [ "$(date +%s)" -lt "$END" ]; do

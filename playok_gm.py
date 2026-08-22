@@ -718,10 +718,12 @@ def main():
                     default=os.environ.get("PLAYOK_ENGINE", "alpha"),
                     help="engine: alpha (AlphaGomoku, mặc định) | rapfi")
     ap.add_argument("--rule", type=int,
-                    default=int(os.environ.get("PLAYOK_RULE", "0")),
-                    help="mã luật. PlayOK gomoku = FREESTYLE nên để 0. "
-                         "Rapfi: 0=freestyle 1=standard 4=renju | "
-                         "AlphaGomoku: 0=freestyle 1=standard 4=renju(cấm nước đen)")
+                    default=int(os.environ.get("PLAYOK_RULE", "1")),
+                    help="mã luật. PlayOK gomoku đòi ĐÚNG 5, KHÔNG tính overline, "
+                         "KHÔNG cấm nước -> dùng rule=1 (standard) với AlphaGomoku. "
+                         "AlphaGomoku: 0=freestyle(5+thắng) 1=standard(đúng5,ko cấm) "
+                         "4=renju(cấm nước đen). "
+                         "Rapfi: 0=freestyle 1=standard(cấm nước) 4=renju.")
     args = ap.parse_args()
 
     if args.engine == "rapfi":
