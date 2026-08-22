@@ -155,7 +155,8 @@ class Bot:
         self.turn_seat = -1
         self.ad = None           # cờ hoán ghế <-> màu quân (thẻ 3 gói 90)
         self.mode = MODE_NORMAL  # chế độ swap2 (thẻ 5 gói 90)
-        self.first_seat = -1     # ghế đi nước đầu tiên (= ĐEN) -> xác định màu chắc chắn
+        self.first_seat = -1     # ghế đi nước đầu tiên (= ĐEN) -> suy màu khi chưa có cache
+        self._my_color_cached = None  # màu ĐÚNG của bot, cache từ nước đi/chọn màu thật
         self.in_game = False
         self.thinking = False
         self.movetime = 3000
@@ -371,6 +372,7 @@ class Bot:
                     self.mode = MODE_NORMAL
                     self.turn_seat = -1
                     self.first_seat = -1
+                    self._my_color_cached = None
                 print(f"[bot] #90 header={i[2]} turn={turn} "
                       f"(ghế tôi {self.my_seat}, quân {self.my_color_name()}) "
                       f"swap2={self.mode} nước={self.n_moves()}")
@@ -394,12 +396,13 @@ class Bot:
                         print(f"[bot] #92 nước {n}: {to_label(v)} (v={v}) — "
                               f"{'CỦA TÔI ✅' if mine else 'đối thủ'}")
                         if mine:
-                            # KIỂM CHỨNG: màu thật server gán cho nước của bot
-                            # phải khớp my_color(); nếu lệch -> đang đảo màu.
-                            bit = (v // AREA) % 2
-                            if bit != self.my_color():
+                            bit = (v // AREA) % 2   # màu THẬT server gán cho nước của bot
+                            if getattr(self, "_my_color_cached", None) is None \
+                                    and bit != self.my_color():
+                                # nước đầu: đoán màu (ad/first_seat) lệch màu thật
                                 print(f"[bot] ⚠️ bit màu thật={bit} nhưng "
                                       f"my_color={self.my_color()} -> ĐẢO MÀU?")
+                            self._my_color_cached = bit  # cố định màu -> chắc chắn từ nước 2
 
             elif code == CODE_CHAT:
                 if s:
@@ -408,26 +411,29 @@ class Bot:
 
     # ---------------- màu quân ----------------
     def my_color(self):
-        """0 = đen (đi trước), 1 = trắng.
+        """0 = đen (đi trước), 1 = trắng. Xác định theo độ tin cậy giảm dần:
 
-        Ưu tiên cách CHẮC CHẮN NHẤT với luật thường (mode == NORMAL): người đi
-        nước đầu tiên luôn là ĐEN, nên màu của bot = 0 nếu my_seat == first_seat,
-        ngược lại = 1. Cách này không phụ thuộc cờ ad hay bit màu của server nên
-        KHÔNG THỂ bị đảo màu — rất quan trọng vì engine Rapfi (rule=1, Standard)
-        chỉ cấm nước với ĐEN: nếu lừa nó đảo màu, nó sẽ áp nước cấm lên sai bên
-        (chính bot khi cầm trắng) -> bot né các nước tốt hợp lệ -> yếu, dễ thua.
+        1) _my_color_cached: màu ĐÚNG đọc từ bit màu của chính nước bot đã đi,
+           hoặc màu bot vừa CHỌN ở luật swap2 -> tin cậy tuyệt đối, DÙNG ĐƯỢC
+           CHO CẢ SWAP2 (sau khi đổi màu) lẫn luật thường.
+        2) Cờ ad (thẻ 3 gói 90): ánh xạ ghế <-> màu quân.
+        3) first_seat: người đi nước đầu luôn là ĐEN (chỉ đúng luật thường; ở
+           swap2 sau khi swap thì first_seat không còn hợp lệ).
+        4) parity số nước: suy tạm khi chưa có gì khác (chỉ đúng luật thường).
 
-        Bit màu trong giá trị server gửi (`Math.floor(d/225)%2` trong Db của
-        gm.js) thực ra chính là parity thứ tự nước đi (= 0 cho nước đầu/đen), nên
-        suy theo first_seat luôn khớp. Chỉ dùng cờ ad (Nb(ghế)) cho luật swap2
-        (mode != NORMAL) hoặc khi chưa biết first_seat.
+        Lý do phải có (1): bản cũ chỉ dùng first_seat khi mode==NORMAL, nhưng ở
+        ván swap2 khi chọn/đổi màu xong, mode về lại 0 mà first_seat đã sai màu
+        -> _ordered_for_engine dán nhãn ngược -> engine nhận thế cờ đảo màu ->
+        yếu, dễ thua (đặc biệt cầm trắng). Cache màu thật triệt tiêu lỗi này.
         """
-        if self.mode == MODE_NORMAL and self.first_seat >= 0:
+        if getattr(self, "_my_color_cached", None) is not None:
+            return self._my_color_cached
+        if self.ad is not None:
+            return (1 - self.my_seat) if self.ad else self.my_seat
+        if self.first_seat >= 0:
             return 0 if self.first_seat == self.my_seat else 1
-        if self.ad is None:
-            real = [v for v in self.moves if is_move_value(v)]
-            return len(real) % 2          # tạm suy khi chưa nhận được cờ ad
-        return (1 - self.my_seat) if self.ad else self.my_seat
+        real = [v for v in self.moves if is_move_value(v)]
+        return len(real) % 2
 
     def my_color_name(self):
         return "ĐEN" if self.my_color() == 0 else "TRẮNG"
@@ -497,6 +503,7 @@ class Bot:
         self.engine.best_move_ordered(ordered)
         ev = self.engine.last_eval
         take = nxt if (ev is None or ev >= 0) else 1 - nxt
+        self._my_color_cached = take   # bot vừa CHỌN màu -> cố định luôn cho my_color()
         token = PICK_BLACK if take == 0 else PICK_WHITE
         print(f"[bot] swap2: trên bàn {c0} đen / {c1} trắng, bên đi tiếp = "
               f"{'đen' if nxt == 0 else 'trắng'}, điểm {ev} -> nhận quân "
