@@ -14,7 +14,13 @@ import time
 import threading
 import queue
 import requests
-import websocket
+try:
+    import websocket
+    HAS_WS=True
+except ImportError:
+    websocket=None
+    HAS_WS=False
+    print('[warn] thieu websocket-client, se dung polling. Cai: pip install websocket-client')
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120"
 WWW = "https://www.playok.com"
