@@ -24,7 +24,7 @@ on:
         default: '3000'
         type: string
       engine:
-        description: 'Engine: alpha (AlphaGomoku, mặc định) | rapfi'
+        description: 'Engine: alpha (AlphaGomoku, mặc định) | rapfi | embryo'
         required: false
         default: 'alpha'
         type: string
@@ -68,7 +68,7 @@ jobs:
 
       # ---------- AlphaGomoku (mặc định) ----------
       - name: Cache AlphaGomoku
-        if: inputs.engine != 'rapfi'
+        if: inputs.engine != 'rapfi' && inputs.engine != 'embryo'
         id: cache-alpha
         uses: actions/cache@v4
         with:
@@ -76,7 +76,7 @@ jobs:
           key: alphagomoku-5.9.3-bs1
 
       - name: Download AlphaGomoku
-        if: inputs.engine != 'rapfi'
+        if: inputs.engine != 'rapfi' && inputs.engine != 'embryo'
         timeout-minutes: 10
         run: |
           python3 - <<'PY'

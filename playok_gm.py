@@ -721,9 +721,10 @@ def main():
     ap.add_argument("--ttype", default=os.environ.get("PLAYOK_TTYPE", ""),
                     help="hạn chế bàn tự tạo: public | private | ngưỡng elo "
                          "(1200/1350/1500/1650/1800/1950/2100) | bậc 1-7")
-    ap.add_argument("--engine", choices=["alpha", "rapfi"],
+    ap.add_argument("--engine", choices=["alpha", "rapfi", "embryo"],
                     default=os.environ.get("PLAYOK_ENGINE", "alpha"),
-                    help="engine: alpha (AlphaGomoku, mặc định) | rapfi")
+                    help="engine: alpha (AlphaGomoku) | rapfi | embryo "
+                         "(Gomoku/Standard, Linux native, ~1MB)")
     ap.add_argument("--rule", type=int,
                     default=int(os.environ.get("PLAYOK_RULE", "1")),
                     help="mã luật. PlayOK gomoku đòi ĐÚNG 5, KHÔNG tính overline, "
@@ -735,6 +736,8 @@ def main():
 
     if args.engine == "rapfi":
         from rapfi import Rapfi as Engine
+    elif args.engine == "embryo":
+        from embryo import Embryo as Engine
     else:
         from alphagomoku import AlphaGomoku as Engine
     engine = Engine(size=SIZE, rule=args.rule, turn_ms=args.movetime)
