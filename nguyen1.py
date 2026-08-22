@@ -176,7 +176,7 @@ class EmbryoEngine:
 
     def _send_time_infos(self):
         """Gửi trần thời gian tối đa 10s và thời gian còn lại động cho Embryo."""
-        left = max(self.time_left_ms, self.timeout_turn)
+        left = self.match_timeout_ms  # ĐỀU SỨC CẢ VÁN: luôn báo time_left lớn -> Embryo nghĩ đúng ~timeout_turn mỗi nước (depth 13-20), không bị yếu khi đồng hồ ván giảm
         self._send(f"INFO timeout_turn {self.timeout_turn}")
         self._send(f"INFO timeout_match {self.match_timeout_ms}")
         self._send(f"INFO time_left {left}")

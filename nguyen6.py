@@ -311,7 +311,7 @@ class AlphaGomokuEngine:
     def _send_time_infos(self):
         """Gửi timeout_turn / timeout_match / time_left cho engine."""
         # Tránh time_left về 0 (engine có thể panic / đánh bừa)
-        left = max(self.time_left_ms, self.timeout_turn_ms)
+        left = self.match_timeout_ms  # ĐỀU SỨC CẢ VÁN: luôn báo time_left lớn -> Embryo nghĩ đúng ~timeout_turn mỗi nước (depth 13-20), không bị yếu khi đồng hồ ván giảm
         self._send(f"INFO timeout_turn {self.timeout_turn_ms}")
         self._send(f"INFO timeout_match {self.match_timeout_ms}")
         self._send(f"INFO time_left {left}")
